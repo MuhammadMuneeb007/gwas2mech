@@ -1,18 +1,37 @@
 # GWAS2Mech
 
-From GWAS summary statistics to candidate molecular mechanisms:
-QC → ancestry-specific LD → clumping → SuSiE fine-mapping → VEP → GTEx / eQTL Catalogue
-QTLs → SpliceAI / Pangolin → colocalisation → gene prioritisation (MAGMA, PoPS) →
-Open Targets / FUMA interpretation.
+From GWAS summary statistics to candidate molecular mechanisms: find and QC the GWAS,
+build ancestry-matched LD panels, clump, fine-map with SuSiE-RSS, draw publication figures,
+annotate every fine-mapped variant and colocalise the loci with molecular QTLs.
 
 Everything is installed and downloaded **inside the directory you run the scripts from**,
 so the same commands work on a laptop, a workstation or any SLURM cluster.
 Run every command from the repository directory.
 
+## Pipeline at a glance
+
+| Step | Script | What it does | One SLURM job per | Output |
+|---|---|---|---|---|
+| 0 | `Step00_Installation.py` | installs all software into `envs/` | – | `envs/`, `external_tools/` |
+| 0 | `Step00_Download_Resources.py` | downloads the shared reference data | file | `resources/` |
+| 1 | `Step01_Download_Resources_Checkheaders.py` | checks every download is readable | – | `setup_manifests/` |
+| 2 | `Step02_Plan_QC_GWAS.py` | finds the GWAS, classifies Binary / Continuous, **downloads and QCs each GWAS in one job** | GWAS | `01_gwas_catalog/`, `02_summary_stats/` |
+| 4 | `Step04_Prepare_LD_Reference.py` | 1000 Genomes LD panels per ancestry | chromosome | `resources/1000G/<ANC>/` |
+| 5 | `Step05_Clump_GWAS_Loci.py` | LD clumping → independent lead variants | GWAS | `05_ld_clumping/` |
+| 6 | `Step06_FineMap_GWAS_Loci.py` | SuSiE-RSS fine-mapping with locus QC | GWAS | `06_finemapping/` |
+| 7 | `Step07_Plots.py` | Manhattan, ideograms, regional / LD / PIP / gene figures | – (one job) | `07_plots/` |
+| 8 | `Step08_Annotate_Finemapped_Variants.py` | local VEP, CADD, AlphaMissense, ClinVar, cCRE, phyloP, LOEUF | GWAS | `08_annotation/` |
+| 9 | `Step09_Colocalize_GTEx_SuSiE.py` | coloc.susie with eQTL / sQTL / pQTL | **locus** | `09_coloc/` |
+
+Every step plans its own SLURM array from the `#SBATCH` header of `HPC_CPU.sh` (never more than
+1,000 jobs; above that, a job processes several items), skips work that is already done, and
+has `--status` (progress) and `--stats` (results). `--index N` runs study N on the current machine
+(see the quick start).
+
 ## Quick start: one Parkinson's disease GWAS, end to end
 
 `--index N` runs **one study** through a step on the current machine. N is the study number the
-Step02 planner prints, and it is the **same N in Step02, Step05, Step06 and Step07**; only that
+Step02 planner prints, and it is the **same N in Steps 02, 05, 06, 07, 08 and 09**; only that
 study has to be through the previous step. In Step04, `--index N` builds LD panel chromosome N.
 Each command skips work that is already finished, so it can be re-run safely.
 
@@ -23,27 +42,30 @@ cluster's values (the ones in `HPC_CPU.sh`):
 RUN="srun --account=a_ace --partition=general --qos=normal --cpus-per-task=8 --mem=64G --time=12:00:00"
 PD=(--phenotype "Parkinson's disease" --ancestry EUR)
 
-# 0. once per installation: software, then the 1000 Genomes inputs + GENCODE (gene tracks)
+# 0. once per installation: software, then the reference data (1000 Genomes, GRCh38 + GENCODE,
+#    VEP cache, variant annotation, CADD, eQTL Catalogue lists + brain QTLs)
 python Step00_Installation.py
 envs/pipeline/bin/python Step00_Download_Resources.py --groups gwas_catalog 1000g genome vep annotation cadd eqtl_catalogue --output Step00_Download_QuickStart.sh
 # Step09 QTLs: eQTL Catalogue GTEx v8, 13 brain tissues = 78 datasets, 101 GB (all GTEx + Sun_2018 pQTL: omit the regex, ~320 GB)
 envs/pipeline/bin/python Step00_Download_Resources.py --groups qtl_catalogue --catalogue-tissue-regex brain --output Step00_Download_QTL.sh
 sbatch Step00_Download_QTL.sh
 sbatch Step00_Download_QuickStart.sh
-envs/pipeline/bin/python Step00_Download_Resources.py --status   # wait until 1000g + genome are complete
+envs/pipeline/bin/python Step00_Download_Resources.py --status   # wait until every group is complete
 
 # 1. find the Parkinson's GWAS; prints the numbered study list (ARRAY_ID)
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py "${PD[@]}"
 
-# 2. study 2 = GCST90475830 (8,704 cases / 440,252 controls): download + QC
+# 2. study 2 = GCST90475830 (8,704 cases / 440,252 controls): download + QC on this node
 $RUN envs/pipeline/bin/python Step02_Plan_QC_GWAS.py "${PD[@]}" --index 2
+#    (all studies instead: sbatch Step02_Download_GWAS_parkinson_s_disease_european.sh -
+#     one job per GWAS, each downloads its file and then QCs it)
 
 # 3. EUR LD panels, chromosomes 1-22 (once; shared by every phenotype)
 envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR
 sbatch Step04_Prepare_1000G_EUR_GRCh38.sh                 # or: for c in $(seq 1 22); do $RUN ... --index $c; done
 envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --status
 
-# 4. clumping -> 5. fine-mapping -> 6. figures -> 7. variant annotation, all for study 2
+# 4. clumping -> 5. fine-mapping -> 6. figures -> 7. variant annotation -> 8. colocalisation, study 2
 $RUN envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py   "${PD[@]}" --index 2
 $RUN envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py "${PD[@]}" --index 2
 $RUN envs/pipeline/bin/python Step07_Plots.py             "${PD[@]}" --index 2
@@ -64,7 +86,19 @@ Step06 does not fine-map it until `VERIFIED_PHENOTYPE_TYPE` is filled in
 `01_gwas_catalog/parkinson_s_disease/european/phenotype_type_review.tsv`. If you planned with an
 older Step02, re-run step 1 once so the classification columns are current.
 
-To run **all** studies, use the generated SLURM arrays instead of `--index` (sections 4–8).
+To run **all** studies, run each planner without `--index` and `sbatch` the script it writes
+(sections 4–10):
+
+```bash
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py "${PD[@]}"                && sbatch Step02_Download_GWAS_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py "${PD[@]}"             && sbatch Step05_Clump_GWAS_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py "${PD[@]}"           && sbatch Step06_FineMap_GWAS_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step07_Plots.py "${PD[@]}" --slurm               && sbatch Step07_Plots_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py "${PD[@]}" && sbatch Step08_Annotate_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py "${PD[@]}"       && sbatch Step09_Coloc_parkinson_s_disease_european.sh
+```
+
+Wait for each array to finish (`--status`) before planning the next step.
 
 ## 1. Install the software
 
@@ -548,4 +582,7 @@ Files are stored under `resources/` (dense eQTL Catalogue files in
 SLURM settings come from the `#SBATCH` header of `HPC_CPU.sh` (account, partition, qos,
 nodes, ntasks, cpus-per-task, mem, time) and apply to every generated job. Edit that file
 for your cluster, or override a single plan with `--account`, `--partition`, `--qos`,
-`--cpus`, `--mem` or `--time`.
+`--cpus`, `--mem`, `--time` or `--max-parallel` (jobs running at once).
+
+Generated job scripts (`Step0*_<phenotype>_<ancestry>.sh`), logs (`logs/`), downloaded data
+(`resources/`) and results (`01_gwas_catalog/` … `09_coloc/`) are not tracked by git.
