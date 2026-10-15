@@ -196,31 +196,40 @@ envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py --full     # 
 
 ## 4. Find, download and QC the GWAS for a phenotype
 
-`Step02_Plan_QC_GWAS.py` searches the GWAS Catalog (full summary statistics, strict ancestry
-match, harmonised file, ranked by sample size) and writes one SLURM array in which **each task
-downloads one GWAS and runs GWASLab QC on it**.
+`Step02_Plan_QC_GWAS.py` works for any phenotype. It searches the GWAS Catalog for the phenotype
+as given (plus any `--alias`), keeps studies with full summary statistics, a strict ancestry
+match and a harmonised file, and ranks them by sample size. For every study it also records
+whether the phenotype is **binary (cases/controls) or quantitative**, with the number of cases
+and controls and the case fraction. These come from the summary-statistics metadata
+(`-meta.yaml`, `case_control_study`) and the GWAS Catalog REST API, because fine-mapping and
+colocalisation differ (SuSiE-RSS / coloc `type="cc"` with case fraction `s`, versus `type="quant"`).
 
 ```bash
-# plan + submit
+# 1. discover + download (one light array task per GWAS)
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR
-sbatch Step02_GWAS_migraine_european.sh
+sbatch Step02_Download_GWAS_migraine_european.sh
 
-# what is downloaded / pending, and QC done / failed / pending, per study
+# 2. GWASLab QC of every GWAS downloaded so far (re-run as more downloads finish)
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --qc
+sbatch Step02_QC_migraine_european.sh
+
+# downloaded / partial / pending and QC done / failed / pending, per study (read-only)
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --status
 
-# publication table: authors, journal, year, PMID, trait (EFO), population and countries,
-# total N, cases, controls, effective N, platform, variants raw / after QC, file columns,
-# genome-wide significant hits, minimum P, lambda GC, available fields
+# publication table: authors, journal, year, PMID, trait / EFO, binary or quantitative,
+# N, cases, controls, case fraction, effective N, population, countries, cohorts, platform,
+# imputed, variants raw / after QC, file columns, genome-wide hits, minimum P, lambda GC
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --stats
 
-# run one task (download + QC) on this machine
+# one QC task directly on this machine
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --index 1
 ```
 
-Options: `--alias "migraine disorder"` (extra search term), `--max-studies 5`, `--refresh`
-(re-download GWAS Catalog metadata), and `--partition --qos --account --cpus --mem --time
---parallel` to override `HPC_CPU.sh`. Outputs go to `01_gwas_catalog/<phenotype>/<ancestry>/`
-(manifests, `study_selection.tsv`, `GWAS_publication_stats.tsv`) and
+Options: `--alias "migraine disorder"` (extra search term, repeatable), `--max-studies 5`,
+`--refresh` (re-download GWAS Catalog metadata), and `--partition --qos --account --cpus --mem
+--time --max-parallel` to override `HPC_CPU.sh`. `TRAIT_TYPE`, `N_CASES`, `N_CONTROLS`,
+`CASE_FRACTION` and `N_TOTAL` are written to `GWAS_download_manifest.tsv`, `GWAS_QC_manifest.tsv`
+and every `<GCST>_QC_summary.tsv`. Outputs go to `01_gwas_catalog/<phenotype>/<ancestry>/` and
 `02_summary_stats/<phenotype>/<ancestry>/{raw,qc}/`.
 
 ## Resource groups
