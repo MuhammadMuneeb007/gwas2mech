@@ -16,6 +16,7 @@ fuma_reproducibility/
 06_finemapping/
 07_plots/
 08_annotation/
+09_coloc/
 
 # Run state, manifests and logs
 setup_manifests/
@@ -34,6 +35,7 @@ Step05_Clump_GWAS_*.sh
 Step06_FineMap_GWAS_*.sh
 Step07_Plots_*.sh
 Step08_Annotate_*.sh
+Step09_Coloc_*.sh
 Setup_*.sh
 environment.yml
 resource_paths.env

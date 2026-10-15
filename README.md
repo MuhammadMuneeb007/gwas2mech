@@ -25,7 +25,10 @@ PD=(--phenotype "Parkinson's disease" --ancestry EUR)
 
 # 0. once per installation: software, then the 1000 Genomes inputs + GENCODE (gene tracks)
 python Step00_Installation.py
-envs/pipeline/bin/python Step00_Download_Resources.py --groups gwas_catalog 1000g genome vep annotation cadd --output Step00_Download_QuickStart.sh
+envs/pipeline/bin/python Step00_Download_Resources.py --groups gwas_catalog 1000g genome vep annotation cadd eqtl_catalogue --output Step00_Download_QuickStart.sh
+# Step09 QTLs: eQTL Catalogue GTEx v8, 13 brain tissues = 78 datasets, 101 GB (all GTEx + Sun_2018 pQTL: omit the regex, ~320 GB)
+envs/pipeline/bin/python Step00_Download_Resources.py --groups qtl_catalogue --catalogue-tissue-regex brain --output Step00_Download_QTL.sh
+sbatch Step00_Download_QTL.sh
 sbatch Step00_Download_QuickStart.sh
 envs/pipeline/bin/python Step00_Download_Resources.py --status   # wait until 1000g + genome are complete
 
@@ -45,11 +48,13 @@ $RUN envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py   "${PD[@]}" --index 2
 $RUN envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py "${PD[@]}" --index 2
 $RUN envs/pipeline/bin/python Step07_Plots.py             "${PD[@]}" --index 2
 $RUN envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py "${PD[@]}" --index 2
+$RUN envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py      "${PD[@]}" --index 2   # every locus of study 2
 
 # results
 envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py   "${PD[@]}" --stats    # leads, loci
 envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py "${PD[@]}" --stats    # credible sets, PIPs, locus QC
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py "${PD[@]}" --stats   # coding / LoF / ClinVar / cCRE in credible sets
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py      "${PD[@]}" --stats   # eQTL / sQTL / pQTL colocalisation (PP.H4)
 ls 07_plots/parkinson_s_disease/european/GCST90475830/                      # Manhattan, ideogram, loci/
 ```
 
@@ -144,7 +149,7 @@ envs/pipeline/bin/python Step00_Download_Resources.py --groups gtex --output Ste
 sbatch Step00_Download_GTEx.sh
 ```
 
-**eQTL Catalogue QTLs used by Step11** (GTEx v8 eQTL / exonQTL / isoQTL / sQTL + Sun_2018 pQTL) — 320 GB
+**eQTL Catalogue QTLs used by Step09** (GTEx v8 eQTL / exonQTL / isoQTL / sQTL + Sun_2018 pQTL) — 320 GB
 ```bash
 envs/pipeline/bin/python Step00_Download_Resources.py --groups eqtl_catalogue qtl_catalogue --output Step00_Download_QTLCatalogue.sh
 sbatch Step00_Download_QTLCatalogue.sh
@@ -160,11 +165,11 @@ envs/pipeline/bin/python Step00_Download_Resources.py --groups qtl_catalogue --c
 envs/pipeline/bin/python Step00_Download_Resources.py --groups qtl_catalogue --catalogue-study-regex '^Sun_2018$' --output Step00_Download_pQTL_Sun2018.sh
 # every eQTL Catalogue study (very large)
 envs/pipeline/bin/python Step00_Download_Resources.py --groups qtl_catalogue --catalogue-all-studies --output Step00_Download_QTLCatalogueAll.sh
-# SuSiE lbf / credible sets for the Step11 contexts (316 GB)
+# SuSiE lbf / credible sets for the Step09 contexts (316 GB)
 envs/pipeline/bin/python Step00_Download_Resources.py --groups qtl_catalogue_susie --output Step00_Download_QTLSuSiE.sh
 ```
 
-**Cell-type eQTL (Jerber_2021, as Setup_11B)** — 62 GB
+**Cell-type eQTL (Jerber_2021)** — 62 GB
 ```bash
 envs/pipeline/bin/python Step00_Download_Resources.py --groups qtl_celltype --output Step00_Download_CellTypeQTL.sh
 sbatch Step00_Download_CellTypeQTL.sh
@@ -483,6 +488,38 @@ variants, fine-mapping + annotation, `Z_ALT`/`BETA_ALT` = GWAS effect of the ALT
 coding / LoF / missense / ClinVar / cCRE evidence in the credible set, PIP-weighted functional
 composition) and `annotation_provenance.json` (every file used, ClinVar release, counts).
 
+## 10. Molecular-QTL colocalisation (Step09, coloc.susie)
+
+For every fine-mapped locus: does the GWAS signal share a causal variant with a gene's expression
+(eQTL), splicing (sQTL), transcript usage (isoQTL), exon expression (exonQTL) or protein (pQTL)?
+The GWAS side is the Step06 SuSiE fit of the locus (reused), the QTL side is fine-mapped with
+`coloc::runsusie` on dense eQTL Catalogue statistics, LD comes from the Step04 panel, and
+`coloc::coloc.susie` gives PP.H4 per signal pair (prior sensitivity p12 = 1e-6 / 5e-6 / 1e-5).
+
+**One SLURM array task per locus** (all studies; above 1000 loci, tasks take several loci):
+
+```bash
+envs/pipeline/bin/python Step00_Download_Resources.py --groups eqtl_catalogue qtl_catalogue --output Step00_Download_QTL.sh
+sbatch Step00_Download_QTL.sh                                   # GTEx v8 + Sun_2018 (default contexts)
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR   # plan: 1 task / locus
+sbatch Step09_Coloc_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --index 2 --locus L001
+```
+
+`STRONG_SHARED_SIGNAL` = PP.H4 ≥ 0.8 and H4 > H3; `PRIOR_ROBUST_STRONG` when it also holds at the
+low prior; `LD_MISMATCH_WARNING` when the LD/z consistency (`estimate_s_rss`) exceeds 0.1. A QTL class
+without downloaded data is reported as `RESOURCE_NOT_CONFIGURED`, never as "no colocalisation".
+Other studies: `--catalog-study-regex` / `--catalog-all-studies` (download them with the same
+regex in `qtl_catalogue`); other molecular QTL (meQTL, caQTL, hQTL, ...): add a dense, tabix-indexed
+file to `resources/coloc/custom_qtl_registry.tsv`.
+
+Outputs in `09_coloc/<phenotype>/<ancestry>/<GCST>/`: `<GCST>_formal_coloc_summary.tsv` (every
+tested trait: PP.H0–H4, signal pair, prior sensitivity, LD diagnostics), `<GCST>_locus_qtl_matrix.tsv`,
+`<GCST>_locus_evidence_table.tsv` (one row per locus), and per-locus / per-trait detail under `loci/`.
+
 ## Resource groups
 
 | Group | Contents | Approx. download |
@@ -494,13 +531,13 @@ composition) and `annotation_provenance.json` (every file used, ClinVar release,
 | `gtex` | GTEx v11 eQTL / sQTL / apaQTL + SuSiE (extracted), variant lookup, GENCODE 47 | 7 GB |
 | `eqtl_catalogue` | eQTL Catalogue metadata tables (+ datasets listed by id) | < 1 GB |
 | `opentargets` | Open Targets Platform 26.09 study / credible sets / L2G / colocalisation | 19 GB |
-| `qtl_catalogue` | eQTL Catalogue dense + `.tbi` for Step11: GTEx v8 eQTL / exonQTL / isoQTL / sQTL + Sun_2018 pQTL | 320 GB |
+| `qtl_catalogue` | eQTL Catalogue dense + `.tbi` for Step09: GTEx v8 eQTL / exonQTL / isoQTL / sQTL + Sun_2018 pQTL | 320 GB |
 | `qtl_celltype` | Jerber_2021 cell-type eQTL, dense + `.tbi` + SuSiE | 62 GB |
 | `molecular_qtl` | ADSP FunGen brain pQTL / sQTL / haQTL + Kumasaka caQTL, MD5-verified | 230 GB |
 | `meqtl` | ADSP FunGen brain mQTL, MD5-verified | 1.5 TB |
 | `annotation` | AlphaMissense (+ tabix index), ClinVar, ENCODE SCREEN cCREs v4, gnomAD v4.1 constraint, UCSC liftover chains, phyloP100way | 11 GB |
 | `cadd` | CADD v1.7 GRCh38 SNVs + gnomAD4 indels (+ `.tbi`) | 89 GB |
-| `qtl_catalogue_susie` *(only when named)* | eQTL Catalogue SuSiE lbf / cs for the Step11 contexts | 316 GB |
+| `qtl_catalogue_susie` *(only when named)* | eQTL Catalogue SuSiE lbf / cs for the Step09 contexts | 316 GB |
 | `adsp_eqtl` *(only when named)* | ADSP FunGen brain bulk + single-nucleus eQTL | 720 GB |
 
 Files are stored under `resources/` (dense eQTL Catalogue files in

@@ -350,8 +350,8 @@ PYTHON_PACKAGES = [
     ("gwaslab", "gwaslab", "pipeline", True, 3, "pip", GWASLAB_SPEC, "Step03 QC"),
     ("yaml", "PyYAML", "pipeline", False, 6, "conda", "pyyaml", "Step06 metadata"),
     ("scipy", "scipy", "pipeline", False, None, "conda", "scipy", "Pipeline_Report, Step13, Step14"),
-    ("polars", "polars", "pipeline", False, None, "pip", POLARS_SPEC, "Diagnose_Step11, Pipeline_Report"),
-    ("orjson", "orjson", "pipeline", False, None, "conda", "orjson", "Diagnose_Step11"),
+    ("polars", "polars", "pipeline", False, None, "pip", POLARS_SPEC, "reports"),
+    ("orjson", "orjson", "pipeline", False, None, "conda", "orjson", "reports"),
     ("pyarrow", "pyarrow", "pipeline", False, None, "conda", "pyarrow", "parquet (Open Targets)"),
     ("duckdb", "duckdb", "pipeline", False, None, "conda", "duckdb", "Step13"),
     ("pysam", "pysam", "pipeline", True, 8, "conda", "pysam", "Step08 CADD / AlphaMissense / ClinVar lookups"),
@@ -361,7 +361,7 @@ PYTHON_PACKAGES = [
     ("statsmodels", "statsmodels", "pipeline", False, None, "conda", "statsmodels", "Step14"),
     ("httpx", "httpx", "pipeline", False, None, "conda", "httpx", "declared"),
     ("tenacity", "tenacity", "pipeline", False, None, "conda", "tenacity", "declared"),
-    ("tqdm", "tqdm", "pipeline", False, None, "conda", "tqdm", "Diagnose_Step11"),
+    ("tqdm", "tqdm", "pipeline", False, None, "conda", "tqdm", "reports"),
     ("matplotlib", "matplotlib", "pipeline", False, None, "conda", "matplotlib", "declared"),
     ("networkx", "networkx", "pipeline", False, None, "conda", "networkx", "Step15"),
     ("gprofiler", "gprofiler-official", "pipeline", False, None, "conda", "gprofiler-official", "Step14"),
@@ -377,7 +377,7 @@ PYTHON_PACKAGES = [
 # name, required, step, spec, used by
 R_PACKAGES = [
     ("susieR", True, 6, "r-susier", "Step06 SuSiE-RSS"),
-    ("coloc", True, 11, "r-coloc", "Step11 coloc.bf_bf"),
+    ("coloc", True, 9, "r-coloc", "Step09 coloc.susie"),
     ("data.table", True, 11, "r-data.table", "coloc dependency"),
     ("ggplot2", True, 7, "r-ggplot2", "Step07 figures"),
     ("patchwork", True, 7, "r-patchwork", "Step07 multi-panel locus figures"),

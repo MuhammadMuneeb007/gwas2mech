@@ -3,174 +3,60 @@
 
 """
 ===============================================================================
-GWAS2m STEP 11
-FORMAL, TISSUE-AGNOSTIC MOLECULAR-QTL COLOCALIZATION
+GWAS2Mech STEP 09 - Formal molecular-QTL colocalisation (coloc.susie), per locus
 ===============================================================================
 
-Version: 3.2.0
+    # plan: ONE SLURM ARRAY TASK PER FINE-MAPPED LOCUS (all studies; >1000 loci share tasks)
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR
+    sbatch Step09_Coloc_parkinson_s_disease_european.sh
 
-SCIENTIFIC PURPOSE
-------------------
-For every successfully fine-mapped GWAS locus, test whether the GWAS signal
-shares a causal genetic signal with molecular phenotypes such as:
+    # study 2 (the number the Step02 planner prints) on this machine, all its loci / one locus
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --index 2 --locus L001
 
-    eQTL          gene expression
-    sQTL          RNA splicing
-    pQTL          protein abundance
-    meQTL         DNA methylation
-    caQTL         chromatin accessibility
-    hQTL          histone modification
-    isoQTL        transcript/isoform usage
-    exonQTL       exon expression
-    apaQTL        alternative polyadenylation
-    metaboliteQTL metabolite abundance
-    otherQTL      any user-registered quantitative molecular phenotype
+    # resources, progress, results
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --status
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 
-The formal statistical method is:
+For every fine-mapped GWAS locus, test whether the GWAS signal and a molecular
+trait (eQTL, sQTL, pQTL, isoQTL, exonQTL, ... ) share a causal variant:
 
-    coloc::runsusie()
-    coloc::coloc.susie()
+  1. GWAS side   = the Step06 SuSiE-RSS fit of that locus (reused, not refitted)
+  2. QTL side    = dense regional summary statistics (eQTL Catalogue), every
+                   molecular trait with P <= --candidate-p in the locus window
+  3. LD          = signed r from the Step04 ancestry-matched 1000G panel
+                   (ref-based, same REF orientation as Step06 Z and the QTL beta)
+  4. coloc::runsusie (QTL) + coloc::coloc.susie (GWAS x QTL), PP.H4 per signal
+     pair, with prior sensitivity p12 = 1e-6 / 5e-6 / 1e-5
+  5. STRONG_SHARED_SIGNAL = PP.H4 >= 0.8 and H4 > H3; PRIOR_ROBUST_STRONG when
+     it also holds at the low p12
 
-using dense regional statistics and signed LD.
+Inputs (nothing is downloaded here)
+    Step06   06_finemapping/<p>/<a>/<GCST>/loci/<L>/ (matched variants, SuSiE fit, LD ids)
+             <GCST>/finemapping_summary.json (PHENOTYPE_TYPE, N, N_EFF)
+    Step04   resources/1000G/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam
+    Step00   Step00_Download_Resources.py --groups eqtl_catalogue qtl_catalogue
+             resources/coloc/eqtl_catalogue/tabix_ftp_paths*.tsv  (dataset list)
+             resources/coloc/eqtl_catalogue/dense/<dataset_id>/*.tsv.gz + .tbi
+             default contexts: GTEx v8 (eQTL, sQTL, isoQTL, exonQTL) + Sun_2018 pQTL;
+             --catalog-study-regex / --catalog-all-studies for others
+    optional resources/coloc/custom_qtl_registry.tsv (any other dense QTL file,
+             e.g. meQTL / caQTL / hQTL; LOCAL_PATH, column names, ENABLED=True)
 
-THIS SCRIPT DOES NOT USE CLPP/LCLPP AS FORMAL COLOCALIZATION.
+A molecular-QTL class with no local resource is reported as
+RESOURCE_NOT_CONFIGURED - never as a biological "no colocalisation".
 
-IMPORTANT DISTINCTIONS
-----------------------
-A. GTEx v11 Step08
-   Existing Step08 outputs are kept as descriptive overlap evidence:
-       "Did one of our fine-mapped variants occur among significant GTEx
-        eQTL/sQTL associations?"
-   This is useful annotation/discovery, but is NOT formal colocalization.
+Outputs (09_coloc/<p>/<a>/)
+    coloc_manifest.tsv, coloc_excluded_studies.tsv, coloc_stats.tsv (--stats)
+    <GCST>/<GCST>_formal_coloc_summary.tsv   every tested molecular trait
+           <GCST>_locus_qtl_matrix.tsv       locus x QTL class evidence
+           <GCST>_locus_evidence_table.tsv   one row per locus
+           <GCST>_molecular_qtl_candidates.tsv, resource_status.tsv, coloc_summary.json
+           loci/<L>/candidates/<id>/          coloc summary / variant results / priors / LD diagnostics
 
-B. Formal coloc
-   Formal coloc uses dense regional molecular-QTL summary statistics.
-   SNPs are NOT selected by molecular-QTL significance for the formal test.
-
-C. Missing resources
-   If a molecular-QTL class is not publicly/configurably available, the script
-   writes:
-       RESOURCE_NOT_CONFIGURED
-   It never converts missing data into a biological "NO".
-
-PUBLIC RESOURCE SUPPORT
------------------------
-1. GTEx v11 descriptive resources:
-   Step08 uses GTEx v11. Step11 keeps those overlaps as descriptive evidence only.
-   They are NOT the formal eQTL-Catalogue GTEx input.
-
-   --setup-resources does not redownload GTEx v11 by default.
-   --setup-full-gtex optionally downloads the GTEx v11 resources used by Step08.
-
-2. eQTL Catalogue (formal public molecular-QTL source):
-   The Catalogue's GTEx study is GTEx v8 (49 tissues), not GTEx v11.
-   Formal results are therefore labeled eQTL_Catalogue_GTEx_v8.
-   Normal analysis is LOCAL-ONLY. The script reads the already-downloaded
-   dense .tsv.gz + .tbi files under resources/coloc/eqtl_catalogue/dense
-   and queries only the current GWAS locus with tabix. It never downloads
-   eQTL-Catalogue LBF files and never uses remote tabix during analysis.
-
-   Supported quantification mappings include:
-       ge / microarray  -> eQTL
-       leafcutter/majiq -> sQTL
-       tx               -> isoQTL
-       exon             -> exonQTL
-       txrev            -> isoQTL (transcript usage family)
-       protein          -> pQTL
-
-   By default, the automatic catalogue scan is restricted to GTEx-labelled
-   datasets plus Sun_2018 protein QTL data. Use --catalog-all-studies to expand
-   across all catalogue studies/conditions.
-
-3. Custom molecular-QTL registry:
-   resources/coloc/custom_qtl_registry.tsv
-
-   This supports pQTL, meQTL, caQTL, hQTL, isoQTL, metaboliteQTL, or any future
-   QTL dataset. If SOURCE_URL is provided and LOCAL_PATH is absent, the script
-   downloads it automatically.
-
-WHY NOT AUTO-DOWNLOAD EVERY POSSIBLE QTL DATABASE?
---------------------------------------------------
-There is no single canonical, unrestricted, harmonized all-tissue dataset for
-all of pQTL/meQTL/caQTL/hQTL/metabolite-QTL data. Some datasets are controlled
-access, cohort-specific, or use different licenses. The script therefore:
-  * automatically downloads verified public GTEx/eQTL-Catalogue resources;
-  * supports arbitrary additional public URLs through the registry;
-  * explicitly reports unavailable resources.
-
-EXPECTED GWAS2m STRUCTURE
--------------------------
-06_finemapping/<phenotype>/<ancestry>/<GCST>/
-    <GCST>_finemapped_variants.tsv.gz
-    finemapping_summary.json
-    loci/
-        L001/
-            reference_qc_matched_variants.tsv.gz
-            matched_variants.tsv
-            susie_fit.rds
-        ...
-
-08_qtl/<phenotype>/<ancestry>/<GCST>/
-    <GCST>_GTEx_eQTL.tsv.gz
-    <GCST>_GTEx_sQTL.tsv.gz
-    <GCST>_GTEx_QTL_variant_summary.tsv
-    ...
-
-resources/1000G/<ANC>/
-    chr1_<ANC>_GRCh38.pgen
-    chr1_<ANC>_GRCh38.pvar
-    chr1_<ANC>_GRCh38.psam
-    ...
-
-OUTPUT
-------
-11_coloc_formal/<phenotype>/<ancestry>/
-    coloc_manifest.tsv
-    coloc_excluded_studies.tsv
-
-    <GCST>/
-        <GCST>_Step08_GTEx_overlap.tsv
-        <GCST>_molecular_qtl_candidates.tsv
-        <GCST>_formal_coloc_summary.tsv
-        <GCST>_locus_qtl_matrix.tsv
-        <GCST>_locus_evidence_table.tsv
-        resource_status.tsv
-        coloc_summary.json
-
-        candidates/
-            <candidate_id>/
-                common_stats.tsv.gz
-                common_reference_ids.txt
-                external_LD.unphased.vcor1.bin
-                external_LD.unphased.vcor1.bin.vars
-                coloc_susie_summary.tsv
-                coloc_susie_variant_results.tsv.gz
-                prior_sensitivity.tsv
-                diagnostics.tsv
-                run_metadata.json
-                coloc.log
-
-MODES
------
-1. Download/setup public resources:
-   python Step11_Formal_Molecular_Colocalization.py --setup-resources
-
-2. Create/check planner:
-   python Step11_Formal_Molecular_Colocalization.py \
-       --phenotype "parkinson's disease" \
-       --ancestry EUR
-
-3. Run first Parkinson GWAS interactively on a COMPUTE node:
-   python Step11_Formal_Molecular_Colocalization.py \
-       --phenotype "parkinson's disease" \
-       --ancestry EUR \
-       --index 1
-
-4. Generated SLURM:
-   sbatch --array=1 Step11_Formal_Coloc_parkinson_s_disease_european.sh
-
-The direct --index mode prints the candidate table and final coloc table to
-screen.
+SLURM settings come from the #SBATCH header of HPC_CPU.sh; --partition --qos
+--account --cpus --mem --time --max-parallel override them.
 ===============================================================================
 """
 
@@ -179,8 +65,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import io
-import time
-import fcntl
 from collections import OrderedDict
 from contextlib import contextmanager
 import json
@@ -190,22 +74,20 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tarfile
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import gwas2m_config  # noqa: E402  (SLURM settings: config/slurm.yaml; scheduling only)
 from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
 
 
-STEP11_VERSION = "4.3.0-local-fast-no-lbf"
+STEP09_VERSION = "5.0.0-per-locus"
+PROJECT_ROOT = Path.cwd().resolve()
+MAX_ARRAY_TASKS = 1000
 
-# SLURM partition/time/memory/CPUs/throttle: config/slurm.yaml (stage "coloc_core").
 DEFAULT_CPUS = 4
 DEFAULT_REMOTE_DELAY = 0.0
 DEFAULT_LD_MAF = 0.01
@@ -251,47 +133,6 @@ ANCESTRY_ALIASES = {
     "hispanic": ("AMR", "Hispanic or Latin American"),
     "latino": ("AMR", "Hispanic or Latin American"),
     "hispanic or latin american": ("AMR", "Hispanic or Latin American"),
-}
-
-GTEX_BASE = "https://storage.googleapis.com/adult-gtex/bulk-qtl/v11"
-
-GTEX_PUBLIC_RESOURCES = {
-    "GTEX_V11_EQTL_SIGNIFICANT": {
-        "url": f"{GTEX_BASE}/single-tissue-cis-qtl/GTEx_Analysis_v11_eQTL.tar",
-        "path": "resources/gtex/v11/qtl/GTEx_Analysis_v11_eQTL.tar",
-        "extract_dir": "resources/gtex/v11/qtl/eQTL",
-        "large": True,
-    },
-    "GTEX_V11_SQTL_SIGNIFICANT": {
-        "url": f"{GTEX_BASE}/single-tissue-cis-qtl/GTEx_Analysis_v11_sQTL.tar",
-        "path": "resources/gtex/v11/qtl/GTEx_Analysis_v11_sQTL.tar",
-        "extract_dir": "resources/gtex/v11/qtl/sQTL",
-        "large": True,
-    },
-    "GTEX_V11_APAQTL_SIGNIFICANT": {
-        "url": f"{GTEX_BASE}/single-tissue-cis-qtl/GTEx_Analysis_v11_apaQTL.tar",
-        "path": "resources/gtex/v11/qtl/GTEx_Analysis_v11_apaQTL.tar",
-        "extract_dir": "resources/gtex/v11/qtl/apaQTL",
-        "large": False,
-    },
-    "GTEX_V11_EQTL_SUSIE": {
-        "url": f"{GTEX_BASE}/susie-qtl/GTEx_Analysis_v11_eQTL_SuSiE.tar",
-        "path": "resources/gtex/v11/susie/GTEx_Analysis_v11_eQTL_SuSiE.tar",
-        "extract_dir": "resources/gtex/v11/susie/eQTL_SuSiE",
-        "large": False,
-    },
-    "GTEX_V11_SQTL_SUSIE": {
-        "url": f"{GTEX_BASE}/susie-qtl/GTEx_Analysis_v11_sQTL_SuSiE.tar",
-        "path": "resources/gtex/v11/susie/GTEx_Analysis_v11_sQTL_SuSiE.tar",
-        "extract_dir": "resources/gtex/v11/susie/sQTL_SuSiE",
-        "large": False,
-    },
-    "GTEX_V11_APAQTL_SUSIE": {
-        "url": f"{GTEX_BASE}/susie-qtl/GTEx_Analysis_v11_apaQTL_SuSiE.tar",
-        "path": "resources/gtex/v11/susie/GTEx_Analysis_v11_apaQTL_SuSiE.tar",
-        "extract_dir": "resources/gtex/v11/susie/apaQTL_SuSiE",
-        "large": False,
-    },
 }
 
 EQTL_CATALOG_PUBLIC = {
@@ -501,22 +342,9 @@ def read_table(path: Path, **kwargs) -> pd.DataFrame:
 
 def validate_walltime(value: str) -> str:
     text = str(value).strip()
-    days = 0
-    if "-" in text:
-        d, text = text.split("-", 1)
-        days = int(d)
-    parts = text.split(":")
-    if len(parts) != 3:
-        raise argparse.ArgumentTypeError("Walltime must be HH:MM:SS or D-HH:MM:SS")
-    h, m, s = map(int, parts)
-    total = days * 86400 + h * 3600 + m * 60 + s
-    if total <= 0:
-        raise argparse.ArgumentTypeError("Walltime must be > 0")
-    try:
-        gwas2m_config.validate_walltime(value)  # configured max_walltime only
-    except gwas2m_config.SlurmConfigError as exc:
-        raise argparse.ArgumentTypeError(str(exc)) from exc
-    return value
+    if not re.fullmatch(r"(\d+-)?\d{1,3}(:\d{2}){0,2}", text):
+        raise argparse.ArgumentTypeError(f"walltime {value!r} must look like 12:00:00 or 2-00:00:00")
+    return text
 
 
 def run_command(
@@ -564,10 +392,11 @@ def run_command(
     return text
 
 
-
 @contextmanager
 def exclusive_file_lock(path: Path):
     """Cross-process advisory lock for shared downloads/aggregate writes on Linux HPC."""
+    import fcntl   # Linux / HPC only
+
     lock_path = Path(str(path) + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w") as handle:
@@ -642,96 +471,6 @@ def find_executable(
     )
 
 
-def download_file(url: str, destination: Path, force: bool = False) -> Path:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    complete = Path(str(destination) + ".complete")
-
-    with exclusive_file_lock(destination):
-        if (
-            not force
-            and destination.exists()
-            and destination.stat().st_size > 0
-            and complete.exists()
-        ):
-            print(f"[CACHE] {destination}")
-            return destination
-
-        part = Path(str(destination) + ".part")
-        banner("DOWNLOAD")
-        print(f"URL : {url}")
-        print(f"OUT : {destination}")
-
-        aria2 = shutil.which("aria2c")
-        curl = shutil.which("curl")
-        wget = shutil.which("wget")
-
-        if aria2:
-            run_command([
-                aria2,
-                "--continue=true",
-                "--max-connection-per-server=4",
-                "--split=4",
-                "--min-split-size=16M",
-                "--file-allocation=none",
-                "--auto-file-renaming=false",
-                "--allow-overwrite=true",
-                "--max-tries=10",
-                "--retry-wait=5",
-                "--dir", str(destination.parent),
-                "--out", part.name,
-                url,
-            ])
-        elif curl:
-            run_command([
-                curl, "--fail", "--location", "--retry", "8",
-                "--retry-delay", "5", "--continue-at", "-",
-                "--output", str(part), url,
-            ])
-        elif wget:
-            run_command([
-                wget, "--continue", "--tries=8", "--timeout=60",
-                "-O", str(part), url,
-            ])
-        else:
-            raise RuntimeError("aria2c, curl, or wget is required for downloads.")
-
-        if not part.exists() or part.stat().st_size == 0:
-            raise RuntimeError(f"Download produced no usable file: {part}")
-
-        part.replace(destination)
-        complete.write_text(
-            f"downloaded_utc={utcnow()}\\nurl={url}\\n",
-            encoding="utf-8",
-        )
-        return destination
-
-
-def extract_tar(archive: Path, out_dir: Path, force: bool = False) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    complete = out_dir / ".extract.complete"
-    if not force and complete.exists():
-        print(f"[CACHE] extracted {out_dir}")
-        return out_dir
-
-    banner("EXTRACT")
-    print(f"TAR : {archive}")
-    print(f"OUT : {out_dir}")
-
-    with tarfile.open(archive, "r:*") as tf:
-        root = out_dir.resolve()
-        for member in tf.getmembers():
-            target = (out_dir / member.name).resolve()
-            if root not in target.parents and target != root:
-                raise RuntimeError(f"Unsafe path inside tar archive: {member.name}")
-        tf.extractall(out_dir)
-
-    complete.write_text(
-        f"extracted_utc={utcnow()}\narchive={archive}\n",
-        encoding="utf-8",
-    )
-    return out_dir
-
-
 def write_custom_registry_template(root: Path, overwrite: bool = False) -> Path:
     path = root / "resources" / "coloc" / "custom_qtl_registry.tsv"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -778,8 +517,8 @@ def write_custom_registry_template(root: Path, overwrite: bool = False) -> Path:
             "QTL_TYPE": qtl_type,
             "TRAIT_COLUMN": trait_col,
             "NOTES": (
-                f"Configure a licensed/public dense {note} summary-statistics source. "
-                "If SOURCE_URL is provided, the file is downloaded automatically."
+                f"Configure a licensed/public dense {note} summary-statistics source: "
+                "set LOCAL_PATH (bgzip + tabix), the column names and ENABLED=True. Nothing is downloaded."
             ),
         })
         rows.append(row)
@@ -790,64 +529,28 @@ def write_custom_registry_template(root: Path, overwrite: bool = False) -> Path:
     return path
 
 
-def setup_public_resources(
-    root: Path,
-    include_large_gtex: bool,
-    force: bool,
-) -> None:
-    banner("STEP 11 RESOURCE SETUP")
-
-    print("Formal source: eQTL Catalogue metadata + LOCAL dense regional tabix retrieval (NO LBF)")
-    for name, spec in EQTL_CATALOG_PUBLIC.items():
-        print(f"\\n[{name}]")
-        download_file(spec["url"], root / spec["path"], force=force)
-
-    if include_large_gtex:
-        print(
-            "\\n[OPTIONAL] Downloading GTEx v11 resources for Step08/descriptive compatibility. "
-            "These are NOT labeled as the formal eQTL-Catalogue GTEx source."
-        )
-        for name, spec in GTEX_PUBLIC_RESOURCES.items():
-            archive = download_file(spec["url"], root / spec["path"], force=force)
-            extract_tar(archive, root / spec["extract_dir"], force=force)
-    else:
-        print(
-            "\\n[SKIP] GTEx v11 archives are not needed for the formal eQTL-Catalogue path. "
-            "Use --setup-full-gtex only if you also want Step08-compatible GTEx v11 resources."
-        )
-
-    registry = write_custom_registry_template(root)
-    banner("RESOURCE SETUP COMPLETE")
-    print(f"Custom registry:\\n  {registry}")
-
-
 def arguments():
     parser = argparse.ArgumentParser(
-        description="Formal tissue-agnostic molecular-QTL colocalization with coloc.susie."
+        description="Formal molecular-QTL colocalisation (coloc.susie), one SLURM task per fine-mapped locus."
     )
-    parser.add_argument("--phenotype")
-    parser.add_argument("--ancestry")
-    parser.add_argument("--index", type=int)
-    parser.add_argument("--study")
+    parser.add_argument("--phenotype", required=True)
+    parser.add_argument("--ancestry", required=True)
 
-    parser.add_argument("--setup-resources", action="store_true")
-    parser.add_argument("--setup-full-gtex", action="store_true")
-    parser.add_argument("--force-download", action="store_true")
-    parser.add_argument(
-        "--no-auto-download", action="store_true",
-        help="Legacy compatibility flag; normal analysis is always local-only in this build."
-    )
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--index", type=int,
+                       help="Study N of the Step02 download manifest: run its loci on this machine.")
+    modes.add_argument("--status", action="store_true", help="READ-ONLY: loci done / failed / pending.")
+    modes.add_argument("--stats", action="store_true", help="Colocalisation results per study (coloc_stats.tsv).")
+    modes.add_argument("--check-resources", action="store_true",
+                       help="Which eQTL Catalogue / custom QTL datasets are available locally.")
+    modes.add_argument("--worker-manifest", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--locus", default=None, help="With --index: only this locus (e.g. L001).")
+    parser.add_argument("--study", default=None, help="Planner: only this GCST accession.")
 
-    parser.add_argument(
-        "--registry",
-        default="resources/coloc/custom_qtl_registry.tsv",
-    )
-    parser.add_argument(
-        "--qtl-types",
-        default=",".join(SUPPORTED_QTL_TYPES),
-    )
-
-    parser.add_argument("--catalog-all-studies", action="store_true")
+    parser.add_argument("--registry", default="resources/coloc/custom_qtl_registry.tsv")
+    parser.add_argument("--qtl-types", default=",".join(SUPPORTED_QTL_TYPES))
+    parser.add_argument("--catalog-all-studies", action="store_true",
+                        help="Every downloaded eQTL Catalogue study (default: GTEx v8 + Sun_2018).")
     parser.add_argument("--catalog-study-regex", default="")
 
     parser.add_argument("--candidate-p", type=float, default=DEFAULT_CANDIDATE_P)
@@ -855,27 +558,44 @@ def arguments():
     parser.add_argument("--max-common-snps", type=int, default=DEFAULT_MAX_COMMON_SNPS)
     parser.add_argument("--strong-pp4", type=float, default=DEFAULT_STRONG_PP4)
     parser.add_argument("--suggestive-pp4", type=float, default=DEFAULT_SUGGESTIVE_PP4)
-    parser.add_argument(
-        "--max-candidates-per-context-locus",
-        type=int,
-        default=DEFAULT_MAX_CANDIDATES_PER_CONTEXT_LOCUS,
-    )
-
-    parser.add_argument("--partition", default=None)
-    parser.add_argument("--time", type=validate_walltime, default=None)
-    parser.add_argument("--memory", default=None)
-    parser.add_argument("--cpus", type=int, default=None)
-    parser.add_argument("--max-parallel", type=int, default=None)
-    parser.add_argument("--remote-delay", type=float, default=DEFAULT_REMOTE_DELAY)
+    parser.add_argument("--max-candidates-per-context-locus", type=int,
+                        default=DEFAULT_MAX_CANDIDATES_PER_CONTEXT_LOCUS)
     parser.add_argument("--ld-maf", type=float, default=DEFAULT_LD_MAF)
     parser.add_argument("--ld-mismatch-s", type=float, default=DEFAULT_LD_MISMATCH_S)
-
     parser.add_argument("--plink2")
     parser.add_argument("--tabix")
     parser.add_argument("--rscript")
-    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--force", action="store_true", help="Re-run loci / candidates that are complete.")
+
+    slurm = parser.add_argument_group("SLURM (default: the #SBATCH header of HPC_CPU.sh)")
+    slurm.add_argument("--template", default="HPC_CPU.sh")
+    slurm.add_argument("--partition", default=None)
+    slurm.add_argument("--qos", default=None)
+    slurm.add_argument("--account", default=None)
+    slurm.add_argument("--cpus", type=int, default=None)
+    slurm.add_argument("--mem", "--memory", dest="mem", default=None)
+    slurm.add_argument("--time", type=validate_walltime, default=None)
+    slurm.add_argument("--max-parallel", type=int, default=0,
+                       help="Maximum simultaneously running locus tasks (0 = no throttle).")
     args = parser.parse_args()
-    gwas2m_config.apply_stage_defaults(args, "coloc_core")
+
+    values = {"nodes": "1", "ntasks": "1", "cpus-per-task": str(DEFAULT_CPUS), "mem": "32G", "time": "12:00:00"}
+    template = PROJECT_ROOT / args.template
+    if template.is_file():
+        for line in template.read_text(encoding="utf-8").splitlines():
+            match = re.match(r"^\s*#SBATCH\s+--([A-Za-z-]+)(?:[=\s]+(.*))?$", line)
+            if match and (match.group(2) or "").strip() and match.group(1) not in {"job-name", "output", "error", "array"}:
+                values[match.group(1)] = match.group(2).strip()
+    for key, value in (("partition", args.partition), ("qos", args.qos), ("account", args.account),
+                       ("cpus-per-task", args.cpus), ("mem", args.mem), ("time", args.time)):
+        if value not in (None, ""):
+            values[key] = str(value)
+    args.slurm_values = values
+    args.cpus = int(values["cpus-per-task"])
+    if args.max_common_snps < args.min_common_snps:
+        parser.error("--max-common-snps must be >= --min-common-snps")
+    if args.locus and args.index is None:
+        parser.error("--locus needs --index")
     return args
 
 
@@ -883,10 +603,10 @@ def project_paths(root: Path, phenotype: str, ancestry_label: str) -> dict[str, 
     p = slugify(phenotype)
     a = slugify(ancestry_label)
     return {
+        "S02": root / "01_gwas_catalog" / p / a,
         "S06": root / "06_finemapping" / p / a,
-        "S08": root / "08_qtl" / p / a,
-        "OUT": root / "11_coloc_formal" / p / a,
-        "LOG": root / "logs" / "step11_formal_coloc" / p / a,
+        "OUT": root / "09_coloc" / p / a,
+        "LOG": root / "logs" / "step09_coloc" / p / a,
     }
 
 
@@ -941,93 +661,43 @@ def discover_step06_studies(s06: Path) -> tuple[list[str], list[dict]]:
 
 
 def list_loci(study_dir: Path) -> list[str]:
+    """Step06 loci that have a SuSiE fit (failed loci cannot be colocalised)."""
     loci_dir = study_dir / "loci"
-    if loci_dir.exists():
-        loci = sorted(
-            d.name for d in loci_dir.iterdir()
-            if d.is_dir() and re.fullmatch(r"L\d+", d.name)
-        )
-        if loci:
-            return loci
-
-    accession = study_dir.name
-    fine_file = study_dir / f"{accession}_finemapped_variants.tsv.gz"
-    x = read_table(fine_file)
-    if not x.empty and "LOCUS_ID" in x.columns:
-        return sorted(x["LOCUS_ID"].dropna().astype(str).unique())
-    return []
-
-
-def find_resolved_metadata(s06: Path, accession: str) -> Path | None:
-    candidates = [
-        s06 / "metadata" / accession / "resolved_metadata.json",
-        s06 / accession / "metadata" / "resolved_metadata.json",
-        s06 / accession / "resolved_metadata.json",
-    ]
-    for path in candidates:
-        if path.exists() and path.stat().st_size > 0:
-            return path
-    for path in (s06 / accession).rglob("resolved_metadata.json"):
-        if path.is_file() and path.stat().st_size > 0:
-            return path
-    return None
+    if not loci_dir.exists():
+        return []
+    return sorted(
+        d.name for d in loci_dir.iterdir()
+        if d.is_dir() and re.fullmatch(r"L\d+", d.name) and (d / "susie" / "susie_fit.rds").exists()
+    )
 
 
 def load_gwas_metadata(s06: Path, accession: str) -> dict:
-    metadata_path = find_resolved_metadata(s06, accession)
-    meta = safe_json(metadata_path) if metadata_path else {}
+    """Phenotype type and N from Step06 (finemapping_summary.json, which carries
+    Step02's PHENOTYPE_TYPE / N_CASES / N_CONTROLS / N_TOTAL / N_EFF), else
+    from Step02 GWAS_study_metadata.tsv. The GWAS side of coloc.susie is the
+    Step06 SuSiE fit, so N only documents the run."""
+    meta = safe_json(s06 / accession / "finemapping_summary.json")
+    step02 = s06.parents[2] / "01_gwas_catalog" / s06.parent.name / s06.name / "GWAS_study_metadata.tsv"
+    if step02.exists() and not meta.get("PHENOTYPE_TYPE"):
+        table = read_table(step02, dtype=str)
+        row = table[table.get("GCST_ID", pd.Series(dtype=str)).astype(str) == accession]
+        if not row.empty:
+            meta = {**row.iloc[0].to_dict(), **meta}
 
-    n_cases = safe_int(meta.get("N_CASES"))
-    n_controls = safe_int(meta.get("N_CONTROLS"))
-    resolved_n = safe_int(meta.get("RESOLVED_GWAS_N"))
-
-    raw_cc = meta.get("CASE_CONTROL_STUDY")
-    if isinstance(raw_cc, str):
-        z = raw_cc.strip().lower()
-        if z in {"true", "yes", "1"}:
-            raw_cc = True
-        elif z in {"false", "no", "0"}:
-            raw_cc = False
-        else:
-            raw_cc = None
-
-    if n_cases and n_controls:
-        coloc_n = n_cases + n_controls
-        trait_type = "cc"
-        case_proportion = n_cases / coloc_n
-        type_source = "CASE_CONTROL_COUNTS"
-        metadata_status = "OK"
-    elif raw_cc is True:
-        coloc_n = resolved_n
-        trait_type = "cc"
-        case_proportion = None
-        type_source = "CASE_CONTROL_STUDY_FLAG"
-        metadata_status = "CASE_CONTROL_COUNTS_MISSING"
-    elif raw_cc is False:
-        coloc_n = resolved_n
-        trait_type = "quant"
-        case_proportion = None
-        type_source = "CASE_CONTROL_STUDY_FALSE"
-        metadata_status = "OK"
-    else:
-        # Backward-compatible fallback for older Step06 metadata.  The pipeline
-        # records this explicitly so it is not mistaken for verified metadata.
-        coloc_n = resolved_n
-        trait_type = "quant"
-        case_proportion = None
-        type_source = "INFERRED_QUANT_NO_CASE_COUNTS"
-        metadata_status = "OK_WITH_UNVERIFIED_TRAIT_TYPE"
-
+    n_cases, n_controls = safe_int(meta.get("N_CASES")), safe_int(meta.get("N_CONTROLS"))
+    phenotype_type = str(meta.get("PHENOTYPE_TYPE", "") or "")
+    binary = phenotype_type == "Binary"
     return {
-        "METADATA_FILE": str(metadata_path) if metadata_path else "",
-        "RESOLVED_GWAS_N": resolved_n,
-        "COLOC_GWAS_N": coloc_n,
-        "N_CASES": n_cases,
-        "N_CONTROLS": n_controls,
-        "GWAS_TYPE": trait_type,
-        "GWAS_TYPE_SOURCE": type_source,
-        "METADATA_STATUS": metadata_status,
-        "CASE_PROPORTION": case_proportion,
+        "METADATA_FILE": str(s06 / accession / "finemapping_summary.json"),
+        "PHENOTYPE_TYPE": phenotype_type or "Unknown",
+        "COLOC_GWAS_N": safe_int(meta.get("GWAS_N")) or safe_int(meta.get("N_TOTAL")),
+        "GWAS_N_SOURCE": meta.get("GWAS_N_SOURCE", ""),
+        "N_CASES": n_cases if binary else None,
+        "N_CONTROLS": n_controls if binary else None,
+        "N_EFF": safe_int(meta.get("N_EFF")),
+        "GWAS_TYPE": "cc" if binary else "quant",
+        "CASE_PROPORTION": n_cases / (n_cases + n_controls) if binary and n_cases and n_controls else None,
+        "METADATA_STATUS": "OK" if phenotype_type in ("Binary", "Continuous") else "PHENOTYPE_TYPE_UNKNOWN",
     }
 
 
@@ -1106,80 +776,13 @@ def locus_region(gwas: pd.DataFrame) -> tuple[int, int, int]:
     return chroms[0], int(gwas["POS"].min()), int(gwas["POS"].max())
 
 
-def load_step08_overlap(s08: Path, accession: str) -> pd.DataFrame:
-    study_dir = s08 / accession
-    frames = []
-
-    for qtl_type, file_name in [
-        ("eQTL", f"{accession}_GTEx_eQTL.tsv.gz"),
-        ("sQTL", f"{accession}_GTEx_sQTL.tsv.gz"),
-    ]:
-        path = study_dir / file_name
-        x = read_table(path)
-        if x.empty:
-            continue
-
-        locus_col = first_existing(x.columns, ["LOCUS_ID"])
-        tissue_col = first_existing(x.columns, ["GTEX_TISSUE", "TISSUE"])
-        gene_col = first_existing(x.columns, ["GTEX_GENE_ID", "GENE_ID"])
-        phenotype_col = first_existing(x.columns, ["GTEX_PHENOTYPE_ID", "PHENOTYPE_ID"])
-        variant_col = first_existing(x.columns, ["VEP_ID", "VARIANT_KEY"])
-        p_col = first_existing(x.columns, ["GTEX_PVALUE", "P"])
-
-        if locus_col is None or tissue_col is None:
-            continue
-
-        work = pd.DataFrame({
-            "LOCUS_ID": x[locus_col].astype(str),
-            "QTL_TYPE": qtl_type,
-            "TISSUE": x[tissue_col].fillna("").astype(str),
-            "GENE_ID": (
-                x[gene_col].fillna("").astype(str)
-                if gene_col else ""
-            ),
-            "MOLECULAR_TRAIT_ID": (
-                x[phenotype_col].fillna("").astype(str)
-                if phenotype_col
-                else (
-                    x[gene_col].fillna("").astype(str)
-                    if gene_col else ""
-                )
-            ),
-            "VARIANT": (
-                x[variant_col].fillna("").astype(str)
-                if variant_col else ""
-            ),
-            "P": numeric(x[p_col]) if p_col else np.nan,
-        })
-        frames.append(work)
-
-    if not frames:
-        return pd.DataFrame(columns=[
-            "LOCUS_ID", "QTL_TYPE", "TISSUE", "GENE_ID",
-            "MOLECULAR_TRAIT_ID", "N_STEP08_ROWS",
-            "N_STEP08_VARIANTS", "STEP08_MIN_P",
-        ])
-
-    x = pd.concat(frames, ignore_index=True)
-    return (
-        x.groupby(
-            ["LOCUS_ID", "QTL_TYPE", "TISSUE", "GENE_ID", "MOLECULAR_TRAIT_ID"],
-            dropna=False,
-            as_index=False,
-        )
-        .agg(
-            N_STEP08_ROWS=("LOCUS_ID", "size"),
-            N_STEP08_VARIANTS=("VARIANT", lambda s: int(pd.Series(s).nunique())),
-            STEP08_MIN_P=("P", "min"),
-        )
-    )
-
-
-def ensure_catalogue_metadata(root: Path, auto_download: bool) -> None:
-    for spec in EQTL_CATALOG_PUBLIC.values():
-        path = root / spec["path"]
-        if (not path.exists() or path.stat().st_size == 0) and auto_download:
-            download_file(spec["url"], path)
+def ensure_catalogue_metadata(root: Path, auto_download: bool = False) -> None:
+    """The dataset lists come from Step00_Download_Resources.py --groups eqtl_catalogue."""
+    missing = [spec["path"] for spec in EQTL_CATALOG_PUBLIC.values()
+               if spec["path"].endswith("tabix_ftp_paths.tsv") and not (root / spec["path"]).exists()]
+    if missing:
+        print("[INFO] eQTL Catalogue dataset list missing: " + ", ".join(missing)
+              + "\n       envs/pipeline/bin/python Step00_Download_Resources.py --groups eqtl_catalogue")
 
 
 def normalize_catalogue_manifest(path: Path) -> pd.DataFrame:
@@ -1300,7 +903,7 @@ def select_catalogue_contexts(
         )
         print(counts.to_string(index=False))
         if x["study_label"].astype(str).str.contains("GTEx_v8", case=False, regex=False).any():
-            print("[INFO] Formal GTEx data from eQTL Catalogue are labelled GTEx_v8; Step08 remains GTEx_v11.")
+            print("[INFO] GTEx data in the eQTL Catalogue are GTEx v8 (labelled GTEx_v8).")
 
     return x.reset_index(drop=True)
 
@@ -1320,7 +923,7 @@ def _catalogue_basename(value: str) -> str:
 def resolve_catalogue_local_sources(root: Path, contexts: pd.DataFrame) -> pd.DataFrame:
     """Resolve every selected eQTL-Catalogue context to local BGZF + TBI files.
 
-    Normal Step11 analysis is deliberately network-free.  The manifest FTP URL
+    Normal Step09 analysis is deliberately network-free.  The manifest FTP URL
     is retained only as provenance; ACCESS_PATH is always a local filesystem path.
     """
     if contexts.empty:
@@ -1328,9 +931,8 @@ def resolve_catalogue_local_sources(root: Path, contexts: pd.DataFrame) -> pd.Da
 
     dense_root = root / "resources" / "coloc" / "eqtl_catalogue" / "dense"
     if not dense_root.exists():
-        raise FileNotFoundError(
-            f"Local dense eQTL-Catalogue root is missing: {dense_root}"
-        )
+        print(f"[LOCAL QTL] no dense eQTL Catalogue files under {dense_root}")
+        return contexts.iloc[0:0].assign(ACCESS_PATH="", ACCESS_INDEX="", ACCESS_MODE="")
 
     by_name: dict[str, list[Path]] = {}
     for path in dense_root.rglob("*.tsv.gz"):
@@ -1380,25 +982,20 @@ def resolve_catalogue_local_sources(root: Path, contexts: pd.DataFrame) -> pd.Da
     result = pd.DataFrame(rows)
     missing = result[result["ACCESS_MODE"].ne("LOCAL_TABIX")]
     print(
-        f"[LOCAL QTL] resolved {len(result) - len(missing)}/{len(result)} "
-        "catalogue contexts to local .tsv.gz + .tbi"
+        f"[LOCAL QTL] {len(result) - len(missing)}/{len(result)} selected eQTL Catalogue datasets "
+        "are downloaded (.tsv.gz + .tbi)"
     )
     if not missing.empty:
-        cols = [c for c in ["dataset_id", "study_label", "QTL_TYPE", "tissue_label", "ftp_path"] if c in missing.columns]
-        preview = missing[cols].head(30).to_string(index=False)
-        raise RuntimeError(
-            "Step11 is LOCAL-ONLY and some selected catalogue contexts are missing locally.\n"
-            f"Missing contexts: {len(missing)}\n{preview}\n"
-            "Download/repair those dense .tsv.gz + .tbi files before running Step11."
-        )
-    return result.reset_index(drop=True)
+        print(f"[LOCAL QTL] {len(missing)} not downloaded - not tested (RESOURCE_NOT_CONFIGURED); get them with\n"
+              "            envs/pipeline/bin/python Step00_Download_Resources.py --groups qtl_catalogue")
+    return result[result["ACCESS_MODE"].eq("LOCAL_TABIX")].reset_index(drop=True)
 
 
 def tabix_header(tabix: Path, source: str) -> list[str]:
     source = str(source).strip()
     if _is_remote_source(source):
         raise RuntimeError(
-            f"Remote tabix is disabled in this Step11 build: {source}"
+            f"Remote tabix is disabled in this Step09 build: {source}"
         )
     path = Path(source)
     if not path.exists() or path.stat().st_size == 0:
@@ -2197,145 +1794,6 @@ def catalogue_context_for_candidate(
     return None if x.empty else x.iloc[0]
 
 
-def download_catalogue_lbf(root: Path, context: pd.Series) -> Path | None:
-    """LBF downloads are intentionally disabled in the local-fast build."""
-    return None
-
-def load_lbf_table(path: Path) -> pd.DataFrame:
-    key = str(path.resolve())
-    if key in _LBF_TABLE_CACHE:
-        _LBF_TABLE_CACHE.move_to_end(key)
-        return _LBF_TABLE_CACHE[key]
-
-    header = pd.read_csv(path, sep="\t", compression="infer", nrows=0)
-    lbf_cols = [c for c in header.columns if str(c).startswith("lbf_variable")]
-    required = ["molecular_trait_id", "variant"] + lbf_cols
-    usecols = [c for c in required if c in header.columns]
-    if "molecular_trait_id" not in usecols or "variant" not in usecols or not lbf_cols:
-        raise RuntimeError(f"Unexpected eQTL Catalogue LBF format: {path}")
-
-    x = pd.read_csv(
-        path,
-        sep="\t",
-        compression="infer",
-        usecols=usecols,
-        low_memory=False,
-    )
-    _cache_put(_LBF_TABLE_CACHE, key, x, _LBF_TABLE_CACHE_LIMIT)
-    return x
-
-
-def write_qtl_lbf_trait(
-    root: Path,
-    context: pd.Series,
-    trait_id: str,
-    out_dir: Path,
-) -> Path | None:
-    path = download_catalogue_lbf(root, context)
-    if path is None:
-        return None
-    x = load_lbf_table(path)
-    sub = x[x["molecular_trait_id"].astype(str) == str(trait_id)].copy()
-    if sub.empty:
-        return None
-
-    parsed = sub["variant"].map(parse_variant_id)
-    sub["VARIANT_KEY"] = [
-        make_variant_key(z[0], z[1], z[2], z[3]) for z in parsed
-    ]
-    sub = sub[sub["VARIANT_KEY"].ne("")].copy()
-    sub = sub.drop_duplicates("VARIANT_KEY", keep="first")
-    lbf_cols = [c for c in sub.columns if str(c).startswith("lbf_variable")]
-    if not lbf_cols:
-        return None
-    out = out_dir / "qtl_lbf_trait.tsv.gz"
-    sub[["VARIANT_KEY"] + lbf_cols].to_csv(
-        out, sep="\t", index=False, compression="gzip"
-    )
-    return out
-
-
-R_BF_WORKER = r"""
-args <- commandArgs(trailingOnly=TRUE)
-if (length(args) < 11) stop("Expected 11 arguments")
-
-gwas_fit_file <- args[1]
-gwas_map_file <- args[2]
-qtl_lbf_file <- args[3]
-out_summary <- args[4]
-out_sensitivity <- args[5]
-p1 <- as.numeric(args[6])
-p2 <- as.numeric(args[7])
-p12 <- as.numeric(args[8])
-p12_low <- as.numeric(args[9])
-p12_high <- as.numeric(args[10])
-out_results <- args[11]
-
-suppressPackageStartupMessages(library(coloc))
-
-fit <- readRDS(gwas_fit_file)
-map <- read.delim(gwas_map_file, stringsAsFactors=FALSE)
-qtl <- read.delim(qtl_lbf_file, stringsAsFactors=FALSE, check.names=FALSE)
-
-if (is.null(fit$lbf_variable)) stop("Step06 susie fit has no lbf_variable")
-gbf <- as.matrix(fit$lbf_variable)
-if (ncol(gbf) == nrow(map)) {
-  colnames(gbf) <- map$VARIANT_KEY
-} else if (nrow(gbf) == nrow(map)) {
-  gbf <- t(gbf)
-  colnames(gbf) <- map$VARIANT_KEY
-} else {
-  stop("Step06 lbf_variable dimensions do not match Step06 variant map")
-}
-
-lbf_cols <- grep("^lbf_variable", names(qtl), value=TRUE)
-if (length(lbf_cols) == 0) stop("QTL LBF file has no lbf_variable columns")
-qbf <- t(as.matrix(qtl[, lbf_cols, drop=FALSE]))
-colnames(qbf) <- qtl$VARIANT_KEY
-
-# Drop signal rows that are entirely non-finite.
-gbf <- gbf[apply(gbf, 1, function(x) any(is.finite(x))),,drop=FALSE]
-qbf <- qbf[apply(qbf, 1, function(x) any(is.finite(x))),,drop=FALSE]
-if (nrow(gbf) == 0 || nrow(qbf) == 0) stop("No finite LBF signal rows")
-
-run_one <- function(prior12, label) {
-  res <- coloc::coloc.bf_bf(
-    gbf, qbf,
-    p1=p1, p2=p2, p12=prior12,
-    overlap.min=0.5,
-    trim_by_posterior=TRUE
-  )
-  sm <- as.data.frame(res$summary)
-  if (nrow(sm) == 0) return(NULL)
-  sm$PRIOR_SET <- label
-  sm$P12 <- prior12
-  sm$METHOD <- "coloc.bf_bf_precomputed_susie"
-  list(res=res, summary=sm)
-}
-
-base <- run_one(p12, "DEFAULT")
-if (is.null(base)) stop("coloc.bf_bf returned no signal pairs")
-low <- run_one(p12_low, "LOW_P12")
-high <- run_one(p12_high, "HIGH_P12")
-
-write.table(base$summary, out_summary, sep="\t", quote=FALSE, row.names=FALSE)
-sens <- base$summary
-if (!is.null(low)) sens <- rbind(sens, low$summary)
-if (!is.null(high)) sens <- rbind(sens, high$summary)
-write.table(sens, out_sensitivity, sep="\t", quote=FALSE, row.names=FALSE)
-
-rr <- tryCatch(as.data.frame(base$res$results), error=function(e) data.frame())
-write.table(rr, out_results, sep="\t", quote=FALSE, row.names=FALSE)
-print(base$summary)
-"""
-
-
-def write_bf_worker(output_root: Path) -> Path:
-    path = output_root / "_step11_coloc_bf_bf_worker.R"
-    path.write_text(R_BF_WORKER, encoding="utf-8")
-    return path
-
-
 R_WORKER = r"""
 args <- commandArgs(trailingOnly=TRUE)
 if (length(args) < 18) stop("Expected 18 arguments")
@@ -2517,7 +1975,7 @@ print(diag_df)
 
 
 def write_r_worker(output_root: Path) -> Path:
-    path = output_root / "_step11_coloc_susie_worker.R"
+    path = output_root / "_step09_coloc_susie_worker.R"
     path.write_text(R_WORKER, encoding="utf-8")
     return path
 
@@ -2820,15 +2278,9 @@ def process_candidate(
             )
             return finish("NOT_TESTED_TOO_MANY_COMMON_SNPS_NO_SUBSAMPLING")
 
-        gwas_n = safe_int(gwas_meta.get("COLOC_GWAS_N"))
-        if not gwas_n:
-            return finish("NOT_TESTED_GWAS_SAMPLE_SIZE_MISSING")
-        if (
-            gwas_meta.get("GWAS_TYPE") == "cc"
-            and gwas_meta.get("CASE_PROPORTION") is None
-        ):
-            result["ERROR"] = "Case-control GWAS identified but case/control counts are missing."
-            return finish("NOT_TESTED_CASE_CONTROL_COUNTS_MISSING")
+        # The GWAS side is the Step06 SuSiE fit (fitted with Step06's N), so
+        # N / case fraction are recorded here but not needed by coloc.susie.
+        gwas_n = safe_int(gwas_meta.get("COLOC_GWAS_N")) or 0
 
         if "ld" not in locus_resources:
             ld_dir = locus_output_dir / "locus_ld"
@@ -2973,69 +2425,24 @@ def resource_status_table(
     allowed_types: set[str],
     catalogue_contexts: pd.DataFrame,
     custom_registry: pd.DataFrame,
-    step08: pd.DataFrame,
 ) -> pd.DataFrame:
     rows = []
-
     for qtl_type in SUPPORTED_QTL_TYPES:
         if qtl_type.lower() not in allowed_types:
             continue
-
-        catalog_n = (
-            int(
-                (
-                    catalogue_contexts["QTL_TYPE"].astype(str).str.lower()
-                    == qtl_type.lower()
-                ).sum()
-            )
-            if not catalogue_contexts.empty
-            else 0
-        )
-
-        custom_n = (
-            int(
-                (
-                    custom_registry["ENABLED_BOOL"]
-                    & (
-                        custom_registry["QTL_TYPE"].astype(str).str.lower()
-                        == qtl_type.lower()
-                    )
-                ).sum()
-            )
-            if not custom_registry.empty
-            else 0
-        )
-
-        step08_n = (
-            int(
-                (
-                    step08["QTL_TYPE"].astype(str).str.lower()
-                    == qtl_type.lower()
-                ).sum()
-            )
-            if not step08.empty
-            else 0
-        )
-
+        catalog_n = int((catalogue_contexts["QTL_TYPE"].astype(str).str.lower() == qtl_type.lower()).sum()) \
+            if not catalogue_contexts.empty else 0
+        custom_n = int((custom_registry["ENABLED_BOOL"]
+                        & (custom_registry["QTL_TYPE"].astype(str).str.lower() == qtl_type.lower())).sum()) \
+            if not custom_registry.empty else 0
         formal = catalog_n > 0 or custom_n > 0
-
         rows.append({
             "QTL_TYPE": qtl_type,
             "FORMAL_RESOURCE_AVAILABLE": formal,
             "N_EQTL_CATALOG_CONTEXTS": catalog_n,
             "N_CUSTOM_CONTEXTS": custom_n,
-            "N_STEP08_GTEX_OVERLAP_ROWS": step08_n,
-            "INTERPRETATION": (
-                "FORMAL_RESOURCE_AVAILABLE"
-                if formal
-                else (
-                    "STEP08_OVERLAP_ONLY_NO_FORMAL_RESOURCE"
-                    if step08_n > 0
-                    else "RESOURCE_NOT_CONFIGURED"
-                )
-            ),
+            "INTERPRETATION": "FORMAL_RESOURCE_AVAILABLE" if formal else "RESOURCE_NOT_CONFIGURED",
         })
-
     return pd.DataFrame(rows)
 
 
@@ -3092,7 +2499,6 @@ def build_locus_qtl_matrix(
     summary: pd.DataFrame,
     loci: list[str],
     resource_status: pd.DataFrame,
-    step08: pd.DataFrame,
     audit: pd.DataFrame,
     suggestive_pp4: float,
 ) -> pd.DataFrame:
@@ -3106,12 +2512,6 @@ def build_locus_qtl_matrix(
                     (summary["LOCUS_ID"].astype(str) == locus)
                     & (summary["QTL_TYPE"].astype(str).str.lower() == qtl_type.lower())
                 ] if not summary.empty else pd.DataFrame()
-            )
-            overlap = (
-                step08[
-                    (step08["LOCUS_ID"].astype(str) == locus)
-                    & (step08["QTL_TYPE"].astype(str).str.lower() == qtl_type.lower())
-                ] if not step08.empty else pd.DataFrame()
             )
             errors = (
                 audit[
@@ -3149,8 +2549,6 @@ def build_locus_qtl_matrix(
                 evidence = "CANDIDATE_NOT_FORMALLY_TESTED"
             elif len(errors) > 0:
                 evidence = "RESOURCE_ERROR"
-            elif len(overlap) > 0:
-                evidence = "STEP08_GTEX_V11_OVERLAP_ONLY"
             elif bool(rs["FORMAL_RESOURCE_AVAILABLE"]):
                 evidence = "NO_CANDIDATE_IN_CONFIGURED_RESOURCE"
             else:
@@ -3160,8 +2558,6 @@ def build_locus_qtl_matrix(
                 "LOCUS_ID": locus,
                 "QTL_TYPE": qtl_type,
                 "FORMAL_RESOURCE_AVAILABLE": bool(rs["FORMAL_RESOURCE_AVAILABLE"]),
-                "STEP08_GTEX_V11_OVERLAP": "YES" if len(overlap) > 0 else "NO",
-                "N_STEP08_OVERLAP_ROWS": len(overlap),
                 "N_RESOURCE_ERRORS": len(errors),
                 "N_CANDIDATES": len(local),
                 "N_FORMALLY_TESTED": tested,
@@ -3221,12 +2617,10 @@ def aggregate_study_outputs(
         result_files = sorted(locus_root.glob("L*/locus_formal_coloc.tsv"))
         audit_files = sorted(locus_root.glob("L*/locus_resource_audit.tsv"))
         resource_files = sorted(locus_root.glob("L*/resource_status.tsv"))
-        overlap_files = sorted(locus_root.glob("L*/step08_overlap.tsv"))
 
         candidates = _combine_tables(candidate_files)
         summary = _combine_tables(result_files)
         audit = _combine_tables(audit_files)
-        step08 = _combine_tables(overlap_files)
 
         if resource_files:
             resource_status = read_table(resource_files[0])
@@ -3241,10 +2635,6 @@ def aggregate_study_outputs(
             study_out / f"{accession}_formal_coloc_summary.tsv",
             sep="\t", index=False
         )
-        step08.to_csv(
-            study_out / f"{accession}_Step08_GTEx_v11_overlap.tsv",
-            sep="\t", index=False
-        )
         audit.to_csv(study_out / "resource_scan_audit.tsv", sep="\t", index=False)
         resource_status.to_csv(study_out / "resource_status.tsv", sep="\t", index=False)
 
@@ -3256,7 +2646,7 @@ def aggregate_study_outputs(
         loci = sorted(study_manifest["LOCUS_ID"].astype(str).unique()) if not study_manifest.empty else []
 
         matrix = build_locus_qtl_matrix(
-            summary, loci, resource_status, step08, audit, args.suggestive_pp4
+            summary, loci, resource_status, audit, args.suggestive_pp4
         ) if not resource_status.empty else pd.DataFrame()
         matrix.to_csv(
             study_out / f"{accession}_locus_qtl_matrix.tsv",
@@ -3278,8 +2668,8 @@ def aggregate_study_outputs(
         write_json(
             study_out / "coloc_summary.json",
             {
-                "STEP11_VERSION": STEP11_VERSION,
-                "METHOD": "LOCAL dense QTL + Step06 GWAS SuSiE reuse + QTL runsusie + coloc.susie",
+                "STEP09_VERSION": STEP09_VERSION,
+                "METHOD": "local dense QTL + Step06 GWAS SuSiE fit + QTL runsusie + coloc.susie",
                 "STUDY_ACCESSION": accession,
                 "PHENOTYPE": phenotype,
                 "N_LOCI_EXPECTED": len(loci),
@@ -3308,7 +2698,7 @@ def process_locus_task(root: Path, manifest_row: pd.Series, args) -> None:
 
     locus_meta = locus_out / "locus_summary.json"
     if not args.force and safe_json(locus_meta).get("STATUS") == "COMPLETE":
-        banner(f"STEP11 LOCUS ALREADY COMPLETE — {accession} {locus_id}")
+        banner(f"STEP09 LOCUS ALREADY COMPLETE — {accession} {locus_id}")
         aggregate_study_outputs(root, phenotype, ancestry_label, accession, args)
         return
 
@@ -3318,15 +2708,9 @@ def process_locus_task(root: Path, manifest_row: pd.Series, args) -> None:
     rscript = find_executable(root, args.rscript, "RSCRIPT", "Rscript")
     verify_r_packages(rscript)
 
-    # Normal analysis is strictly local-only.  --setup-resources is the only
-    # mode allowed to perform network downloads.
+    # Local files only (Step00_Download_Resources.py); nothing is downloaded.
     catalogue = load_eqtl_catalogue(root, False)
-    if catalogue.empty:
-        raise RuntimeError(
-            "Local eQTL-Catalogue manifests are missing. Run --setup-resources once, "
-            "then rerun normal analysis."
-        )
-    contexts = select_catalogue_contexts(catalogue, args, allowed_types)
+    contexts = select_catalogue_contexts(catalogue, args, allowed_types) if not catalogue.empty else catalogue
     contexts = resolve_catalogue_local_sources(root, contexts)
     if not contexts.empty:
         check_local_tabix_connectivity(tabix, contexts)
@@ -3334,22 +2718,18 @@ def process_locus_task(root: Path, manifest_row: pd.Series, args) -> None:
     custom_registry = ensure_custom_registry_files(
         root, load_custom_registry(root, args.registry), False
     )
-    step08_all = load_step08_overlap(paths["S08"], accession)
-    step08 = step08_all[step08_all["LOCUS_ID"].astype(str) == locus_id].copy() if not step08_all.empty else step08_all
     gwas_meta = load_gwas_metadata(paths["S06"], accession)
     gwas = load_gwas_locus(study_dir, locus_id)
 
-    banner(f"STEP11 LOCUS TASK — {accession} | {locus_id}")
+    banner(f"STEP09 LOCUS TASK — {accession} | {locus_id}")
     print(f"Phenotype      : {phenotype}")
     print(f"Ancestry       : {ancestry_label} ({ancestry_code})")
-    print(f"Catalogue ctx  : {len(contexts)}")
-    print(f"Step08 v11 rows: {len(step08)}")
+    print(f"GWAS           : {gwas_meta['PHENOTYPE_TYPE']}, N {gwas_meta['COLOC_GWAS_N']} [{gwas_meta['GWAS_N_SOURCE']}]")
+    print(f"QTL datasets   : {len(contexts)} eQTL Catalogue + "
+          f"{int(custom_registry['ENABLED_BOOL'].sum()) if not custom_registry.empty else 0} custom")
 
-    resource_status = resource_status_table(
-        allowed_types, contexts, custom_registry, step08
-    )
+    resource_status = resource_status_table(allowed_types, contexts, custom_registry)
     resource_status.to_csv(locus_out / "resource_status.tsv", sep="\t", index=False)
-    step08.to_csv(locus_out / "step08_overlap.tsv", sep="\t", index=False)
 
     candidates_frames = []
     audits = []
@@ -3419,7 +2799,7 @@ def process_locus_task(root: Path, manifest_row: pd.Series, args) -> None:
     write_json(
         locus_meta,
         {
-            "STEP11_VERSION": STEP11_VERSION,
+            "STEP09_VERSION": STEP09_VERSION,
             "STUDY_ACCESSION": accession,
             "LOCUS_ID": locus_id,
             "N_CANDIDATES": len(candidates),
@@ -3447,10 +2827,47 @@ def process_locus_task(root: Path, manifest_row: pd.Series, args) -> None:
     aggregate_study_outputs(root, phenotype, ancestry_label, accession, args)
 
 
-def planner_mode(root: Path, args) -> None:
-    if not args.phenotype or not args.ancestry:
-        raise SystemExit("--phenotype and --ancestry are required.")
+def study_for_index(root: Path, phenotype: str, ancestry_label: str, index: int) -> str:
+    """Accession of study N in the Step02 download manifest (the ARRAY_ID the
+    Step02 planner prints) - the same N in Steps 02, 05, 06, 07, 08 and 09."""
+    path = project_paths(root, phenotype, ancestry_label)["S02"] / "GWAS_download_manifest.tsv"
+    if not path.is_file():
+        raise SystemExit(f"No Step02 download manifest: {path}\nRun the Step02 planner first.")
+    manifest = pd.read_csv(path, sep="\t", dtype=str)
+    ids = pd.to_numeric(manifest["ARRAY_ID"], errors="coerce")
+    selected = manifest[ids == index]
+    if selected.empty:
+        listing = "\n".join(f"  {int(i):>3}  {a}" for i, a in zip(ids, manifest["STUDY_ACCESSION"]) if pd.notna(i))
+        raise SystemExit(f"--index {index} is not in {path}\nAvailable:\n{listing}")
+    return str(selected.iloc[0]["STUDY_ACCESSION"]).strip()
 
+
+def available_qtl_resources(root: Path, args) -> tuple[pd.DataFrame, pd.DataFrame]:
+    allowed = {v.strip().lower() for v in args.qtl_types.split(",") if v.strip()}
+    catalogue = load_eqtl_catalogue(root, False)
+    contexts = select_catalogue_contexts(catalogue, args, allowed) if not catalogue.empty else catalogue
+    contexts = resolve_catalogue_local_sources(root, contexts)
+    registry = ensure_custom_registry_files(root, load_custom_registry(root, args.registry), False)
+    return contexts, registry
+
+
+def passthrough_options(args) -> list[str]:
+    options = ["--registry", args.registry, "--qtl-types", args.qtl_types,
+               "--candidate-p", str(args.candidate_p), "--min-common-snps", str(args.min_common_snps),
+               "--max-common-snps", str(args.max_common_snps), "--strong-pp4", str(args.strong_pp4),
+               "--suggestive-pp4", str(args.suggestive_pp4),
+               "--max-candidates-per-context-locus", str(args.max_candidates_per_context_locus),
+               "--ld-maf", str(args.ld_maf), "--ld-mismatch-s", str(args.ld_mismatch_s)]
+    if args.catalog_all_studies:
+        options.append("--catalog-all-studies")
+    if args.catalog_study_regex:
+        options += ["--catalog-study-regex", args.catalog_study_regex]
+    if args.force:
+        options.append("--force")
+    return options
+
+
+def planner_mode(root: Path, args) -> None:
     phenotype = args.phenotype.strip()
     ancestry_code, ancestry_label = canonical_ancestry(args.ancestry)
     paths = project_paths(root, phenotype, ancestry_label)
@@ -3458,174 +2875,230 @@ def planner_mode(root: Path, args) -> None:
     if args.study:
         studies = [x for x in studies if x == args.study]
     if not studies:
-        raise RuntimeError(f"No eligible Step06 studies found under:\n  {paths['S06']}")
+        raise SystemExit(f"No fine-mapped studies under {paths['S06']} - run Step06 first.")
 
-    paths["OUT"].mkdir(parents=True, exist_ok=True)
-    paths["LOG"].mkdir(parents=True, exist_ok=True)
+    contexts, registry = available_qtl_resources(root, args)
+    n_custom = int(registry["ENABLED_BOOL"].sum()) if not registry.empty else 0
+    if contexts.empty and n_custom == 0:
+        raise SystemExit(
+            "No molecular-QTL data available locally. Download the eQTL Catalogue datasets with\n"
+            "  envs/pipeline/bin/python Step00_Download_Resources.py --groups eqtl_catalogue qtl_catalogue "
+            "--output Step00_Download_QTL.sh\n  sbatch Step00_Download_QTL.sh\n"
+            f"or enable datasets in {args.registry}"
+        )
 
     rows = []
-    study_ranges = {}
     for study_index, accession in enumerate(studies, start=1):
         loci = list_loci(paths["S06"] / accession)
-        start_task = len(rows) + 1
+        if not loci:
+            excluded.append({"STUDY_ACCESSION": accession, "STEP06_STATUS": "", "REASON": "no locus with a SuSiE fit"})
         for locus_id in loci:
-            rows.append({
-                "COLOC_TASK_ID": len(rows) + 1,
-                "STUDY_INDEX": study_index,
-                "STUDY_ACCESSION": accession,
-                "LOCUS_ID": locus_id,
-                "PHENOTYPE": phenotype,
-                "ANCESTRY_CODE": ancestry_code,
-                "ANCESTRY_LABEL": ancestry_label,
-            })
-        if loci:
-            study_ranges[study_index] = (accession, start_task, len(rows))
+            rows.append({"STUDY_INDEX": study_index, "STUDY_ACCESSION": accession, "LOCUS_ID": locus_id,
+                         "PHENOTYPE": phenotype, "ANCESTRY_CODE": ancestry_code, "ANCESTRY_LABEL": ancestry_label})
+    if not rows:
+        raise SystemExit("No fine-mapped loci with a SuSiE fit (see Step06 --status).")
 
+    n_tasks = min(len(rows), MAX_ARRAY_TASKS)
     manifest = pd.DataFrame(rows)
-    if manifest.empty:
-        raise RuntimeError("No eligible Step06 loci found.")
+    manifest.insert(0, "COLOC_TASK_ID", [i % n_tasks + 1 for i in range(len(rows))])
+    paths["OUT"].mkdir(parents=True, exist_ok=True)
+    paths["LOG"].mkdir(parents=True, exist_ok=True)
     manifest_file = paths["OUT"] / "coloc_manifest.tsv"
     manifest.to_csv(manifest_file, sep="\t", index=False)
-    pd.DataFrame(excluded, columns=["STUDY_ACCESSION","STEP06_STATUS","REASON"]).to_csv(
-        paths["OUT"] / "coloc_excluded_studies.tsv", sep="\t", index=False
-    )
+    pd.DataFrame(excluded, columns=["STUDY_ACCESSION", "STEP06_STATUS", "REASON"]).to_csv(
+        paths["OUT"] / "coloc_excluded_studies.tsv", sep="\t", index=False)
 
-    pipeline_python = root / "envs" / "pipeline" / "bin" / "python"
-    if not pipeline_python.exists():
-        pipeline_python = Path(sys.executable).resolve()
-    script_path = Path(__file__).resolve()
-    bash_file = root / f"Step11_Formal_Coloc_{slugify(phenotype)}_{slugify(ancestry_label)}.sh"
-
-    throttle = f"%{args.max_parallel}" if args.max_parallel and args.max_parallel > 0 else ""
-    array_spec = f"1-{len(manifest)}{throttle}"
-    extra = [
-        f"--phenotype {shlex.quote(phenotype)}",
-        f"--ancestry {shlex.quote(ancestry_code)}",
-        f"--registry {shlex.quote(args.registry)}",
-        f"--qtl-types {shlex.quote(args.qtl_types)}",
-        f"--candidate-p {args.candidate_p}",
-        f"--min-common-snps {args.min_common_snps}",
-        f"--max-common-snps {args.max_common_snps}",
-        f"--strong-pp4 {args.strong_pp4}",
-        f"--suggestive-pp4 {args.suggestive_pp4}",
-        f"--max-candidates-per-context-locus {args.max_candidates_per_context_locus}",
-        f"--cpus {args.cpus}",
-        f"--max-parallel {args.max_parallel}",
-        f"--ld-maf {args.ld_maf}",
-        f"--ld-mismatch-s {args.ld_mismatch_s}",
-    ]
-    if args.catalog_all_studies:
-        extra.append("--catalog-all-studies")
-    if args.catalog_study_regex:
-        extra.append(f"--catalog-study-regex {shlex.quote(args.catalog_study_regex)}")
-    if args.no_auto_download:
-        extra.append("--no-auto-download")
-    if args.force:
-        extra.append("--force")
-
-    bash_text = f"""#!/bin/bash
-#SBATCH --job-name=FColoc_{slugify(phenotype)[:28]}
-#SBATCH --nodes=1
-{chr(10).join(gwas2m_config.site_directives(args.slurm_resources))}
-#SBATCH --time={args.time}
-#SBATCH --mem={args.memory}
-#SBATCH --cpus-per-task={args.cpus}
-#SBATCH --ntasks=1
-#SBATCH --array={array_spec}
-#SBATCH --output={paths['LOG']}/coloc.%A_%a.out
-#SBATCH --error={paths['LOG']}/coloc.%A_%a.err
+    array = (f"1-{n_tasks}" if n_tasks > 1 else "1") + (f"%{args.max_parallel}" if args.max_parallel else "")
+    directives = {**args.slurm_values, "job-name": f"COLOC_{slugify(phenotype)}_{ancestry_code.lower()}"[:100],
+                  "array": array, "output": f"{paths['LOG']}/coloc.%A_%a.out",
+                  "error": f"{paths['LOG']}/coloc.%A_%a.err"}
+    order = ["job-name", "account", "partition", "qos", "nodes", "ntasks", "cpus-per-task", "mem", "time",
+             "array", "output", "error"]
+    header = "\n".join(f"#SBATCH --{k}={directives[k]}" for k in order if directives.get(k))
+    header += "".join(f"\n#SBATCH --{k}={v}" for k, v in directives.items() if k not in order and v)
+    python = root / "envs" / "pipeline" / "bin" / "python"
+    if not python.exists():
+        python = Path(sys.executable).resolve()
+    command = [str(python), str(Path(__file__).resolve()), "--phenotype", phenotype, "--ancestry", ancestry_code,
+               "--worker-manifest", str(manifest_file)] + passthrough_options(args)
+    bash_file = root / f"Step09_Coloc_{slugify(phenotype)}_{slugify(ancestry_label)}.sh"
+    bash_file.write_text(f"""#!/bin/bash --login
+{header}
 
 set -euo pipefail
 cd {shlex.quote(str(root))}
-export GWAS_FORMAL_COLOC_MANIFEST={shlex.quote(str(manifest_file))}
+export PATH={shlex.quote(str(root / 'envs' / 'pipeline' / 'bin'))}:"$PATH"
+export OMP_NUM_THREADS="${{SLURM_CPUS_PER_TASK:-{args.cpus}}}"
 
-{shlex.quote(str(pipeline_python))} \\
-    {shlex.quote(str(script_path))} \\
-    {' '.join(extra)}
-"""
-    bash_file.write_text(bash_text, encoding="utf-8")
+{' '.join(shlex.quote(x) for x in command)}
+""", encoding="utf-8", newline="\n")
     bash_file.chmod(0o755)
 
-    banner("STEP11 FORMAL COLOCALIZATION PLANNER — ONE ARRAY TASK PER LOCUS")
+    banner("STEP 09 COLOCALISATION PLANNER - ONE ARRAY TASK PER LOCUS")
     print(f"Phenotype       : {phenotype}")
     print(f"Ancestry        : {ancestry_label} ({ancestry_code})")
-    print(f"Studies         : {len(studies)}")
-    print(f"Locus tasks     : {len(manifest)}")
-    print(f"Array           : {array_spec}")
-    print("Catalogue I/O   : LOCAL tabix only; no remote access; no LBF downloads")
-    print("Tissue policy   : ALL configured tissues/contexts")
+    print(f"Studies         : {len(studies)}  ({len(excluded)} excluded, see coloc_excluded_studies.tsv)")
+    print(f"Locus tasks     : {len(manifest)}  -> array {array}"
+          + (f"  ({len(manifest) / n_tasks:.1f} loci per task)" if len(manifest) > n_tasks else ""))
+    print(f"QTL datasets    : {len(contexts)} eQTL Catalogue (downloaded) + {n_custom} custom")
     print()
-    print(manifest.to_string(index=False))
-    print()
-    if 1 in study_ranges:
-        accession, first, last = study_ranges[1]
-        first_spec = f"{first}-{last}"
-        if args.max_parallel and args.max_parallel > 0:
-            first_spec += f"%{args.max_parallel}"
-        print(f"FIRST GWAS ({accession}) ALL LOCI:")
-        print(f"  sbatch --array={first_spec} {bash_file.name}")
-        print()
-    print(f"ALL STUDIES/LOCI:\n  sbatch {bash_file.name}")
+    per_study = manifest.groupby("STUDY_ACCESSION")["COLOC_TASK_ID"].agg(["min", "max", "size"])
+    for accession, r in per_study.iterrows():
+        print(f"  {accession:<15} {int(r['size']):>4} loci   tasks {int(r['min'])}-{int(r['max'])}")
+    print(f"\nManifest: {manifest_file}\n\nRUN ALL LOCI:\n  sbatch {bash_file.name}")
+    if len(manifest) <= n_tasks and len(per_study) > 1:
+        accession, r = next(iter(per_study.iterrows()))
+        print(f"ONLY {accession}:\n  sbatch --array={int(r['min'])}-{int(r['max'])} {bash_file.name}")
+    base = f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(phenotype)} --ancestry {ancestry_code}"
+    print(f"THEN:\n  {base} --status\n  {base} --stats")
 
 
-def direct_index_mode(root: Path, args) -> None:
-    phenotype = args.phenotype.strip()
-    _, ancestry_label = canonical_ancestry(args.ancestry)
-    paths = project_paths(root, phenotype, ancestry_label)
-    manifest_file = paths["OUT"] / "coloc_manifest.tsv"
-    if not manifest_file.exists():
-        planner_mode(root, args)
-    manifest = pd.read_csv(manifest_file, sep="\t", dtype=str)
-    ids = pd.to_numeric(manifest["COLOC_TASK_ID"], errors="coerce")
-    selected = manifest[ids == args.index]
-    if len(selected) != 1:
-        raise RuntimeError(f"Expected one locus task for index {args.index}; found {len(selected)}")
-    process_locus_task(root, selected.iloc[0], args)
+def run_locus(root: Path, row: pd.Series, args) -> bool:
+    try:
+        process_locus_task(root, row, args)
+        return True
+    except Exception as exc:
+        paths = project_paths(root, str(row["PHENOTYPE"]), str(row["ANCESTRY_LABEL"]))
+        out = paths["OUT"] / str(row["STUDY_ACCESSION"]) / "loci" / str(row["LOCUS_ID"])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "LOCUS_FAILED.txt").write_text(f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}",
+                                              encoding="utf-8")
+        print(f"[FAILED] {row['STUDY_ACCESSION']} {row['LOCUS_ID']}: {exc}", file=sys.stderr)
+        return False
 
 
 def worker_mode(root: Path, args) -> None:
-    manifest_value = os.environ.get("GWAS_FORMAL_COLOC_MANIFEST")
-    task_value = os.environ.get("SLURM_ARRAY_TASK_ID")
-    if not manifest_value or not task_value:
-        raise RuntimeError("GWAS_FORMAL_COLOC_MANIFEST and SLURM_ARRAY_TASK_ID are required")
-    manifest = pd.read_csv(manifest_value, sep="\t", dtype=str)
-    ids = pd.to_numeric(manifest["COLOC_TASK_ID"], errors="coerce")
-    selected = manifest[ids == int(task_value)]
-    if len(selected) != 1:
-        raise RuntimeError(f"Expected one locus task for {task_value}; found {len(selected)}")
-    process_locus_task(root, selected.iloc[0], args)
+    task = int(os.environ.get("SLURM_ARRAY_TASK_ID", "1"))
+    args.cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", args.cpus))
+    manifest = pd.read_csv(args.worker_manifest, sep="\t", dtype=str)
+    selected = manifest[pd.to_numeric(manifest["COLOC_TASK_ID"], errors="coerce") == task]
+    if selected.empty:
+        raise SystemExit(f"No manifest rows for array task {task}")
+    failed = [f"{r['STUDY_ACCESSION']} {r['LOCUS_ID']}" for _, r in selected.iterrows() if not run_locus(root, r, args)]
+    if failed:
+        raise SystemExit("Colocalisation failed for: " + ", ".join(failed))
+
+
+def index_mode(root: Path, args) -> None:
+    phenotype = args.phenotype.strip()
+    ancestry_code, ancestry_label = canonical_ancestry(args.ancestry)
+    paths = project_paths(root, phenotype, ancestry_label)
+    accession = study_for_index(root, phenotype, ancestry_label, args.index)
+    loci = list_loci(paths["S06"] / accession)
+    if not loci:
+        raise SystemExit(
+            f"Study {args.index} ({accession}) has no fine-mapped locus with a SuSiE fit. Run:\n"
+            f"  envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype {shlex.quote(phenotype)} "
+            f"--ancestry {ancestry_code} --index {args.index}")
+    if args.locus:
+        if args.locus not in loci:
+            raise SystemExit(f"{args.locus} is not a fine-mapped locus of {accession}: {', '.join(loci)}")
+        loci = [args.locus]
+    args.cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", args.cpus))
+    failed = []
+    for locus_id in loci:
+        row = pd.Series({"STUDY_ACCESSION": accession, "LOCUS_ID": locus_id, "PHENOTYPE": phenotype,
+                         "ANCESTRY_CODE": ancestry_code, "ANCESTRY_LABEL": ancestry_label})
+        if not run_locus(root, row, args):
+            failed.append(locus_id)
+    if failed:
+        raise SystemExit(f"{accession}: colocalisation failed for {', '.join(failed)}")
+
+
+def check_resources_mode(root: Path, args) -> None:
+    banner("STEP 09 - MOLECULAR-QTL RESOURCES (local)")
+    contexts, registry = available_qtl_resources(root, args)
+    if not contexts.empty:
+        counts = contexts.groupby(["study_label", "QTL_TYPE"]).size().reset_index(name="DATASETS")
+        print(counts.to_string(index=False))
+    n_custom = int(registry["ENABLED_BOOL"].sum()) if not registry.empty else 0
+    print(f"\nCustom registry ({args.registry}): {n_custom} enabled datasets")
+    _, ancestry_label = canonical_ancestry(args.ancestry)
+    code = canonical_ancestry(args.ancestry)[0]
+    panels = all(Path(str(reference_prefix(root, code, c)) + ".pgen").exists() for c in range(1, 23))
+    print(f"1000G {code} LD panels (Step04): {'OK' if panels else 'MISSING - run Step04'}")
+    try:
+        rscript = find_executable(root, args.rscript, "RSCRIPT", "Rscript")
+        print("R coloc / susieR: " + ", ".join(f"{k} {v}" for k, v in verify_r_packages(rscript).items()))
+    except Exception as exc:
+        print(f"R coloc / susieR: MISSING ({exc})")
+
+
+def status_mode(root: Path, args) -> None:
+    phenotype = args.phenotype.strip()
+    _, ancestry_label = canonical_ancestry(args.ancestry)
+    paths = project_paths(root, phenotype, ancestry_label)
+    studies, _ = discover_step06_studies(paths["S06"])
+    banner(f"STEP 09 STATUS - {phenotype} / {ancestry_label}")
+    print(f"{'STUDY':<15}{'LOCI':>6}{'DONE':>6}{'FAILED':>8}{'PENDING':>9}{'TESTS':>7}{'STRONG':>8}")
+    totals = {"DONE": 0, "FAILED": 0, "PENDING": 0}
+    for accession in studies:
+        loci = list_loci(paths["S06"] / accession)
+        done = failed = 0
+        for locus in loci:
+            d = paths["OUT"] / accession / "loci" / locus
+            if (d / "locus_summary.json").exists():
+                done += 1
+            elif (d / "LOCUS_FAILED.txt").exists():
+                failed += 1
+        summary = safe_json(paths["OUT"] / accession / "coloc_summary.json")
+        pending = len(loci) - done - failed
+        totals["DONE"] += done
+        totals["FAILED"] += failed
+        totals["PENDING"] += pending
+        print(f"{accession:<15}{len(loci):>6}{done:>6}{failed:>8}{pending:>9}"
+              f"{summary.get('N_TESTS', 0):>7}{summary.get('N_STRONG', 0):>8}")
+    print("\nLoci    : " + "  ".join(f"{k}={v}" for k, v in totals.items()))
+
+
+def stats_mode(root: Path, args) -> None:
+    phenotype = args.phenotype.strip()
+    _, ancestry_label = canonical_ancestry(args.ancestry)
+    paths = project_paths(root, phenotype, ancestry_label)
+    banner(f"STEP 09 COLOCALISATION RESULTS - {phenotype} / {ancestry_label}")
+    rows = []
+    for d in sorted(p for p in paths["OUT"].iterdir() if p.is_dir()) if paths["OUT"].exists() else []:
+        summary = read_table(d / f"{d.name}_formal_coloc_summary.tsv")
+        if summary.empty:
+            continue
+        tested = summary[summary["COLOC_TESTED"].astype(str) == "YES"]
+        strong = tested[tested["COLOCALIZED_STRONG"].astype(str) == "YES"]
+        robust = tested[tested.get("PRIOR_ROBUST_STRONG", pd.Series(dtype=str)).astype(str) == "YES"]
+        rows.append({"STUDY_ACCESSION": d.name, "N_LOCI": summary["LOCUS_ID"].nunique(),
+                     "N_CANDIDATE_TRAITS": len(summary), "N_TESTED": len(tested), "N_STRONG": len(strong),
+                     "N_PRIOR_ROBUST_STRONG": len(robust),
+                     "N_LOCI_WITH_STRONG": strong["LOCUS_ID"].nunique() if len(strong) else 0,
+                     "N_LD_MISMATCH_WARNINGS": int((tested.get("LD_MISMATCH_WARNING", pd.Series(dtype=str))
+                                                    .astype(str) == "YES").sum())})
+        print(f"\n{d.name}: {len(tested)} tests in {summary['LOCUS_ID'].nunique()} loci; "
+              f"{len(strong)} strong (PP.H4>={args.strong_pp4}), {len(robust)} robust to the low p12 prior")
+        top = tested.assign(_H4=numeric(tested["MAX_PP_H4"])).sort_values("_H4", ascending=False).head(10)
+        for _, r in top.iterrows():
+            print(f"   {r['LOCUS_ID']} {r['QTL_TYPE']:<7} {str(r['TISSUE'])[:30]:<30} {r['GENE_ID'] or r['MOLECULAR_TRAIT_ID']}"
+                  f"  PP.H4 {r['_H4']:.3f}  {r['COLOC_CLASS']}"
+                  + ("  [LD mismatch]" if str(r.get("LD_MISMATCH_WARNING", "")) == "YES" else ""))
+    if not rows:
+        print("No colocalisation results yet (see --status).")
+        return
+    output = paths["OUT"] / "coloc_stats.tsv"
+    pd.DataFrame(rows).to_csv(output, sep="\t", index=False)
+    print(f"\nTable: {output}")
 
 
 def main() -> None:
     args = arguments()
-    root = Path.cwd().resolve()
-
-    if args.setup_resources:
-        setup_public_resources(
-            root,
-            include_large_gtex=args.setup_full_gtex,
-            force=args.force_download,
-        )
-        return
-
+    root = PROJECT_ROOT
     write_custom_registry_template(root)
-    if not args.phenotype or not args.ancestry:
-        raise SystemExit("--phenotype and --ancestry are required unless --setup-resources is used.")
-    if args.index is not None and args.index < 1:
-        raise SystemExit("--index must be >=1")
-    if args.cpus < 1:
-        raise SystemExit("--cpus must be >=1")
-    if args.max_parallel < 0:
-        raise SystemExit("--max-parallel must be >=0")
-    if args.remote_delay < 0:
-        raise SystemExit("--remote-delay must be >=0")
-    if args.max_common_snps < args.min_common_snps:
-        raise SystemExit("--max-common-snps must be >= --min-common-snps")
-
-    if os.environ.get("SLURM_ARRAY_TASK_ID") and os.environ.get("GWAS_FORMAL_COLOC_MANIFEST"):
+    if args.check_resources:
+        check_resources_mode(root, args)
+    elif args.status:
+        status_mode(root, args)
+    elif args.stats:
+        stats_mode(root, args)
+    elif args.worker_manifest:
         worker_mode(root, args)
     elif args.index is not None:
-        direct_index_mode(root, args)
+        index_mode(root, args)
     else:
         planner_mode(root, args)
 

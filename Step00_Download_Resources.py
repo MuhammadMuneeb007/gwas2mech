@@ -60,10 +60,10 @@ Resource groups (--groups / --skip-groups); sizes are approximate downloads:
                       setup_manifests/eqtl_catalogue_datasets.txt
   opentargets         Open Targets Platform study / credible_set /
                       l2g_prediction / colocalisation (one task per parquet)  ~19 GB
-  qtl_catalogue       eQTL Catalogue dense .tsv.gz + .tbi for the Step11
+  qtl_catalogue       eQTL Catalogue dense .tsv.gz + .tbi for the Step09
                       contexts (GTEx v8 eQTL / exonQTL / isoQTL / sQTL
                       (leafcutter) + Sun_2018 pQTL)                           ~320 GB
-  qtl_celltype        Setup_11B contexts: Jerber_2021 cell-type eQTL,
+  qtl_celltype        Jerber_2021 cell-type eQTL,
                       dense + .tbi + SuSiE lbf / credible sets                ~62 GB
   molecular_qtl       ADSP FunGen xQTL brain pQTL / sQTL / haQTL (NIAGADS
                       NG00184, GRCh38) + Kumasaka caQTL (GRCh38), MD5-checked ~230 GB
@@ -72,11 +72,11 @@ Resource groups (--groups / --skip-groups); sizes are approximate downloads:
                       gnomAD v4.1 constraint, UCSC liftover chains, phyloP    ~11 GB
   cadd                CADD v1.7 GRCh38 SNVs + gnomAD4 indels (+ .tbi)         ~89 GB
   Only when named in --groups:
-  qtl_catalogue_susie eQTL Catalogue SuSiE lbf / cs for the Step11 contexts   ~316 GB
+  qtl_catalogue_susie eQTL Catalogue SuSiE lbf / cs for the Step09 contexts   ~316 GB
   adsp_eqtl           ADSP FunGen brain bulk eQTL + single-nucleus eQTL       ~720 GB
 
 Layouts match the pipeline: dense QTL files under
-resources/coloc/eqtl_catalogue/dense/<dataset_id>/ (as Step11 / Setup_11B
+resources/coloc/eqtl_catalogue/dense/<dataset_id>/ (as Step09
 expect), other molecular QTL under resources/molecular_qtl/<type>/<source>/,
 annotation under resources/annotation/<source>/.
 
@@ -236,15 +236,17 @@ parser.add_argument("--finalize", action="store_true",
                     help="Verify the planned files, write the report and Open Targets markers; plan nothing.")
 parser.add_argument("--status", action="store_true",
                     help="READ-ONLY: how many planned files are downloaded / partial / missing, per group.")
-# eQTL Catalogue selections (same defaults as Step11 / Setup_11B)
+# eQTL Catalogue selections (same defaults as Step09)
 parser.add_argument("--catalogue-study-regex", default="",
-                    help="qtl_catalogue: study_label regex (default: Step11's GTEx-labelled + Sun_2018).")
+                    help="qtl_catalogue: study_label regex (default: Step09's GTEx-labelled + Sun_2018).")
+parser.add_argument("--catalogue-tissue-regex", default="",
+                    help="qtl_catalogue: only datasets whose tissue / sample group matches, e.g. 'brain'.")
 parser.add_argument("--catalogue-all-studies", action="store_true",
                     help="qtl_catalogue: every catalogue study (very large).")
 parser.add_argument("--catalogue-qtl-types", default="eQTL,sQTL,isoQTL,exonQTL,pQTL,apaQTL",
-                    help="qtl_catalogue: QTL classes to include (default: all Step11 classes).")
+                    help="qtl_catalogue: QTL classes to include (default: all Step09 classes).")
 parser.add_argument("--celltype-study-regex", default=r"^Jerber_2021$",
-                    help="qtl_celltype: study_label regex (default: Setup_11B's ^Jerber_2021$).")
+                    help="qtl_celltype: study_label regex (default: ^Jerber_2021$).")
 parser.add_argument("--celltype-qtl-types", default="eQTL",
                     help="qtl_celltype: QTL classes to include (default eQTL).")
 args = parser.parse_args()
@@ -394,7 +396,7 @@ def static_items(notes: list[str]) -> list[dict]:
         ("GTEX_SQTL", "bulk-qtl/v11/single-tissue-cis-qtl/GTEx_Analysis_v11_sQTL.tar", "qtl", "sQTL"),
         ("GTEX_EQTL_SUSIE", "bulk-qtl/v11/susie-qtl/GTEx_Analysis_v11_eQTL_SuSiE.tar", "susie", "eQTL_SuSiE"),
         ("GTEX_SQTL_SUSIE", "bulk-qtl/v11/susie-qtl/GTEx_Analysis_v11_sQTL_SuSiE.tar", "susie", "sQTL_SuSiE"),
-        # alternative polyadenylation QTL (read by Step11)
+        # alternative polyadenylation QTL (read by Step09)
         ("GTEX_APAQTL", "bulk-qtl/v11/single-tissue-cis-qtl/GTEx_Analysis_v11_apaQTL.tar", "qtl", "apaQTL"),
         ("GTEX_APAQTL_SUSIE", "bulk-qtl/v11/susie-qtl/GTEx_Analysis_v11_apaQTL_SuSiE.tar", "susie", "apaQTL_SuSiE"),
     ]:
@@ -564,13 +566,13 @@ def opentargets_items() -> list[dict]:
 
 # -----------------------------------------------------------------------------
 # eQTL Catalogue dense summary statistics for colocalisation
-#   Layout read by Step11 / Setup_11B:
+#   Layout read by Step09:
 #     resources/coloc/eqtl_catalogue/dense/<dataset_id>/<file>.tsv.gz (+ .tbi)
 #     resources/coloc/eqtl_catalogue/susie_provider/<dataset_id>/<lbf|cs file>
 # -----------------------------------------------------------------------------
 
 def quant_method_to_qtl_type(value: str) -> str | None:
-    """Same mapping as Step11."""
+    """Same mapping as Step09."""
     q = re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
     if q in {"ge", "gene expression", "gene", "microarray"}:
         return "eQTL"
@@ -600,6 +602,8 @@ def catalogue_rows() -> list[dict]:
                 "ftp_path": r.get("ftp_path") or r.get("sumstats_path", ""),
                 "ftp_lbf_path": r.get("ftp_lbf_path", ""),
                 "ftp_cs_path": r.get("ftp_cs_path", ""),
+                "tissue": " ".join(x for x in (r.get("tissue_label", ""), r.get("sample_group", ""),
+                                               r.get("qtl_group", "")) if x),
             }
             row["qtl_type"] = quant_method_to_qtl_type(row["quant_method"])
             if row["ftp_path"] and row["qtl_type"]:
@@ -650,10 +654,13 @@ def catalogue_qtl_items() -> list[dict]:
         if args.catalogue_study_regex:
             pattern = re.compile(args.catalogue_study_regex, flags=re.I)
             selected = [r for r in selected if pattern.search(r["study_label"])]
-        elif not args.catalogue_all_studies:      # Step11 default contexts
+        elif not args.catalogue_all_studies:      # Step09 default contexts
             selected = [r for r in selected
                         if "gtex" in r["study_label"].lower() or r["study_label"].lower() == "sun_2018"]
-        summarise("eQTL Catalogue (Step11 contexts)", selected)
+        if args.catalogue_tissue_regex:
+            tissue = re.compile(args.catalogue_tissue_regex, flags=re.I)
+            selected = [r for r in selected if tissue.search(r.get("tissue", ""))]
+        summarise("eQTL Catalogue (Step09 contexts)", selected)
         for r in selected:
             if "qtl_catalogue" in wanted:
                 items += dense_items(r, "qtl_catalogue")
@@ -664,7 +671,7 @@ def catalogue_qtl_items() -> list[dict]:
         pattern = re.compile(args.celltype_study_regex, flags=re.I)
         types = {t.strip().lower() for t in args.celltype_qtl_types.split(",") if t.strip()}
         selected = [r for r in rows if pattern.search(r["study_label"]) and r["qtl_type"].lower() in types]
-        summarise("eQTL Catalogue (cell-type, Setup_11B contexts)", selected)
+        summarise("eQTL Catalogue (cell-type contexts)", selected)
         for r in selected:
             items += dense_items(r, "qtl_celltype") + provider_items(r, "qtl_celltype")
     return items
