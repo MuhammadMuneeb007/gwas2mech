@@ -21,10 +21,7 @@ python Step00_Installation.py --verify-only
 # 2. Shared reference data: one SLURM array task per file (max 1000 queued jobs)
 python Step00_Download_Resources.py        # plans what is missing, writes the job script
 sbatch Step00_Download_Resources.sh        # or without SLURM: bash Step00_Download_Resources.sh local 4
-
-# 3. Derived resources (1000G PGEN panels, Pangolin DB) and a full status report
-python Step00_Check_Resources.py --resources-only
-python Step00_Check_Resources.py --inspect
+python Step00_Download_Resources.py --finalize   # re-check every file + report
 ```
 
 ## Software installed by `Step00_Installation.py`
@@ -46,6 +43,6 @@ GTEx v11 eQTL/sQTL (+ SuSiE), eQTL Catalogue metadata, Open Targets Platform 26.
 
 ## Configuration
 
-- SLURM settings: `config/slurm.yaml` (see `gwas2m_config.py`), else the `#SBATCH`
-  header of `HPC_CPU.sh`; every script also accepts command-line overrides.
-- Resource registry and validation rules: `gwas2m_resources.py`.
+- SLURM settings: the `#SBATCH` header of `HPC_CPU.sh` (partition, qos, account, time);
+  `Step00_Download_Resources.py` also accepts `--partition`, `--qos`, `--account`,
+  `--cpus`, `--mem`, `--time`, `--max-jobs` and `--parallel`.
