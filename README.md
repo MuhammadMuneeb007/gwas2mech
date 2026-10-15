@@ -199,13 +199,36 @@ envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py --full     # 
 `Step02_Plan_QC_GWAS.py` works for any phenotype. It searches the GWAS Catalog for the phenotype
 as given (plus any `--alias`), keeps studies with full summary statistics, a strict ancestry
 match and a harmonised file, and ranks them by sample size. For every study it also records
-whether the phenotype is **Binary (cases/controls) or Continuous**, with the number of cases
-and controls, the case fraction and the effective sample size. These come from the
-summary-statistics metadata (`-meta.yaml`, `case_control_study`) and the GWAS Catalog REST API,
-because fine-mapping and colocalisation differ (SuSiE-RSS / coloc `type="cc"` with case fraction
-`s`, versus `type="quant"`). The type is decided **per study**, not per disease: a depression
-diagnosis GWAS is Binary, a depression symptom score GWAS is Continuous. `--phenotype-type
-binary|continuous` overrides the automatic decision.
+whether the phenotype is **Binary (cases/controls) or Continuous**, because fine-mapping and
+colocalisation differ (SuSiE-RSS / coloc `type="cc"` with case fraction `s`, versus
+`type="quant"`). The type is decided **per study**, not per disease: a depression diagnosis GWAS is
+Binary, a depression symptom score GWAS is Continuous. The evidence, strongest first:
+
+| Evidence | Source | Points to |
+|---|---|---|
+| `case_control_study` true / false | summary-statistics `-meta.yaml` (GWAS-SSF) | Binary / Continuous (strong) |
+| separate numbers of cases **and** controls | `-meta.yaml`, GWAS Catalog API sample description | Binary (strong) |
+| odds ratios | `-meta.yaml` `effect_statistic`, first rows of the harmonised file | Binary (moderate) |
+| sample described without cases/controls | GWAS Catalog API / table | Continuous (weak) |
+| beta only, and no cases/controls reported | file / `-meta.yaml` | Continuous (weak); beta alone can be log-odds |
+| measurement wording (`measurement`, `levels`, `score`, `age at`, ...) | trait / EFO terms | Continuous (weak) |
+
+Strong evidence, or two agreeing weak ones, decides. **Conflicting or insufficient evidence gives
+`Unknown` with `NEEDS_REVIEW=True`; it is never guessed.** Flagged studies are listed in
+`01_gwas_catalog/<phenotype>/<ancestry>/phenotype_type_review.tsv` with the trait, sample
+description, PMID, DOI and evidence. Fill `VERIFIED_PHENOTYPE_TYPE` (`Binary` / `Continuous`;
+optionally `VERIFIED_N_CASES`, `VERIFIED_N_CONTROLS`) after reading the paper and re-run with `--qc`;
+your verdicts are kept on every re-run. `--phenotype-type binary|continuous` forces one type for
+all studies.
+
+Every study gets `PHENOTYPE_TYPE`, `N_CASES`, `N_CONTROLS`, `N_TOTAL`, `N_EFF`, `EFFECT_TYPE`,
+`EFFECT_REPORTED`, `CLASSIFICATION_SOURCE`, `CLASSIFICATION_CONFIDENCE` (high / moderate /
+conflicting / insufficient / verified / user), `NEEDS_REVIEW`, `CLASSIFICATION_EVIDENCE`, and the
+publication `PUBMEDID` and `DOI` (PMID converted with Europe PMC, NCBI E-utilities as fallback;
+cached in `reference_metadata/gwas_catalog/pmid_doi.json`).
+
+Missing Python packages (pandas, numpy, requests, PyYAML; scipy and gwaslab 4.2.3 for QC) are
+installed automatically into the Python that runs the script, i.e. `envs/pipeline`.
 
 ```bash
 # 1. discover + download (one light array task per GWAS)
@@ -223,6 +246,9 @@ envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry 
 # N, cases, controls, case fraction, N_eff, population, countries, cohorts, platform,
 # imputed, variants raw / after QC, file columns, genome-wide hits, minimum P, lambda GC
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --stats
+
+# PubMed ID -> DOI only
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --pmid-to-doi 34737426 33987465
 
 # one QC task directly on this machine
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --index 1
@@ -269,11 +295,76 @@ The study metadata is in `qc/<GCST>/<GCST>_study_metadata.tsv` (and `.json`), an
 | `GENOME_BUILD` | `GRCh38` (harmonised files) |
 | `EFFECT_TYPE` | `log(OR)` for binary, `BETA` for continuous |
 
-Provenance columns follow (`CASE_FRACTION`, `PHENOTYPE_TYPE_SOURCE`, `N_SOURCE`, `QC_STATUS`,
-`LD_REFERENCE`). Both `N_TOTAL` and `N_EFF` are kept; each fine-mapping method chooses which one
-it uses. The LD matrix must come from the ancestry-matched panel in `LD_REFERENCE`
-(`04_ld_reference/1000G_<ANCESTRY>_GRCh38`, Step04), with the same variants, order and allele
-orientation as the GWAS.
+Provenance columns follow (`CASE_FRACTION`, `EFFECT_REPORTED`, `CLASSIFICATION_SOURCE`,
+`CLASSIFICATION_CONFIDENCE`, `NEEDS_REVIEW`, `CLASSIFICATION_EVIDENCE`, `PMID`, `DOI`, `N_SOURCE`,
+`QC_STATUS`, `LD_REFERENCE`). Step06 skips studies with `PHENOTYPE_TYPE=Unknown` or
+`NEEDS_REVIEW=True`. Both `N_TOTAL` and `N_EFF` are kept; each fine-mapping method chooses which one
+it uses. The LD matrix comes from the ancestry-matched panel in `LD_REFERENCE`
+(`resources/1000G/<ANCESTRY>`, Step04), with the same variants, order and allele orientation as
+the GWAS (Step06). Studies whose sample includes **proxy cases** (family history, GWAX) are flagged
+for review: their effects are attenuated and N_EFF is only approximate.
+
+## 5. LD reference panels (Step04)
+
+Ancestry-specific PLINK2 panels from the 1000 Genomes GRCh38 (2019) VCFs downloaded by
+`--groups 1000g`. They are shared by all phenotypes and built once per ancestry into
+`resources/1000G/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam`.
+
+```bash
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR       # or: EUR EAS / all
+sbatch Step04_Prepare_1000G_EUR_GRCh38.sh
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --status
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --stats  # people per population, variants
+```
+
+## 6. LD clumping (Step05)
+
+Independent lead variants per study with PLINK2 `--clump` (p1 5e-8, p2 1e-2, r2 0.1, 1000 kb)
+on the ancestry-matched panel. GWAS variants are matched to the panel by chromosome, GRCh38
+position **and both alleles**; a different variant at the same position is never used.
+
+```bash
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR
+sbatch Step05_Clump_GWAS_migraine_european.sh
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --status
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --stats   # leads, loci, mapping, lost GWS variants
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --plots   # Manhattan, QQ, chromosome locus map
+```
+
+## 7. Fine-mapping (Step06, SuSiE-RSS)
+
+Per study: leads ±1 Mb merged into loci; every GWAS variant of the locus; Z oriented to the 1000G
+REF allele; a new signed LD matrix (`plink2 --r-unphased ref-based`) on exactly those variants in the
+same order; `susieR::susie_rss(z, R, n)` with `estimate_residual_variance = FALSE`.
+
+N comes from Step02 (`GWAS_study_metadata.tsv`): **Binary → N_EFF** (`--susie-n total` for N_TOTAL),
+**Continuous → N_TOTAL**; the N used and why is recorded per study.
+
+```bash
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR
+sbatch Step06_FineMap_GWAS_migraine_european.sh
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --status
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --stats   # loci, credible sets, PIPs, locus QC
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --plots   # regional + PIP + genes, LD heatmap, genome PIP
+```
+
+Every locus is checked and gets `LOCUS_QC = PASS / WARN` with the reasons (`LOCUS_QC_NOTES`):
+
+| Check | What it detects |
+|---|---|
+| `ESTIMATE_S_RSS` (susieR) | z-scores inconsistent with the reference LD (0 = consistent; > 0.1 warn, > 0.3 strong) |
+| `kriging_rss` | variants whose z disagrees with their LD neighbours (possible allele flips) |
+| `CONVERGED` | SuSiE did not converge within `--max-iter` (500) |
+| credible-set purity | min \|r\| inside a credible set < 0.5 |
+| `N_HIGH_PIP_OUTSIDE_CS` | PIP > 0.5 outside every credible set (typical LD-reference artefact) |
+| `TOP_AGREES_L1` | top variant also top in the L = 1 fit, which does not use the LD matrix |
+| LD cap / N spread / leads not in LD | locus trimmed to `--max-ld-variants`, per-variant N varies > 2-fold, Step05 lead not in the LD set |
+
+**LD reference size.** 1000G EUR has ~503 people. For very large GWAS (z-scores of 15–25) its
+sampling noise alone gives `ESTIMATE_S_RSS` around 0.5 and can create spurious PIPs — the checks
+above flag those loci. Interpret WARN loci with care and, where available, repeat with a larger
+ancestry-matched panel or in-sample LD. Rare variants (MAF < 1% in the panel, e.g. many
+high-penetrance coding variants) are not fine-mapped with this panel.
 
 ## Resource groups
 

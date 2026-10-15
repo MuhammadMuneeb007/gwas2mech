@@ -12,10 +12,13 @@ Step03_QC_One_GWAS.py, logic unchanged) plus status / statistics:
     # 1. Discover + plan downloads (GWAS Catalog: phenotype match, full summary
     #    statistics, STRICT ancestry, harmonised file, ranked by sample size).
     #    Also records per study whether the phenotype is BINARY (cases/controls)
-    #    or QUANTITATIVE - from the summary-statistics metadata (-meta.yaml,
-    #    "case_control_study") and the GWAS Catalog REST API v2 - because
-    #    fine-mapping / colocalisation differ (SuSiE-RSS / coloc type "cc" with
-    #    case fraction s, versus type "quant").
+    #    or CONTINUOUS - from the summary-statistics metadata (-meta.yaml,
+    #    "case_control_study", effect_statistic), the sample description (GWAS
+    #    Catalog REST API v2), the effect columns of the file and the trait
+    #    wording - because fine-mapping / colocalisation differ (SuSiE-RSS /
+    #    coloc type "cc" with case fraction s, versus type "quant"). Ambiguous
+    #    studies are Unknown + NEEDS_REVIEW (phenotype_type_review.tsv).
+    #    PMID and DOI per study (Europe PMC / NCBI).
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR
     sbatch Step02_Download_GWAS_migraine_european.sh
 
@@ -35,6 +38,11 @@ Step03_QC_One_GWAS.py, logic unchanged) plus status / statistics:
     # One QC task directly on this machine
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --index 1
 
+    # PubMed ID -> DOI
+    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --pmid-to-doi 34737426 33987465
+
+Missing Python packages are pip-installed into the running interpreter.
+
 Generic: the phenotype is searched as given, plus any --alias terms
 (no built-in phenotype list).
 
@@ -46,7 +54,10 @@ Outputs (read by Step04 / Step05):
 
     01_gwas_catalog/<phenotype>/<ancestry>/
         candidate_studies.tsv, study_selection.tsv, discovery_summary.json
-        GWAS_download_manifest.tsv   (+ PHENOTYPE_TYPE, N_CASES, N_CONTROLS, CASE_FRACTION, N_TOTAL, N_EFF)
+        GWAS_download_manifest.tsv   (+ PUBMEDID, DOI, PHENOTYPE_TYPE, N_CASES, N_CONTROLS, N_TOTAL,
+                                      N_EFF, EFFECT_TYPE, CLASSIFICATION_SOURCE / _CONFIDENCE /
+                                      _EVIDENCE, NEEDS_REVIEW)
+        phenotype_type_review.tsv    studies to verify by hand (VERIFIED_PHENOTYPE_TYPE)
         GWAS_study_metadata.tsv      GCST_ID PHENOTYPE_TYPE N_CASES N_CONTROLS N_TOTAL N_EFF
                                      ANCESTRY GENOME_BUILD EFFECT_TYPE (+ provenance, LD_REFERENCE)
         GWAS_QC_manifest.tsv, GWAS_QC_summary.tsv, GWAS_QC_missing_downloads.tsv
@@ -63,8 +74,8 @@ Outputs (read by Step04 / Step05):
                       PHENOTYPE_TYPE, N_CASES, N_CONTROLS, N_EFF, EFFECT_TYPE, derivation counts)
 
 Binary vs Continuous is decided per STUDY (the same disease can be a diagnosis
-or a score), from the GWAS-SSF metadata and GWAS Catalog API; --phenotype-type
-binary|continuous overrides it. N_TOTAL and N_EFF are both kept: each
+or a score); conflicting or insufficient evidence is never guessed.
+--phenotype-type binary|continuous overrides it. N_TOTAL and N_EFF are both kept: each
 fine-mapping method chooses its own N.
 ===============================================================================
 """
@@ -83,7 +94,48 @@ import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
+
+
+def ensure_packages(packages):
+    """pip-install missing packages into THIS interpreter (envs/pipeline when run
+    as envs/pipeline/bin/python), with the pip cache inside the project."""
+
+    import importlib
+    import importlib.util
+
+    missing = [spec for module, spec in packages.items() if importlib.util.find_spec(module) is None]
+
+    if not missing:
+        return
+
+    print(f"Installing missing Python packages into {sys.executable}: {' '.join(missing)}", flush=True)
+
+    env = dict(os.environ)
+    env.setdefault("PIP_CACHE_DIR", str(Path.cwd() / ".gwas2m_cache" / "pip"))
+    env["PYTHONNOUSERSITE"] = "1"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--no-input", *missing],
+        env=env,
+    )
+
+    if result.returncode != 0:
+        raise SystemExit(
+            f"Could not install {' '.join(missing)} (pip exit code {result.returncode}).\n"
+            "Run: python Step00_Installation.py"
+        )
+
+    importlib.invalidate_caches()
+
+
+ensure_packages({
+    "numpy": "numpy",
+    "pandas": "pandas",
+    "requests": "requests",
+    "urllib3": "urllib3",
+    "yaml": "pyyaml",
+})
 
 import numpy as np
 import pandas as pd
@@ -103,7 +155,22 @@ TRAIT_FIELDS = [
     "CASE_FRACTION",
     "N_TOTAL",
     "N_EFF",
-    "PHENOTYPE_TYPE_SOURCE",
+    "EFFECT_TYPE",
+    "EFFECT_REPORTED",
+    "CLASSIFICATION_SOURCE",
+    "CLASSIFICATION_CONFIDENCE",
+    "NEEDS_REVIEW",
+    "CLASSIFICATION_EVIDENCE",
+]
+
+# Manual verdicts for studies flagged NEEDS_REVIEW (phenotype_type_review.tsv),
+# keyed by accession; loaded by main().
+REVIEWS = {}
+
+REVIEW_COLUMNS = [
+    "STUDY_ACCESSION", "DISEASE_TRAIT", "MAPPED_TRAIT", "INITIAL_SAMPLE_SIZE", "PUBMEDID", "DOI",
+    "PHENOTYPE_TYPE", "CLASSIFICATION_CONFIDENCE", "CLASSIFICATION_EVIDENCE",
+    "VERIFIED_PHENOTYPE_TYPE", "VERIFIED_N_CASES", "VERIFIED_N_CONTROLS", "REVIEW_NOTE",
 ]
 
 # Standardised fine-mapping columns (SuSiE-RSS / FINEMAP), first and in this order
@@ -134,22 +201,50 @@ def effective_n(cases, controls):
     return round(4 * cases * controls / (cases + controls)) if cases and controls else ""
 
 
-def normalise_trait(trait):
+def phenotype_type_value(value):
+
+    value = str(value or "").strip().lower()
+
+    return {"binary": "Binary", "case-control": "Binary", "quantitative": "Continuous",
+            "continuous": "Continuous"}.get(value, "Unknown")
+
+
+def normalise_trait(trait, accession=""):
     """Binary / Continuous / Unknown (older manifests used binary / quantitative),
-    --phenotype-type override, N_EFF for binary studies and EFFECT_TYPE."""
+    then the manual review verdict, then --phenotype-type; N_EFF for binary
+    studies and EFFECT_TYPE."""
 
     trait = dict(trait)
-    value = str(trait.get("PHENOTYPE_TYPE", "") or "").strip().lower()
-    value = {"binary": "Binary", "case-control": "Binary", "quantitative": "Continuous",
-             "continuous": "Continuous"}.get(value, "Unknown")
+
+    if "PHENOTYPE_TYPE_SOURCE" in trait:   # older manifests
+        trait.setdefault("CLASSIFICATION_SOURCE", trait.pop("PHENOTYPE_TYPE_SOURCE"))
+
+    value = phenotype_type_value(trait.get("PHENOTYPE_TYPE"))
+    source = str(trait.get("CLASSIFICATION_SOURCE", "") or "")
+    review = str(trait.get("NEEDS_REVIEW", "")).strip().lower() in ("true", "1", "yes")
+
+    verdict = REVIEWS.get(str(accession).strip(), {})
+    verified = phenotype_type_value(verdict.get("VERIFIED_PHENOTYPE_TYPE"))
+
+    if verified != "Unknown":
+        value, review = verified, False
+        source = "+".join(x for x in (source, "manual review") if x)
+        trait["CLASSIFICATION_CONFIDENCE"] = "verified"
+        for field in ("N_CASES", "N_CONTROLS"):
+            if parse_number(verdict.get(f"VERIFIED_{field}")):
+                trait[field] = parse_number(verdict.get(f"VERIFIED_{field}"))
 
     forced = getattr(ARGS, "phenotype_type", "auto") if ARGS is not None else "auto"
-    if forced in ("binary", "continuous") and value != forced.capitalize():
-        value = forced.capitalize()
-        source = str(trait.get("PHENOTYPE_TYPE_SOURCE", "") or "")
-        trait["PHENOTYPE_TYPE_SOURCE"] = "+".join(x for x in (source, "--phenotype-type") if x)
+    if forced in ("binary", "continuous"):
+        value, review = forced.capitalize(), False
+        if "--phenotype-type" not in source:
+            source = "+".join(x for x in (source, "--phenotype-type") if x)
+        trait["CLASSIFICATION_CONFIDENCE"] = "user"
 
     trait["PHENOTYPE_TYPE"] = value
+    trait["CLASSIFICATION_SOURCE"] = source
+    trait["NEEDS_REVIEW"] = review
+    trait["EFFECT_TYPE"] = effect_type(value)
 
     if value == "Binary":
         cases, controls = parse_number(trait.get("N_CASES")), parse_number(trait.get("N_CONTROLS"))
@@ -164,7 +259,7 @@ def normalise_trait(trait):
 def effect_type(phenotype_type):
     """Effect scale of BETA in the standardised output."""
 
-    return {"Binary": "log(OR)", "Continuous": "BETA"}.get(phenotype_type, "BETA (scale unknown)")
+    return {"Binary": "log(OR)", "Continuous": "BETA"}.get(phenotype_type, "unknown (review)")
 
 GWAS_API_V2 = "https://www.ebi.ac.uk/gwas/rest/api/v2/studies"
 
@@ -1269,7 +1364,7 @@ def download_study_file(
 
 
 # =============================================================================
-# BINARY vs QUANTITATIVE PHENOTYPE (GWAS Catalog API + sumstats metadata)
+# BINARY vs CONTINUOUS PHENOTYPE (study metadata, sample description, effects)
 #
 # Fine-mapping and colocalisation need it: SuSiE-RSS / coloc use type "cc"
 # with the case fraction s for case-control GWAS and type "quant" otherwise.
@@ -1280,6 +1375,67 @@ def download_study_file(
 #      e.g. "4,110 European ancestry cases, 13,569 European ancestry controls"
 #   3. the cached GWAS Catalog studies table (same text) when the API is down
 # =============================================================================
+
+# =============================================================================
+# PMID -> DOI (Europe PMC, then NCBI E-utilities; cached)
+# =============================================================================
+
+def clean_pmid(value):
+
+    match = re.search(r"\d+", str(value or ""))
+
+    return match.group(0) if match and str(value).strip() not in ("nan", "") else ""
+
+
+def pmid_to_doi(session, pmids):
+    """{pmid: doi} for PubMed IDs; '' when the article has no DOI."""
+
+    cache_file = PROJECT_ROOT / "reference_metadata" / "gwas_catalog" / "pmid_doi.json"
+
+    try:
+        cache = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.is_file() else {}
+    except (OSError, ValueError):
+        cache = {}
+
+    wanted = sorted({clean_pmid(x) for x in pmids} - {""})
+    todo = [x for x in wanted if x not in cache]
+
+    for start in range(0, len(todo), 100):
+
+        batch = todo[start:start + 100]
+        query = " OR ".join(f"EXT_ID:{x}" for x in batch) + " AND SRC:MED"
+        data = fetch_json(
+            session,
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+            f"?query={quote(query)}&format=json&resultType=lite&pageSize=1000",
+        ) or {}
+
+        for hit in (data.get("resultList") or {}).get("result") or []:
+            if str(hit.get("pmid", "")) in batch and hit.get("doi"):
+                cache[str(hit["pmid"])] = hit["doi"]
+
+        missing = [x for x in batch if not cache.get(x)]
+
+        if missing:
+            data = fetch_json(
+                session,
+                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+                f"?db=pubmed&retmode=json&id={','.join(missing)}",
+            ) or {}
+            for pmid in missing:
+                ids = ((data.get("result") or {}).get(pmid) or {}).get("articleids") or []
+                doi = next((x.get("value", "") for x in ids if x.get("idtype") == "doi"), "")
+                if doi or data:
+                    cache[pmid] = doi
+
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(json.dumps(cache, indent=1, sort_keys=True), encoding="utf-8")
+    except OSError:
+        pass
+
+    return {x: cache.get(x, "") for x in wanted}
+
 
 def parse_cases_controls(text):
 
@@ -1331,18 +1487,98 @@ def read_sumstats_metadata(session, harmonised_url):
         return None
 
 
+def read_effect_columns(session, url, max_bytes=262144, max_rows=500, max_seconds=30):
+    """Which effect columns carry values in the first rows of the harmonised
+    file (streamed, only the first ~256 KB, at most max_seconds): odds_ratio /
+    beta / z."""
+
+    import time
+    import zlib
+
+    deadline = time.monotonic() + max_seconds
+
+    try:
+        response = session.get(str(url), stream=True, timeout=(15, 20))
+    except requests.RequestException:
+        return set()
+
+    if response.status_code != 200:
+        return set()
+
+    text = b""
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+
+    try:
+        for chunk in response.iter_content(65536):
+            text += decompressor.decompress(chunk) if str(url).endswith(".gz") else chunk
+            if len(text) >= max_bytes or text.count(b"\n") > max_rows or time.monotonic() > deadline:
+                break
+    except (requests.RequestException, zlib.error):
+        pass
+    finally:
+        response.close()
+
+    lines = text.decode("utf-8", errors="replace").splitlines()[:max_rows]
+
+    if len(lines) < 2:
+        return set()
+
+    header = [x.strip().lower() for x in lines[0].split("\t")]
+    rows = [x.split("\t") for x in lines[1:-1] or lines[1:]]
+    groups = {
+        "odds_ratio": {"odds_ratio", "hm_odds_ratio", "or"},
+        "beta": {"beta", "hm_beta", "b"},
+        "z": {"z", "zscore", "z_score"},
+    }
+    found = set()
+
+    for name, columns in groups.items():
+        for index, column in enumerate(header):
+            if column in columns and any(
+                index < len(row) and row[index].strip().lower() not in ("", "na", "nan", "null", "none", "#na")
+                for row in rows
+            ):
+                found.add(name)
+
+    return found
+
+
+# Generic wording of a MEASURED trait (no phenotype names): EFO "... measurement",
+# levels, scores, volumes, age at onset, ...
+MEASUREMENT_WORDS = re.compile(
+    r"\b(measurement|levels?|concentrations?|scores?|volumes?|thickness|density|"
+    r"quantitative|age at|duration|counts?|index|height|weight|area|amount|"
+    r"progression rate|rate of)\b",
+    flags=re.I,
+)
+
+
 def study_trait_information(
     session,
     accession,
     download,
     catalog_row
 ):
+    """Binary / Continuous / Unknown from the study's own metadata.
+
+    Evidence (strongest first):
+      strong   sumstats -meta.yaml case_control_study; separate case AND control
+               counts (meta.yaml or the sample description)
+      moderate odds ratios in the summary statistics (meta.yaml effect_statistic
+               or the file's first rows) -> Binary
+      weak     a sample description without cases/controls, beta effects,
+               measurement wording in the trait -> Continuous
+    Conflicting or too little evidence -> Unknown + NEEDS_REVIEW (never guessed);
+    the verdict goes in phenotype_type_review.tsv.
+    """
 
     cases = 0
     controls = 0
     n_total = 0
     case_control = None
     sources = []
+    evidence = []
+    effect_reported = set()
 
     meta = read_sumstats_metadata(session, download["URL"])
 
@@ -1364,6 +1600,13 @@ def study_trait_information(
             if isinstance(flag, bool):
                 case_control = flag if case_control is None else (case_control or flag)
 
+        statistic = str(meta.get("effect_statistic") or "").strip().lower()
+
+        if "odds" in statistic or statistic in ("or", "log_odds"):
+            effect_reported.add("odds_ratio")
+        elif statistic in ("beta", "b"):
+            effect_reported.add("beta")
+
     api = fetch_json(session, f"{GWAS_API_V2}/{accession}")
 
     if isinstance(api, dict) and api.get("initial_sample_size"):
@@ -1381,24 +1624,98 @@ def study_trait_information(
     if not n_total:
         n_total = cases + controls if cases and controls else estimate_sample_size(text)
 
-    # Decided per STUDY from its own sample description, never from the disease
-    # name: diagnosed depression (cases/controls) is Binary, a depression
-    # symptom score is Continuous.
-    if case_control is True or (cases and controls):
-        phenotype_type = "Binary"
+    # The file itself is read only when -meta.yaml does not state the effect.
+    file_effects = set() if effect_reported else read_effect_columns(session, download["URL"])
+
+    if file_effects:
+        sources.append("file header")
+
+    effect_reported |= file_effects
+
+    trait_text = " ".join(
+        str(x) for x in (
+            catalog_row.get("DISEASE/TRAIT", ""),
+            catalog_row.get("MAPPED_TRAIT", ""),
+            " ".join(t.get("efo_trait", "") for t in (api or {}).get("efo_traits") or [] if isinstance(t, dict))
+            if isinstance(api, dict) else "",
+        )
+        if str(x) not in ("", "nan")
+    )
+    case_words = re.search(r"\bcases?\b|\bcontrols?\b", str(text), flags=re.I)
+
+    # ---- evidence ----------------------------------------------------------
+    binary, continuous = [], []   # (strength, description)
+
+    if case_control is True:
+        binary.append(("strong", "meta.yaml case_control_study=true"))
     elif case_control is False:
+        continuous.append(("strong", "meta.yaml case_control_study=false"))
+
+    if cases and controls:
+        binary.append(("strong", f"{cases:,} cases / {controls:,} controls"))
+    elif cases and not controls:
+        evidence.append(f"{cases:,} cases but no controls (case-only / within-case analysis?)")
+
+    if "odds_ratio" in effect_reported:
+        binary.append(("moderate", "odds ratios reported"))
+
+    if str(text).strip() and not case_words:
+        continuous.append(("weak", "sample described without cases/controls"))
+
+    # Beta alone is compatible with both (binary GWAS often report log-odds as
+    # beta), so it only counts when no cases/controls are reported.
+    if effect_reported and "odds_ratio" not in effect_reported and case_control is not True \
+            and not (cases and controls):
+        continuous.append(("weak", "beta effects (no odds ratios)"))
+
+    measurement = MEASUREMENT_WORDS.search(trait_text)
+    if measurement:
+        continuous.append(("weak", f"trait wording '{measurement.group(0)}'"))
+
+    evidence += [f"Binary: {d} [{s}]" for s, d in binary]
+    evidence += [f"Continuous: {d} [{s}]" for s, d in continuous]
+
+    if not evidence:
+        evidence.append("no case/control, sample or effect-size information found")
+
+    strengths = {"strong": 3, "moderate": 2, "weak": 1}
+    best_binary = max((strengths[s] for s, _ in binary), default=0)
+    best_continuous = max((strengths[s] for s, _ in continuous), default=0)
+    review = False
+
+    # ---- decision ----------------------------------------------------------
+    if best_binary and best_continuous:
+        # Strong evidence wins only over WEAK contrary evidence.
+        if best_binary == 3 and best_continuous == 1:
+            phenotype_type, confidence = "Binary", "moderate"
+        elif best_continuous == 3 and best_binary == 1:
+            phenotype_type, confidence = "Continuous", "moderate"
+        else:
+            phenotype_type, confidence, review = "Unknown", "conflicting", True
+    elif best_binary:
+        phenotype_type = "Binary"
+        confidence = "high" if best_binary == 3 else "moderate"
+    elif best_continuous == 3 or len(continuous) >= 2:
         phenotype_type = "Continuous"
-    elif str(text).strip() and not re.search(r"\bcases?\b|\bcontrols?\b", str(text), flags=re.I):
-        phenotype_type = "Continuous"
+        confidence = "high" if best_continuous == 3 else "moderate"
     else:
-        phenotype_type = "Unknown"
+        phenotype_type, confidence, review = "Unknown", "insufficient", True
+
+    if cases and not controls:
+        review = True
+
+    # Proxy cases (family history, "GWAX") are not diagnosed cases: their effect
+    # sizes are attenuated and 4*cases*controls/N overstates the information.
+    if re.search(r"\bproxy\b|by[- ]proxy|family history", str(text), flags=re.I):
+        review = True
+        evidence.append("sample includes PROXY cases (GWAX / family history): N_EFF is approximate")
 
     forced = getattr(ARGS, "phenotype_type", "auto") if ARGS is not None else "auto"
     if forced in ("binary", "continuous"):
-        phenotype_type = forced.capitalize()
+        phenotype_type, confidence, review = forced.capitalize(), "user", False
         sources.append("--phenotype-type")
 
-    binary = phenotype_type == "Binary"
+    binary_type = phenotype_type == "Binary"
 
     # Counts are kept as reported (a later --phenotype-type binary can use them);
     # normalise_trait() blanks them for continuous studies.
@@ -1406,10 +1723,15 @@ def study_trait_information(
         "PHENOTYPE_TYPE": phenotype_type,
         "N_CASES": cases or "",
         "N_CONTROLS": controls or "",
-        "CASE_FRACTION": round(cases / (cases + controls), 6) if binary and cases and controls else "",
+        "CASE_FRACTION": round(cases / (cases + controls), 6) if binary_type and cases and controls else "",
         "N_TOTAL": n_total or "",
-        "N_EFF": effective_n(cases, controls) if binary else "",
-        "PHENOTYPE_TYPE_SOURCE": "+".join(sources),
+        "N_EFF": effective_n(cases, controls) if binary_type else "",
+        "EFFECT_TYPE": effect_type(phenotype_type),
+        "EFFECT_REPORTED": "+".join(sorted(effect_reported)),
+        "CLASSIFICATION_SOURCE": "+".join(sources),
+        "CLASSIFICATION_CONFIDENCE": confidence,
+        "NEEDS_REVIEW": review,
+        "CLASSIFICATION_EVIDENCE": "; ".join(evidence),
     }
 
 
@@ -2046,13 +2368,15 @@ def _plan(args, state):
         )
 
         print(
-            f"    trait: {trait['PHENOTYPE_TYPE']}"
+            f"    phenotype: {trait['PHENOTYPE_TYPE']} ({trait['CLASSIFICATION_CONFIDENCE']})"
             f" | cases {trait['N_CASES'] or '-'}"
             f" | controls {trait['N_CONTROLS'] or '-'}"
             f" | N {trait['N_TOTAL'] or '-'}"
             f" | N_eff {trait['N_EFF'] or '-'}"
-            f" [{trait['PHENOTYPE_TYPE_SOURCE']}]"
+            f" | effect {trait['EFFECT_REPORTED'] or '-'}"
+            + ("  ** NEEDS REVIEW **" if trait["NEEDS_REVIEW"] else "")
         )
+        print(f"      evidence: {trait['CLASSIFICATION_EVIDENCE'] or '-'}")
 
         eligible.append(
             {
@@ -2086,6 +2410,11 @@ def _plan(args, state):
     # -------------------------------------------------------------------------
 
     manifest_rows = []
+
+    dois = pmid_to_doi(
+        session,
+        [item["ROW"].get("PUBMEDID", "") for item in eligible]
+    )
 
     for i, item in enumerate(
         eligible,
@@ -2171,8 +2500,16 @@ def _plan(args, state):
                     ),
 
                 "PUBMEDID":
-                    row.get(
-                        "PUBMEDID",
+                    clean_pmid(
+                        row.get(
+                            "PUBMEDID",
+                            ""
+                        )
+                    ),
+
+                "DOI":
+                    dois.get(
+                        clean_pmid(row.get("PUBMEDID", "")),
                         ""
                     ),
 
@@ -3368,9 +3705,9 @@ def planner_mode(args):
                 ancestry_label=ancestry_label,
                 extra=normalise_trait({
                     field: row.get(field, "")
-                    for field in TRAIT_FIELDS
+                    for field in TRAIT_FIELDS + ["PHENOTYPE_TYPE_SOURCE"]
                     if field in row
-                }),
+                }, accession),
             )
         )
 
@@ -3942,6 +4279,8 @@ def worker_mode():
     # Load GWASLab only on compute worker
     # -------------------------------------------------------------------------
 
+    ensure_packages({"scipy": "scipy", "gwaslab": "gwaslab==4.2.3"})
+
     import gwaslab as gl
 
     threads = int(
@@ -4012,9 +4351,9 @@ def worker_mode():
         # would otherwise drop those variants (fine-mapping needs them all).
         trait = normalise_trait({
             field: row.get(field, "")
-            for field in TRAIT_FIELDS
+            for field in TRAIT_FIELDS + ["PHENOTYPE_TYPE_SOURCE"]
             if field in row
-        })
+        }, accession)
 
         n_prefilled = 0
         raw_n_col = find_column(ss.data, ["N"])
@@ -5004,7 +5343,7 @@ def study_metadata_row(trait, accession, ancestry_code, ancestry_label, effect=N
     EFFECT_TYPE, then provenance. Both N_TOTAL and N_EFF are kept; each
     fine-mapping method chooses which one it uses."""
 
-    trait = normalise_trait(trait)
+    trait = normalise_trait(trait, accession)
 
     row = {
         "GCST_ID": accession,
@@ -5018,13 +5357,79 @@ def study_metadata_row(trait, accession, ancestry_code, ancestry_label, effect=N
         "EFFECT_TYPE": effect or effect_type(trait["PHENOTYPE_TYPE"]),
         "ANCESTRY_LABEL": ancestry_label,
         "CASE_FRACTION": trait.get("CASE_FRACTION", ""),
-        "PHENOTYPE_TYPE_SOURCE": trait.get("PHENOTYPE_TYPE_SOURCE", ""),
-        "LD_REFERENCE": f"04_ld_reference/1000G_{ancestry_code}_GRCh38",
+        "EFFECT_REPORTED": trait.get("EFFECT_REPORTED", ""),
+        "CLASSIFICATION_SOURCE": trait.get("CLASSIFICATION_SOURCE", ""),
+        "CLASSIFICATION_CONFIDENCE": trait.get("CLASSIFICATION_CONFIDENCE", ""),
+        "NEEDS_REVIEW": trait.get("NEEDS_REVIEW", False),
+        "CLASSIFICATION_EVIDENCE": trait.get("CLASSIFICATION_EVIDENCE", ""),
+        "LD_REFERENCE": f"resources/1000G/{ancestry_code}",
     }
 
     row.update(extra or {})
 
     return row
+
+
+def manifest_trait(row):
+
+    return {
+        field: row.get(field, "")
+        for field in TRAIT_FIELDS + ["PHENOTYPE_TYPE_SOURCE"]
+        if field in row
+    }
+
+
+def review_file(analysis_dir):
+
+    return Path(analysis_dir) / "phenotype_type_review.tsv"
+
+
+def load_reviews(analysis_dir):
+    """VERIFIED_PHENOTYPE_TYPE (Binary / Continuous) filled in by hand."""
+
+    path = review_file(analysis_dir)
+
+    if not path.is_file():
+        return {}
+
+    table = pd.read_csv(path, sep="\t", dtype=str).fillna("")
+
+    return {str(r["STUDY_ACCESSION"]).strip(): r.to_dict() for _, r in table.iterrows()}
+
+
+def write_review_file(analysis_dir, manifest):
+    """Studies whose phenotype type needs manual verification. Verdicts already
+    filled in are kept; studies verified by hand stay listed."""
+
+    path = review_file(analysis_dir)
+    old = load_reviews(analysis_dir)
+    rows = []
+
+    for _, item in manifest.iterrows():
+
+        accession = str(item["STUDY_ACCESSION"]).strip()
+        flagged = (
+            str(item.get("NEEDS_REVIEW", "")).strip().lower() == "true"
+            or phenotype_type_value(item.get("PHENOTYPE_TYPE")) == "Unknown"
+        )
+
+        if not flagged and accession not in old:
+            continue
+
+        row = {column: item.get(column, "") for column in REVIEW_COLUMNS}
+        row["STUDY_ACCESSION"] = accession
+        for column in ("VERIFIED_PHENOTYPE_TYPE", "VERIFIED_N_CASES", "VERIFIED_N_CONTROLS", "REVIEW_NOTE"):
+            row[column] = old.get(accession, {}).get(column, "")
+        rows.append(row)
+
+    if not rows:
+        if path.is_file() and not old:
+            path.unlink()
+        return []
+
+    pd.DataFrame(rows, columns=REVIEW_COLUMNS).to_csv(path, sep="\t", index=False)
+
+    return [r for r in rows if phenotype_type_value(r["VERIFIED_PHENOTYPE_TYPE"]) == "Unknown"]
 
 
 def write_study_metadata_table(analysis_dir, qc_root, manifest, ancestry_code, ancestry_label):
@@ -5038,14 +5443,23 @@ def write_study_metadata_table(analysis_dir, qc_root, manifest, ancestry_code, a
         accession = str(item["STUDY_ACCESSION"]).strip()
         per_study = Path(qc_root) / accession / f"{accession}_study_metadata.tsv"
 
+        # Phenotype type from the manifest + review verdicts (so a later
+        # review also updates finished studies); QC fields from the QC run.
+        qc = {"QC_STATUS": "PENDING"}
+        effect = None
+
         if per_study.is_file() and per_study.stat().st_size > 0:
-            rows.append(pd.read_csv(per_study, sep="\t", dtype=str).fillna("").iloc[0].to_dict())
-            continue
+            done = pd.read_csv(per_study, sep="\t", dtype=str).fillna("").iloc[0].to_dict()
+            qc = {k: done.get(k, "") for k in ("N_SOURCE", "N_VARIANTS", "QC_STATUS", "QC_FILE")}
+            if done.get("EFFECT_TYPE") and done.get("PHENOTYPE_TYPE") == normalise_trait(
+                    manifest_trait(item), accession)["PHENOTYPE_TYPE"]:
+                effect = done["EFFECT_TYPE"]
 
         rows.append(study_metadata_row(
-            {field: item.get(field, "") for field in TRAIT_FIELDS},
+            manifest_trait(item),
             accession, ancestry_code, ancestry_label,
-            extra={"QC_STATUS": "PENDING"},
+            effect=effect,
+            extra={"PMID": item.get("PUBMEDID", ""), "DOI": item.get("DOI", ""), **qc},
         ))
 
     table = pd.DataFrame(rows)
@@ -5068,10 +5482,24 @@ def refresh_study_metadata(args):
     if not P["download_manifest"].is_file():
         return
 
+    manifest = read_download_manifest(P)
+    pending = write_review_file(P["analysis"], manifest)
+    REVIEWS.clear()
+    REVIEWS.update(load_reviews(P["analysis"]))
+
     output = write_study_metadata_table(
-        P["analysis"], P["qc"], read_download_manifest(P), P["code"], P["label"]
+        P["analysis"], P["qc"], manifest, P["code"], P["label"]
     )
     print(f"Study metadata (fine-mapping): {output}")
+
+    if pending:
+        print()
+        print(f"{len(pending)} studies need a manual phenotype-type check (Binary or Continuous):")
+        for r in pending:
+            print(f"  {r['STUDY_ACCESSION']:<14} {str(r['DISEASE_TRAIT'])[:45]:<45}  "
+                  f"PMID {r['PUBMEDID'] or '-'}  DOI {r['DOI'] or '-'}")
+        print(f"Fill VERIFIED_PHENOTYPE_TYPE (Binary / Continuous) in:\n  {review_file(P['analysis'])}")
+        print("then re-run with --qc (unverified studies stay PHENOTYPE_TYPE=Unknown).")
 
 
 def status_mode(args):
@@ -5090,7 +5518,8 @@ def status_mode(args):
         downloads[s["download"]] = downloads.get(s["download"], 0) + 1
         key = s["qc"].split(" ")[0]
         qcs[key] = qcs.get(key, 0) + 1
-        phenotype_type = normalise_trait({field: row.get(field, "") for field in TRAIT_FIELDS})["PHENOTYPE_TYPE"]
+        trait = normalise_trait(manifest_trait(row), row["STUDY_ACCESSION"])
+        phenotype_type = trait["PHENOTYPE_TYPE"] + (" *" if trait["NEEDS_REVIEW"] else "")
         print(f"{row.get('ARRAY_ID', ''):>3}  {row['STUDY_ACCESSION']:<14}{phenotype_type:<14}"
               f"{s['download']:<12}{human_bytes(s['size']) if s['size'] else '-':>10}  {s['qc']:<15}{s['detail']}")
 
@@ -5249,8 +5678,8 @@ def stats_mode(args):
         })
 
         # Binary / continuous from the planner (API + sumstats metadata).
-        r.update(normalise_trait({field: m.get(field, "") for field in TRAIT_FIELDS}))
-        r["EFFECT_TYPE"] = effect_type(r["PHENOTYPE_TYPE"])
+        r.update(normalise_trait(manifest_trait(m), accession))
+        r["DOI"] = m.get("DOI", "")
 
         s = study_state(P, m)
         r.update({"DOWNLOAD_STATUS": s["download"], "QC_STATE": s["qc"], "FILE_NAME": m.get("FILE_NAME", ""),
@@ -5293,7 +5722,7 @@ def stats_mode(args):
     table.to_csv(P["stats_table"], sep="\t", index=False)
 
     banner("SUMMARY TABLE")
-    show = [c for c in ("STUDY_ACCESSION", "FIRST_AUTHOR", "PUBLICATION_DATE", "PHENOTYPE_TYPE", "N_TOTAL", "N_CASES",
+    show = [c for c in ("STUDY_ACCESSION", "FIRST_AUTHOR", "PUBLICATION_DATE", "PUBMEDID", "DOI", "PHENOTYPE_TYPE", "N_TOTAL", "N_CASES",
                         "N_CONTROLS", "N_EFF", "N_VARIANTS_QC", "N_GENOME_WIDE_SIGNIFICANT", "LAMBDA_GC", "QC_STATUS")
             if c in table.columns]
     display = table[show].copy()
@@ -5316,11 +5745,13 @@ def print_study(r):
 
     print()
     print(f"{r['ID']}. {r['STUDY_ACCESSION']}  {r.get('FIRST_AUTHOR', '')} ({str(r.get('PUBLICATION_DATE', ''))[:4]}) "
-          f"{r.get('JOURNAL', '')}  PMID {r.get('PUBMEDID', '')}")
+          f"{r.get('JOURNAL', '')}  PMID {r.get('PUBMEDID', '')}  DOI {r.get('DOI', '') or '-'}")
     print(f"   Title        : {str(r.get('TITLE', ''))[:110]}")
     print(f"   Trait        : {r.get('DISEASE_TRAIT', '')}  [{r.get('EFO_TERMS', '') or r.get('MAPPED_TRAIT', '')}]")
-    print(f"   Phenotype    : {r.get('PHENOTYPE_TYPE') or 'Unknown'} | effect {r.get('EFFECT_TYPE') or '-'}"
-          f"  (source: {r.get('PHENOTYPE_TYPE_SOURCE', '') or '-'})")
+    print(f"   Phenotype    : {r.get('PHENOTYPE_TYPE') or 'Unknown'} ({r.get('CLASSIFICATION_CONFIDENCE') or '-'})"
+          f" | effect {r.get('EFFECT_TYPE') or '-'} (reported: {r.get('EFFECT_REPORTED') or '-'})"
+          + ("  ** NEEDS REVIEW **" if r.get("NEEDS_REVIEW") else ""))
+    print(f"   Evidence     : {r.get('CLASSIFICATION_EVIDENCE') or '-'} [{r.get('CLASSIFICATION_SOURCE') or '-'}]")
     print(f"   Samples      : N {fmt(r.get('N_TOTAL'))} | cases {fmt(r.get('N_CASES'))} | "
           f"controls {fmt(r.get('N_CONTROLS'))} | case fraction {r.get('CASE_FRACTION') or '-'} | "
           f"N_eff {fmt(r.get('N_EFF'))} | replication N {fmt(r.get('N_REPLICATION'))}")
@@ -5348,15 +5779,24 @@ def print_study(r):
 # ARGUMENTS / MAIN
 # =============================================================================
 
+def pmid_to_doi_mode(args):
+
+    dois = pmid_to_doi(make_session(), args.pmid_to_doi)
+
+    print("PMID\tDOI")
+    for pmid in args.pmid_to_doi:
+        print(f"{clean_pmid(pmid)}\t{dois.get(clean_pmid(pmid), '') or 'NOT FOUND'}")
+
+
 def arguments(argv=None):
 
     parser = argparse.ArgumentParser(
         description="GWAS discovery + download planner and GWASLab QC for one phenotype x ancestry."
     )
 
-    parser.add_argument("--phenotype", required=True,
+    parser.add_argument("--phenotype", default=None,
                         help="Any phenotype, searched as given in the GWAS Catalog.")
-    parser.add_argument("--ancestry", required=True,
+    parser.add_argument("--ancestry", default=None,
                         help="EUR, AFR, EAS, SAS, AMR, MID or European, East Asian, ...")
     parser.add_argument("--alias", action="append", default=[],
                         help="Extra search term (repeatable), e.g. --alias \"migraine disorder\".")
@@ -5377,6 +5817,8 @@ def arguments(argv=None):
                        help="READ-ONLY: downloaded / partial / pending and QC done / failed / pending.")
     modes.add_argument("--stats", action="store_true",
                        help="Publication statistics per study (writes GWAS_publication_stats.tsv).")
+    modes.add_argument("--pmid-to-doi", nargs="+", metavar="PMID", default=None,
+                       help="Only convert PubMed IDs to DOIs (Europe PMC / NCBI) and exit.")
 
     slurm = parser.add_argument_group("SLURM (default: the #SBATCH header of HPC_CPU.sh)")
     slurm.add_argument("--template", default="HPC_CPU.sh")
@@ -5390,6 +5832,10 @@ def arguments(argv=None):
                        help="Maximum simultaneously running array tasks (0 = no throttle).")
 
     args = parser.parse_args(argv)
+
+    if not args.pmid_to_doi and not (args.phenotype and args.ancestry):
+        parser.error("--phenotype and --ancestry are required (except with --pmid-to-doi)")
+
     return resolve_slurm(args)
 
 
@@ -5407,6 +5853,12 @@ def main():
 
     args = arguments()
     ARGS = args
+
+    if args.pmid_to_doi:
+        pmid_to_doi_mode(args)
+        return
+
+    REVIEWS.update(load_reviews(project_paths(args)["analysis"]))
 
     if args.status:
         status_mode(args)
