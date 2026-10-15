@@ -6,7 +6,7 @@
 GWAS2m STEP 00 - DOWNLOAD SHARED RESOURCES (SLURM: ONE ARRAY TASK PER FILE)
 ===============================================================================
 
-    python Step00_Download_Resources.py        # plan + write the SLURM script
+    envs/pipeline/bin/python Step00_Download_Resources.py        # plan + write the SLURM script
     sbatch Step00_Download_Resources.sh        # download everything
 
 This script only PLANS; it never downloads data itself. It:
@@ -82,18 +82,18 @@ NOT done here: derived resources (1000G PGEN panels, sample lists, Pangolin
 DB), REVEL (its server blocks automated downloads), and phenotype GWAS
 summary statistics.
 
-After the downloads: python Step01_Download_Resources_Checkheaders.py
+After the downloads: envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py
 
 Usage:
 
-    python Step00_Download_Resources.py
-    python Step00_Download_Resources.py --groups genome vep gtex
-    python Step00_Download_Resources.py --skip-groups meqtl cadd
-    python Step00_Download_Resources.py --groups qtl_catalogue --catalogue-study-regex '^Sun_2018$'
-    python Step00_Download_Resources.py --groups meqtl --time 7-00:00:00 --output Step00_Download_meQTL.sh
-    python Step00_Download_Resources.py --max-jobs 500 --parallel 50
-    python Step00_Download_Resources.py --account a_myproject
-    python Step00_Download_Resources.py --finalize      # re-check + report
+    envs/pipeline/bin/python Step00_Download_Resources.py
+    envs/pipeline/bin/python Step00_Download_Resources.py --groups genome vep gtex
+    envs/pipeline/bin/python Step00_Download_Resources.py --skip-groups meqtl cadd
+    envs/pipeline/bin/python Step00_Download_Resources.py --groups qtl_catalogue --catalogue-study-regex '^Sun_2018$'
+    envs/pipeline/bin/python Step00_Download_Resources.py --groups meqtl --time 7-00:00:00 --output Step00_Download_meQTL.sh
+    envs/pipeline/bin/python Step00_Download_Resources.py --max-jobs 500 --parallel 50
+    envs/pipeline/bin/python Step00_Download_Resources.py --account a_myproject
+    envs/pipeline/bin/python Step00_Download_Resources.py --finalize      # re-check + report
 
 Without SLURM (laptop / workstation):
 
@@ -1190,10 +1190,10 @@ def finalize() -> int:
         for entry in missing[:50]:
             print(f"  - {entry['resource']:<30} {entry['dest']}")
         print("\nRe-plan only what is missing and resubmit:")
-        print(f"  python {Path(__file__).name} && sbatch {args.output}")
+        print(f"  envs/pipeline/bin/python {Path(__file__).name} && sbatch {args.output}")
         return 1
     print("\nAll planned files downloaded and verified.")
-    print("Next: python Step01_Download_Resources_Checkheaders.py   (readability + headers)")
+    print("Next: envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py   (readability + headers)")
     return 0
 
 
@@ -1271,7 +1271,7 @@ def main() -> int:
             MANIFEST.unlink()
         banner("NOTHING TO DOWNLOAD")
         print("Every planned file is already valid.")
-        print("Next: python Step01_Download_Resources_Checkheaders.py   (readability + headers)")
+        print("Next: envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py   (readability + headers)")
         return 0
 
     write_tsv(MANIFEST, MANIFEST_COLUMNS, [
@@ -1294,8 +1294,8 @@ def main() -> int:
         print(f"       Each needs download + MD5 + extraction in one task; with --time "
               f"{settings['values'].get('time')} it may time out.")
         print("       A timed-out download resumes when you re-run this planner, or give it longer, e.g.:")
-        print("         python Step00_Download_Resources.py --skip-groups meqtl          # everything else")
-        print("         python Step00_Download_Resources.py --groups meqtl --time 7-00:00:00 "
+        print("         envs/pipeline/bin/python Step00_Download_Resources.py --skip-groups meqtl          # everything else")
+        print("         envs/pipeline/bin/python Step00_Download_Resources.py --groups meqtl --time 7-00:00:00 "
               "--output Step00_Download_meQTL.sh")
 
     script = ROOT / args.output

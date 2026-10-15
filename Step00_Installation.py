@@ -1453,7 +1453,7 @@ def main() -> int:
     log("Reference data (MAGMA gene locations, LDSC baseline/weights, PoPS features,")
     log("liftover chain files) is NOT downloaded by this script.")
     log("Next (shared resources, one SLURM task per file):")
-    log("  python Step00_Download_Resources.py && sbatch Step00_Download_Resources.sh")
+    log("  envs/pipeline/bin/python Step00_Download_Resources.py && sbatch Step00_Download_Resources.sh")
     return 0
 
 

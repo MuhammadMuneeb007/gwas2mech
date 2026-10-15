@@ -22,9 +22,9 @@ Also reports MISSING files and files whose size differs from the size the
 server reported (= partial download). Large archives that were deleted after a
 verified extraction are reported OK with their extracted contents.
 
-    python Step01_Download_Resources_Checkheaders.py            # fast (headers only)
-    python Step01_Download_Resources_Checkheaders.py --full     # + read every compressed file to the end
-    python Step01_Download_Resources_Checkheaders.py --group opentargets
+    envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py            # fast (headers only)
+    envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py --full     # + read every compressed file to the end
+    envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py --group opentargets
 
 Run it with envs/pipeline/bin/python (has pyarrow). The fast check is fine on a
 login node; --full reads every downloaded byte, so submit that one as a job.
@@ -226,7 +226,7 @@ def planned_files() -> list[dict]:
     # One plan per generated script (e.g. a separate meQTL plan writes its own).
     plans = sorted(PLAN.parent.glob("download_resources*_plan.tsv"))
     if not plans:
-        sys.exit(f"ERROR: no plan in {PLAN.parent}.\n       Run python Step00_Download_Resources.py first.")
+        sys.exit(f"ERROR: no plan in {PLAN.parent}.\n       Run envs/pipeline/bin/python Step00_Download_Resources.py first.")
     rows: dict[str, dict] = {}
     for plan in plans:
         with open(plan, encoding="utf-8") as handle:
@@ -280,7 +280,7 @@ def main() -> int:
     bad = len(results) - counts.get("OK", 0)
     if bad:
         print(f"{bad} file(s) not OK. Re-plan and resubmit the missing ones:")
-        print("  python Step00_Download_Resources.py && sbatch Step00_Download_Resources.sh")
+        print("  envs/pipeline/bin/python Step00_Download_Resources.py && sbatch Step00_Download_Resources.sh")
     else:
         print("All files readable.")
     return 1 if bad else 0
