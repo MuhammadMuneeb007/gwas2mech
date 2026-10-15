@@ -1609,7 +1609,8 @@ def annotate_vep(universe: pd.DataFrame, work: Path, threads: int, args) -> tupl
     table = pd.DataFrame(rows)
     if not table.empty:
         table = table.drop(columns=[c for c in ("API_ID",) if c in table.columns])
-        table = table.rename(columns={c: c.replace("ENSEMBL_", "VEP_", 1) for c in table.columns
+        table = table.rename(columns={c: "VEP_" + c[len("ENSEMBL_VEP_"):] if c.startswith("ENSEMBL_VEP_")
+                                      else c.replace("ENSEMBL_", "VEP_", 1) for c in table.columns
                                       if c.startswith("ENSEMBL_")})
     info = {"source": "Ensembl VEP " + (f"--gtf {args.vep_gtf} (test)" if args.vep_gtf else f"{VEP_RELEASE} offline cache"),
             "annotated": int(len(table)), "log_version_line": version}
@@ -1847,8 +1848,9 @@ def derive_flags(m: pd.DataFrame) -> pd.DataFrame:
     cons = m.get("VEP_BEST_CONSEQUENCE", pd.Series("", index=m.index)).fillna("").astype(str)
     m["IS_LOF"] = cons.apply(lambda s: bool(set(s.split(";")) & LOF_TERMS))
     m["IS_MISSENSE"] = cons.str.contains("missense_variant")
-    m["IS_CODING"] = m.get("VEP_FUNCTIONAL_CATEGORY", "").astype(str).eq("CODING")
-    m["IS_SPLICE"] = m.get("VEP_FUNCTIONAL_CATEGORY", "").astype(str).eq("SPLICING")
+    # missense / LoF count as coding even when a splice-region term ranks first
+    m["IS_CODING"] = m["VEP_FUNCTIONAL_CATEGORY"].astype(str).eq("CODING") | m["IS_LOF"] | m["IS_MISSENSE"]
+    m["IS_SPLICE"] = m["VEP_FUNCTIONAL_CATEGORY"].astype(str).eq("SPLICING")
     m["CADD_GE_20"] = pd.to_numeric(m.get("CADD_PHRED"), errors="coerce") >= 20
     m["AM_LIKELY_PATHOGENIC"] = m.get("AM_CLASS", pd.Series("", index=m.index)).fillna("").eq("likely_pathogenic")
     sig = m.get("CLINVAR_SIGNIFICANCE", pd.Series("", index=m.index)).fillna("").str.lower()
