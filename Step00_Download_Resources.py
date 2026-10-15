@@ -80,9 +80,16 @@ resources/coloc/eqtl_catalogue/dense/<dataset_id>/ (as Step11 / Setup_11B
 expect), other molecular QTL under resources/molecular_qtl/<type>/<source>/,
 annotation under resources/annotation/<source>/.
 
+Step08 (local variant annotation) uses: vep (VEP 116 cache), genome (GRCh38
+FASTA + GENCODE GTF), annotation (AlphaMissense - tabix-indexed here -, ClinVar,
+ENCODE cCRE V4, gnomAD v4.1 constraint / LOEUF, phyloP 100-way) and cadd
+(CADD v1.7 SNVs + indels):
+    envs/pipeline/bin/python Step00_Download_Resources.py --groups vep genome annotation cadd --output Step00_Download_Step08.sh
+
 NOT done here: derived resources (1000G PGEN panels, sample lists, Pangolin
-DB), REVEL (its server blocks automated downloads), and phenotype GWAS
-summary statistics.
+DB), REVEL (its server blocks automated downloads), SpliceAI precomputed
+scores (login required; SpliceAI / Pangolin run locally instead), and
+phenotype GWAS summary statistics.
 
 After the downloads: envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py
 
@@ -304,6 +311,7 @@ def local_file_valid(path: Path, expected_size: int | None = None) -> bool:
 # =============================================================================
 # FILE ITEMS  (one item = one file = one SLURM array task)
 #   post  : - | fasta (decompress + faidx) | tar (extract into post_dir)
+#           | tabix (index a bgzip TSV: chrom col 1, position col 2, '#' header lines)
 #   check : - | gzip | tar | parquet       (integrity test after download)
 #   mutable: "latest"/"master" URLs whose size may change before download,
 #            so their size is reported but not enforced.
@@ -696,7 +704,7 @@ def annotation_items() -> list[dict]:
     if "annotation" in SELECTED_GROUPS:
         items += [
             item("ALPHAMISSENSE", "annotation", f"{ALPHAMISSENSE}/AlphaMissense_hg38.tsv.gz",
-                 base / "alphamissense/AlphaMissense_hg38.tsv.gz", check="gzip"),
+                 base / "alphamissense/AlphaMissense_hg38.tsv.gz", check="gzip", post="tabix"),
             item("ALPHAMISSENSE_GENE", "annotation", f"{ALPHAMISSENSE}/AlphaMissense_gene_hg38.tsv.gz",
                  base / "alphamissense/AlphaMissense_gene_hg38.tsv.gz", check="gzip"),
             item("CLINVAR", "annotation", f"{CLINVAR}/clinvar.vcf.gz", base / "clinvar/clinvar.vcf.gz",
@@ -732,6 +740,8 @@ def post_done(entry: dict) -> bool:
         return local_file_valid(fasta) and local_file_valid(Path(str(fasta) + ".fai"))
     if entry["post"] in ("tar", "tar-rm"):   # marker written after a successful extraction
         return (ROOT / entry["post_dir"] / entry["post_marker"]).is_file()
+    if entry["post"] == "tabix":
+        return local_file_valid(ROOT / entry["dest"]) and local_file_valid(ROOT / (entry["dest"] + ".tbi"))
     return True
 
 
@@ -868,6 +878,7 @@ CURL="$(tool curl)"
 WGET="$(tool wget)"
 PIGZ="$(tool pigz)"
 SAMTOOLS="$(tool samtools)"
+TABIX="$(tool tabix)"
 # The final check runs with the project's interpreter, envs/pipeline/bin/python.
 PYTHON="$ROOT/envs/pipeline/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
@@ -891,6 +902,7 @@ post_done() {
     case "$POST" in
         fasta) [[ -s "${OUT%.gz}" && -s "${OUT%.gz}.fai" ]] ;;
         tar|tar-rm) [[ -e "$ROOT/$PDIR/$PMARKER" ]] ;;
+        tabix) [[ -s "$OUT" && -s "$OUT.tbi" ]] ;;
         *)     return 0 ;;
     esac
 }
@@ -974,6 +986,10 @@ post_process() {
             if [[ "$POST" == "tar-rm" ]]; then
                 rm -f "$OUT"; log "removed the verified archive to save space: ${OUT#$ROOT/}"
             fi ;;
+        tabix)
+            [[ -n "$TABIX" ]] || { log "ERROR: tabix not found (run Step00_Installation.py first)"; return 1; }
+            "$TABIX" -f -s 1 -b 2 -e 2 "$OUT" || return 1
+            log "indexed: ${OUT#$ROOT/}.tbi" ;;
     esac
 }
 

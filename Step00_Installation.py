@@ -230,6 +230,7 @@ dependencies:
   - pyarrow
   - duckdb
   - pysam
+  - pybigwig
   - cyvcf2
   - scikit-learn
   - statsmodels
@@ -353,7 +354,8 @@ PYTHON_PACKAGES = [
     ("orjson", "orjson", "pipeline", False, None, "conda", "orjson", "Diagnose_Step11"),
     ("pyarrow", "pyarrow", "pipeline", False, None, "conda", "pyarrow", "parquet (Open Targets)"),
     ("duckdb", "duckdb", "pipeline", False, None, "conda", "duckdb", "Step13"),
-    ("pysam", "pysam", "pipeline", False, None, "conda", "pysam", "declared"),
+    ("pysam", "pysam", "pipeline", True, 8, "conda", "pysam", "Step08 CADD / AlphaMissense / ClinVar lookups"),
+    ("pyBigWig", "pybigwig", "pipeline", True, 8, "conda", "pybigwig", "Step08 phyloP conservation"),
     ("cyvcf2", "cyvcf2", "pipeline", False, None, "conda", "cyvcf2", "declared"),
     ("sklearn", "scikit-learn", "pipeline", False, None, "conda", "scikit-learn", "declared"),
     ("statsmodels", "statsmodels", "pipeline", False, None, "conda", "statsmodels", "Step14"),

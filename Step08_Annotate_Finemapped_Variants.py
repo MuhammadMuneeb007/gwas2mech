@@ -2,202 +2,80 @@
 # -*- coding: utf-8 -*-
 
 """
-GWAS2m STEP 07 — Distributed API-only annotation of fine-mapped variants
-=======================================================================
+===============================================================================
+GWAS2Mech STEP 08 - Local annotation of fine-mapped variants
+===============================================================================
 
-GOAL
-----
-Annotate every usable Step06 fine-mapped variant without downloading large
-reference annotation databases.
+    # plan + SLURM array (one task per fine-mapped study; >1000 studies share tasks)
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR
+    sbatch Step08_Annotate_parkinson_s_disease_european.sh
 
-This file is intentionally self-contained. It does NOT require:
-    * a local VEP cache
-    * a local GRCh38 FASTA
-    * local AlphaMissense
-    * local CADD
-    * local REVEL
-    * local ClinVar
-    * local ENCODE / SCREEN matrices
-    * local RegulomeDB
-    * local UniProt
+    # study 2 (the number the Step02 planner prints) on this machine
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
 
-Instead it builds a deduplicated variant universe, splits it into provider-
-specific batches, submits independent SLURM arrays, stores only returned
-annotation shards, then merges them back into one annotation table per study.
+    # which local resources are present, progress, per-study statistics
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --status
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 
-PROVIDERS
----------
-1. ENSEMBL_VEP
-   POST /vep/homo_sapiens/region
-   - exon / intron / UTR / upstream / downstream / intergenic
-   - genes, transcripts, biotypes, lncRNA/non-coding transcript consequences
-   - HGVS c./p., protein consequence, amino-acid change
-   - SIFT, PolyPhen
-   - AlphaMissense
-   - CADD
-   - REVEL
-   - ProtVar
-   - SpliceAI
-   - BLOSUM62
-   - ClinPred
-   - EVE
-   - LOEUF
-   - MaveDB
-   - OpenTargets
-   - phenotype/co-located variant evidence
-   - Ensembl regulatory consequences
-   - protein domains and UniProt identifiers
+    # one variant (GRCh38, CHR:POS:REF:ALT)
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --test-variant 4:89822321:G:A
 
-2. ENSEMBL_VARIATION
-   POST /variation/homo_sapiens
-   - population frequencies
-   - phenotype associations
-   - clinical significance
-   - ancestral/minor allele
+LOCAL FIRST. Every annotation comes from versioned files downloaded by
+Step00_Download_Resources.py (--groups vep genome annotation cadd); no web
+service is needed, so the step runs on compute nodes without internet, has no
+rate limits, annotates ALL fine-mapped variants (not only credible sets) and
+is reproducible:
 
-3. SCREEN
-   GraphQL https://screen.api.wenglab.org/graphql
-   - overlapping ENCODE cCRE
-   - cCRE class (PLS/pELS/dELS/etc.)
-   - ATAC/DNase/CTCF/H3K27ac/H3K4me3 max Z
-   - biosample/cell/tissue-specific signals
-   - nearest genes
-   - experimental cCRE -> gene links
-   - computational cCRE -> gene links
-   - TF representative peaks
-   - silencers / dynamic enhancers
+    Ensembl VEP 116, offline cache  consequences on every transcript, the most
+        + GRCh38 FASTA              severe / MANE / canonical one, gene, biotype,
+                                    exon/intron, HGVS c./p., amino acids, protein
+                                    domains, UniProt, SIFT, PolyPhen, regulatory
+                                    features, rsIDs, gnomAD v4 / 1000G frequencies
+    CADD v1.7 (SNVs + indels)       raw score, PHRED
+    AlphaMissense (hg38)            missense pathogenicity + class
+    ClinVar VCF (dated release)     clinical significance, review status, condition
+    ENCODE SCREEN cCRE V4           overlapping candidate cis-regulatory element + class
+    phyloP 100-way (UCSC)           base-wise conservation
+    gnomAD v4.1 constraint          LOEUF, pLI, missense Z of the affected gene
 
-4. REGULOMEDB
-   - regulatory score/rank/probability
-   - compact supporting feature evidence
+OPTIONAL ONLINE (--online screen,regulomedb), credible-set variants only:
+    SCREEN GraphQL  cell-type-specific cCRE activity, cCRE -> gene links
+                    (export SCREEN_API_KEY=...)
+    RegulomeDB      regulatory probability / rank
+Network failures are recorded as API_ERROR, never as "no hit".
 
-5. CLINVAR
-   NCBI E-utilities
-   - query rsID-bearing variants
-   - ClinVar variation summaries, traits, significance, accessions
+Inputs (Step06):
+    06_finemapping/<p>/<a>/<GCST>/<GCST>_finemapped_variants.tsv.gz
+    (LOCUS_ID CHR REFERENCE_POS REFERENCE_REF REFERENCE_ALT PIP IN_95_CREDIBLE_SET ...)
 
-UniProt details:
-    VEP is called with uniprot=1 and domains=1, so UniProt accessions and
-    protein-domain annotations are obtained without a separate dependency
-    phase.
+Outputs (08_annotation/<p>/<a>/):
+    <GCST>/<GCST>_annotated_variants.tsv.gz       every variant: fine-mapping + annotation
+    <GCST>/<GCST>_credible_set_variants.tsv        95% credible-set variants, by locus / PIP
+    <GCST>/<GCST>_locus_annotation_summary.tsv     per locus: top variant, gene, coding /
+                                                   LoF / missense / ClinVar / cCRE evidence,
+                                                   PIP-weighted functional composition
+    <GCST>/annotation_provenance.json              resources, versions, counts per source
+    annotation_stats.tsv                           (--stats)
 
-ARCHITECTURE
-------------
-Step06
-  |
-  +--> unique variant universe ---------------------------------------------+
-  |                                                                         |
-  +--> study/locus/variant map                                              |
-                                                                            |
-          +-------------------+----------------+----------------+-------------+
-          |                   |                |                |             |
-     ENSEMBL_VEP        ENSEMBL_VARIATION    SCREEN       REGULOMEDB     CLINVAR
-     100 variants       100-200 rsIDs       50 vars      25 vars        20 rsIDs
-     / array task       / array task        / task       / task         / task
-          |                   |                |                |             |
-          +-------------------+----------------+----------------+-------------+
-                                                                            |
-                                                                     MERGE JOB
-                                                                            |
-                                                   global unique-variant annotation
-                                                                            |
-                                                   one master table per GWAS study
-                                                                            |
-                                                   one locus summary per GWAS study
+Alleles: annotation is for the 1000G REF/ALT pair matched in Step06. Z_ALT /
+BETA_ALT give the GWAS effect of the ALT allele (Step06 orients Z to REF).
 
-IMPORTANT
----------
-* The SLURM array concurrency defaults are deliberately conservative because
-  public APIs can throttle clients. More array jobs does NOT mean you should
-  send hundreds of concurrent requests to one public service.
-* HTTP 429 / Retry-After is honoured.
-* Network/API failure is recorded as API_ERROR, never converted to biological
-  NO_HIT.
-* Existing shard files are reused unless --force is supplied.
-* Only API responses/results are stored. No reference annotation database is
-  mirrored locally.
-* SCREEN requires:
-      export SCREEN_API_KEY='...'
-* NCBI strongly prefers an email and supports API keys:
-      export NCBI_EMAIL='you@example.com'
-      export NCBI_API_KEY='...'
-
-EXPECTED STEP06 INPUT
----------------------
-<root>/06_finemapping/<phenotype_slug>/<ancestry_slug>/<study>/
-    <study>_finemapped_variants.tsv.gz
-
-Required columns:
-    LOCUS_ID
-    CHR
-    REFERENCE_POS
-    REFERENCE_REF
-    REFERENCE_ALT
-    PIP
-
-Optional useful columns:
-    rsID
-    SNPID
-    REFERENCE_ID
-    IN_95_CREDIBLE_SET
-    CREDIBLE_SET
-    P
-    BETA
-    SE
-    Z
-    Z_REF
-
-NORMAL USAGE
-------------
-1. Plan:
-    python Step07_API_Distributed_Annotation.py \
-        --phenotype "parkinson's disease" \
-        --ancestry EUR
-
-2. Set SCREEN key:
-    export SCREEN_API_KEY='YOUR_KEY'
-
-3. Submit the generated master submission script:
-    bash Step07_Submit_API_parkinson_s_disease_european.sh
-
-Or plan + submit directly:
-    python Step07_API_Distributed_Annotation.py \
-        --phenotype "parkinson's disease" \
-        --ancestry EUR \
-        --submit
-
-The generated submission script submits all provider arrays and then a merge
-job with afterok dependencies.
-
-DIRECT WORKER MODE
-------------------
-Normally SLURM invokes this automatically:
-    python Step07_API_Distributed_Annotation.py \
-        --worker \
-        --provider ensembl_vep \
-        --manifest /path/to/ensembl_vep_manifest.tsv \
-        --task-id 1
-
-MERGE MODE
-----------
-Normally SLURM invokes this automatically:
-    python Step07_API_Distributed_Annotation.py \
-        --merge \
-        --plan-json /path/to/step07_api_plan.json
+SLURM settings come from the #SBATCH header of HPC_CPU.sh; --partition --qos
+--account --cpus --mem --time --max-parallel override them.
+===============================================================================
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import gzip
 import hashlib
-import io
 import json
-import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -217,31 +95,28 @@ except ImportError:
     requests = None
 
 
-VERSION = "5.1.0-api-distributed-qc"
+VERSION = "6.0.0-local"
 ASSEMBLY = "GRCh38"
 SPECIES = "homo_sapiens"
+PROJECT_ROOT = Path.cwd().resolve()
+MAX_ARRAY_TASKS = 1000
 
-ENSEMBL_REST = "https://rest.ensembl.org"
 SCREEN_GRAPHQL = "https://screen.api.wenglab.org/graphql"
 REGULOMEDB_API = "https://api.regulomedb.org/search"
 REGULOMEDB_FALLBACK = "https://regulomedb.org/regulome-search/"
-NCBI_EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
-DEFAULT_BATCHES = {
-    "ensembl_vep": 100,
-    "ensembl_variation": 150,
-    "screen": 50,
-    "regulomedb": 25,
-    "clinvar": 20,
-}
-
-DEFAULT_MAX_PARALLEL = {
-    "ensembl_vep": 5,
-    "ensembl_variation": 5,
-    "screen": 3,
-    "regulomedb": 3,
-    "clinvar": 1,
-}
+# ---- local resources (Step00_Download_Resources.py) -------------------------
+RES = PROJECT_ROOT / "resources"
+VEP_RELEASE = "116"
+VEP_CACHE_DIR = RES / "vep" / "cache"
+FASTA = RES / "genome" / "GRCh38" / "GRCh38.primary_assembly.genome.fa"
+CADD_SNV = RES / "annotation" / "cadd" / "v1.7" / "whole_genome_SNVs.tsv.gz"
+CADD_INDEL = RES / "annotation" / "cadd" / "v1.7" / "gnomad.genomes.r4.0.indel.tsv.gz"
+ALPHAMISSENSE = RES / "annotation" / "alphamissense" / "AlphaMissense_hg38.tsv.gz"
+CLINVAR = RES / "annotation" / "clinvar" / "clinvar.vcf.gz"
+CCRE_BED = RES / "annotation" / "encode_screen" / "GRCh38-cCREs.V4.bed"
+CONSTRAINT = RES / "annotation" / "gnomad" / "gnomad.v4.1.constraint_metrics.tsv"
+PHYLOP = RES / "annotation" / "conservation" / "hg38.phyloP100way.bw"
 
 ANCESTRY_ALIASES = {
     "eur": ("EUR", "European"),
@@ -482,7 +357,7 @@ def request_session() -> requests.Session:
     s.headers.update(
         {
             "Accept": "application/json",
-            "User-Agent": f"GWAS2m-Step07/{VERSION}",
+            "User-Agent": f"GWAS2Mech-Step08/{VERSION}",
         }
     )
     return s
@@ -652,426 +527,8 @@ def load_finemapped(path: Path) -> pd.DataFrame:
     return x
 
 
-def discover_studies(
-    root: Path,
-    phenotype: str,
-    ancestry_label: str,
-    allow_partial: bool,
-) -> tuple[list[tuple[str, Path]], list[dict[str, Any]]]:
-    phenotype_slug = slugify(phenotype)
-    ancestry_slug = slugify(ancestry_label)
-    fine_root = root / "06_finemapping" / phenotype_slug / ancestry_slug
-
-    if not fine_root.exists():
-        raise FileNotFoundError(f"Step06 directory not found: {fine_root}")
-
-    studies: list[tuple[str, Path]] = []
-    excluded: list[dict[str, Any]] = []
-
-    dirs = sorted(p for p in fine_root.iterdir() if p.is_dir())
-
-    for d in dirs:
-        accession = d.name
-        fine_file = d / f"{accession}_finemapped_variants.tsv.gz"
-        summary_file = d / "finemapping_summary.json"
-
-        reason = ""
-
-        if summary_file.exists():
-            try:
-                summary = json.loads(summary_file.read_text(encoding="utf-8"))
-            except Exception:
-                summary = {}
-
-            status = str(summary.get("STATUS", "")).upper()
-            n_loci = safe_int(summary.get("N_LOCI"), 0)
-            n_success = safe_int(summary.get("N_LOCI_SUCCESS"), 0)
-            n_failed = safe_int(summary.get("N_LOCI_FAILED"), 0)
-
-            if status == "NO_SIGNIFICANT_LOCI" or n_loci == 0:
-                reason = "No significant loci"
-            elif n_success == 0 and n_loci > 0:
-                reason = "No successfully fine-mapped loci"
-            elif n_failed > 0 and not allow_partial:
-                reason = f"Partial Step06: {n_success} success / {n_failed} failed"
-
-        if not fine_file.exists() or fine_file.stat().st_size == 0:
-            reason = reason or "Fine-mapped variant file missing/empty"
-
-        if reason:
-            excluded.append({"STUDY_ACCESSION": accession, "REASON": reason})
-        else:
-            studies.append((accession, fine_file))
-
-    if not studies:
-        raise RuntimeError(f"No eligible Step06 studies found under {fine_root}")
-
-    return studies, excluded
-
-
-def build_variant_universe(
-    studies: list[tuple[str, Path]],
-    phenotype: str,
-    ancestry_code: str,
-    ancestry_label: str,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    maps: list[pd.DataFrame] = []
-
-    for accession, path in studies:
-        x = load_finemapped(path)
-        x["STUDY_ACCESSION"] = accession
-        x["PHENOTYPE"] = phenotype
-        x["ANCESTRY_CODE"] = ancestry_code
-        x["ANCESTRY_LABEL"] = ancestry_label
-
-        keep = [
-            c
-            for c in [
-                "STUDY_ACCESSION",
-                "PHENOTYPE",
-                "ANCESTRY_CODE",
-                "ANCESTRY_LABEL",
-                "LOCUS_ID",
-                "VARIANT_KEY",
-                "PRIMARY_RSID",
-                "CHR",
-                "REFERENCE_POS",
-                "REFERENCE_REF",
-                "REFERENCE_ALT",
-                "PIP",
-                "IN_95_CREDIBLE_SET",
-                "PIP_GE_0_01",
-                "PIP_GE_0_10",
-                "PIP_GE_0_50",
-                "PIP_GE_0_90",
-                "REFERENCE_ID",
-                "rsID",
-                "SNPID",
-                "P",
-                "BETA",
-                "SE",
-                "Z",
-                "Z_REF",
-            ]
-            if c in x.columns
-        ]
-        maps.append(x[keep].copy())
-
-    study_map = pd.concat(maps, ignore_index=True)
-
-    study_map = study_map.sort_values(
-        ["STUDY_ACCESSION", "LOCUS_ID", "VARIANT_KEY", "PIP"],
-        ascending=[True, True, True, False],
-        kind="stable",
-    )
-    study_map = study_map.drop_duplicates(
-        ["STUDY_ACCESSION", "LOCUS_ID", "VARIANT_KEY"], keep="first"
-    ).reset_index(drop=True)
-
-    universe = study_map.sort_values(
-        ["VARIANT_KEY", "PIP"],
-        ascending=[True, False],
-        kind="stable",
-    ).drop_duplicates("VARIANT_KEY", keep="first").copy()
-
-    universe = universe[
-        [
-            "VARIANT_KEY",
-            "PRIMARY_RSID",
-            "CHR",
-            "REFERENCE_POS",
-            "REFERENCE_REF",
-            "REFERENCE_ALT",
-        ]
-    ].reset_index(drop=True)
-
-    universe["API_ID"] = [
-        f"GWAS2M_{i:09d}" for i in range(1, len(universe) + 1)
-    ]
-
-    return universe, study_map
-
-
-def build_rsid_universe(universe: pd.DataFrame) -> pd.DataFrame:
-    x = universe[["VARIANT_KEY", "PRIMARY_RSID"]].copy()
-    x["PRIMARY_RSID"] = x["PRIMARY_RSID"].fillna("").astype(str).str.lower()
-    x = x[x["PRIMARY_RSID"].str.match(r"^rs\d+$", na=False)].copy()
-    x = x.sort_values(["PRIMARY_RSID", "VARIANT_KEY"], kind="stable")
-    return x.drop_duplicates("PRIMARY_RSID", keep="first").reset_index(drop=True)
-
-
-def create_batch_manifest(
-    input_file: Path,
-    n_rows: int,
-    batch_size: int,
-    provider: str,
-    output_dir: Path,
-    manifest_file: Path,
-) -> pd.DataFrame:
-    rows = []
-
-    for i, start in enumerate(range(0, n_rows, batch_size), start=1):
-        stop = min(start + batch_size, n_rows)
-        rows.append(
-            {
-                "TASK_ID": i,
-                "PROVIDER": provider,
-                "INPUT_FILE": str(input_file.resolve()),
-                "START_ROW": start,
-                "END_ROW": stop,
-                "N_RECORDS": stop - start,
-                "OUTPUT_FILE": str(
-                    (output_dir / f"batch_{i:06d}.tsv.gz").resolve()
-                ),
-            }
-        )
-
-    manifest = pd.DataFrame(
-        rows,
-        columns=[
-            "TASK_ID",
-            "PROVIDER",
-            "INPUT_FILE",
-            "START_ROW",
-            "END_ROW",
-            "N_RECORDS",
-            "OUTPUT_FILE",
-        ],
-    )
-    manifest_file.parent.mkdir(parents=True, exist_ok=True)
-    manifest.to_csv(manifest_file, sep="\t", index=False)
-    return manifest
-
-
-def slurm_walltime_for_partition(
-    partition: str | None,
-    requested: str | None,
-    *,
-    merge: bool = False,
-) -> str:
-    """Resolve a safe walltime that matches the UQ partition policy.
-
-    Known project policy:
-      * general: maximum 24 hours
-      * asher: unlimited; Slurm represents this as --time=0
-
-    An explicitly supplied --time/--merge-time always wins, except that a
-    general-partition request above 24 h is rejected early instead of letting
-    sbatch fail later with an opaque error.
-    """
-    part = str(partition or "general").strip().lower()
-
-    if requested is not None and str(requested).strip():
-        value = str(requested).strip()
-        if part == "general":
-            # Accept HH:MM:SS or D-HH:MM:SS and enforce <=24 h.
-            text = value
-            days = 0
-            if "-" in text:
-                d, text = text.split("-", 1)
-                days = int(d)
-            fields = text.split(":")
-            if len(fields) not in (2, 3):
-                raise ValueError(
-                    f"Invalid SLURM time {value!r}; use HH:MM:SS or D-HH:MM:SS"
-                )
-            if len(fields) == 2:
-                hours, minutes = map(int, fields)
-                seconds = 0
-            else:
-                hours, minutes, seconds = map(int, fields)
-            total = days * 86400 + hours * 3600 + minutes * 60 + seconds
-            if total > 24 * 3600:
-                raise ValueError(
-                    f"general partition is limited to 24 hours; requested {value}. "
-                    "Use --partition asher for unlimited walltime."
-                )
-        return value
-
-    if part == "general":
-        return "24:00:00"
-    if part == "asher":
-        return "0"
-    return "02:00:00" if merge else "04:00:00"
-
-
-def sbatch_header(
-    job_name: str,
-    log_file: Path,
-    array_spec: str | None,
-    cpus: int,
-    memory: str,
-    walltime: str,
-    partition: str | None,
-) -> str:
-    lines = [
-        "#!/bin/bash",
-        f"#SBATCH --job-name={job_name}",
-        f"#SBATCH --cpus-per-task={cpus}",
-        f"#SBATCH --mem={memory}",
-        f"#SBATCH --time={walltime}",
-        f"#SBATCH --output={log_file}",
-        f"#SBATCH --error={log_file.with_suffix('.err')}",
-        "#SBATCH --export=ALL",
-    ]
-    if array_spec:
-        lines.append(f"#SBATCH --array={array_spec}")
-    if partition:
-        lines.append(f"#SBATCH --partition={partition}")
-    return "\n".join(lines)
-
-
-def write_provider_sbatch(
-    script_path: Path,
-    python_exe: str,
-    this_script: Path,
-    provider: str,
-    manifest: Path,
-    n_tasks: int,
-    max_parallel: int,
-    root: Path,
-    log_root: Path,
-    args: argparse.Namespace,
-) -> None:
-    if n_tasks <= 0:
-        return
-
-    array = f"1-{n_tasks}"
-    if max_parallel > 0:
-        array += f"%{max_parallel}"
-
-    log = log_root / f"{provider}.%A_%a.out"
-
-    header = sbatch_header(
-        job_name=f"S7_{provider}"[:100],
-        log_file=log,
-        array_spec=array,
-        cpus=args.cpus,
-        memory=args.memory,
-        walltime=slurm_walltime_for_partition(args.partition, args.time, merge=False),
-        partition=args.partition,
-    )
-
-    body = f"""
-set -euo pipefail
-cd {shlex.quote(str(root))}
-
-echo "======================================================================"
-echo "STEP07 API PROVIDER: {provider}"
-echo "JOB ID            : $SLURM_JOB_ID"
-echo "ARRAY TASK        : $SLURM_ARRAY_TASK_ID"
-echo "HOST              : $(hostname)"
-echo "DATE              : $(date -Is)"
-echo "======================================================================"
-
-{shlex.quote(python_exe)} {shlex.quote(str(this_script))} \
-  --worker \
-  --provider {shlex.quote(provider)} \
-  --manifest {shlex.quote(str(manifest))} \
-  --task-id "$SLURM_ARRAY_TASK_ID" \
-  --screen-detail-workers {args.screen_detail_workers} \
-  --regulomedb-workers {args.regulomedb_workers} \
-  {"--force" if args.force else ""}
-"""
-    script_path.write_text(header + "\n" + body, encoding="utf-8")
-    script_path.chmod(0o755)
-
-
-def write_merge_sbatch(
-    script_path: Path,
-    python_exe: str,
-    this_script: Path,
-    plan_json: Path,
-    root: Path,
-    log_root: Path,
-    args: argparse.Namespace,
-) -> None:
-    log = log_root / "merge.%j.out"
-    header = sbatch_header(
-        job_name="S7_API_MERGE",
-        log_file=log,
-        array_spec=None,
-        cpus=max(1, args.cpus),
-        memory=args.merge_memory,
-        walltime=slurm_walltime_for_partition(args.partition, args.merge_time, merge=True),
-        partition=args.partition,
-    )
-    body = f"""
-set -euo pipefail
-cd {shlex.quote(str(root))}
-
-{shlex.quote(python_exe)} {shlex.quote(str(this_script))} \
-  --merge \
-  --plan-json {shlex.quote(str(plan_json))}
-"""
-    script_path.write_text(header + "\n" + body, encoding="utf-8")
-    script_path.chmod(0o755)
-
-
-def write_submit_script(
-    path: Path,
-    providers: list[tuple[str, Path, int]],
-    merge_sbatch: Path,
-    screen_required: bool,
-) -> None:
-    lines = [
-        "#!/bin/bash",
-        "set -euo pipefail",
-        "",
-    ]
-
-    if screen_required:
-        lines.extend(
-            [
-                'if [[ -z "${SCREEN_API_KEY:-}" ]]; then',
-                '  echo "ERROR: SCREEN_API_KEY is not set." >&2',
-                '  echo "Create a SCREEN API key and run:" >&2',
-                '  echo "  export SCREEN_API_KEY=YOUR_KEY" >&2',
-                "  exit 2",
-                "fi",
-                "",
-            ]
-        )
-
-    lines.extend(
-        [
-            'echo "Submitting Step07 API annotation arrays..."',
-            "deps=()",
-        ]
-    )
-
-    for provider, sbatch_file, n_tasks in providers:
-        if n_tasks <= 0:
-            continue
-        var = "jid_" + provider
-        lines.extend(
-            [
-                f'{var}=$(sbatch --parsable {shlex.quote(str(sbatch_file))})',
-                f'echo "{provider}: ${var}"',
-                f'deps+=("${var}")',
-            ]
-        )
-
-    lines.extend(
-        [
-            "",
-            'if [[ ${#deps[@]} -eq 0 ]]; then',
-            '  echo "No provider arrays were generated." >&2',
-            "  exit 3",
-            "fi",
-            'dep=$(IFS=:; echo "${deps[*]}")',
-            f'jid_merge=$(sbatch --parsable --dependency=afterok:${{dep}} {shlex.quote(str(merge_sbatch))})',
-            'echo "merge: ${jid_merge}"',
-            'echo "All jobs submitted."',
-        ]
-    )
-
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    path.chmod(0o755)
-
-
 # =============================================================================
-# ENSEMBL VEP API
+# VEP JSON -> one row per variant (most severe / MANE / canonical transcript)
 # =============================================================================
 
 def transcript_rank(tc: dict[str, Any]) -> tuple:
@@ -1266,184 +723,8 @@ def extract_ensembl_vep_record(item: dict[str, Any], api_id: str, vkey: str) -> 
     return out
 
 
-def worker_ensembl_vep(batch: pd.DataFrame, args: argparse.Namespace) -> pd.DataFrame:
-    session = request_session()
-    session.headers.update({"Content-Type": "application/json"})
-
-    payload_variants = []
-    id_to_key = {}
-
-    for r in batch.itertuples(index=False):
-        api_id = str(r.API_ID)
-        id_to_key[api_id] = str(r.VARIANT_KEY)
-        payload_variants.append(
-            f"{int(r.CHR)} {int(r.REFERENCE_POS)} {api_id} "
-            f"{r.REFERENCE_REF} {r.REFERENCE_ALT} . . ."
-        )
-
-    params = {
-        "hgvs": 1,
-        "canonical": 1,
-        "mane": 1,
-        "numbers": 1,
-        "protein": 1,
-        "domains": 1,
-        "uniprot": 1,
-        "symbol": 1,
-        "biotype": 1,
-        "variant_class": 1,
-        "regulatory": 1,
-        "Phenotypes": 1,
-        "AlphaMissense": 1,
-        "CADD": "snv_indels",
-        "REVEL": 1,
-        "ProtVar": 1,
-        "SpliceAI": 2,
-        "Blosum62": 1,
-        "ClinPred": 1,
-        "EVE": 1,
-        "LOEUF": 1,
-        "MaveDB": 1,
-        "OpenTargets": 1,
-    }
-
-    rows: list[dict[str, Any]] = []
-
-    try:
-        r = request_with_retry(
-            session,
-            "POST",
-            f"{ENSEMBL_REST}/vep/{SPECIES}/region",
-            params=params,
-            json={"variants": payload_variants},
-        )
-        data = r.json()
-
-        by_api_id: dict[str, dict[str, Any]] = {}
-        if isinstance(data, list):
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                tokens = str(item.get("input", "")).split()
-                api_id = tokens[2] if len(tokens) >= 3 else ""
-                if api_id:
-                    by_api_id[api_id] = item
-
-        for rec in batch.itertuples(index=False):
-            api_id = str(rec.API_ID)
-            item = by_api_id.get(api_id)
-
-            if item:
-                rows.append(
-                    extract_ensembl_vep_record(
-                        item, api_id, str(rec.VARIANT_KEY)
-                    )
-                )
-            else:
-                rows.append(
-                    {
-                        "VARIANT_KEY": rec.VARIANT_KEY,
-                        "API_ID": api_id,
-                        "ENSEMBL_VEP_STATUS": "NO_HIT",
-                    }
-                )
-
-    except Exception as exc:
-        err = f"{type(exc).__name__}: {exc}"
-        for rec in batch.itertuples(index=False):
-            rows.append(
-                {
-                    "VARIANT_KEY": rec.VARIANT_KEY,
-                    "API_ID": rec.API_ID,
-                    "ENSEMBL_VEP_STATUS": "API_ERROR",
-                    "ENSEMBL_VEP_ERROR": err,
-                }
-            )
-
-    return pd.DataFrame(rows)
-
-
 # =============================================================================
-# ENSEMBL VARIATION API
-# =============================================================================
-
-def worker_ensembl_variation(
-    batch: pd.DataFrame, args: argparse.Namespace
-) -> pd.DataFrame:
-    session = request_session()
-    session.headers.update({"Content-Type": "application/json"})
-
-    ids = batch["PRIMARY_RSID"].dropna().astype(str).str.lower().tolist()
-    rows: list[dict[str, Any]] = []
-
-    if not ids:
-        return pd.DataFrame(columns=["PRIMARY_RSID", "ENSEMBL_VARIATION_STATUS"])
-
-    try:
-        r = request_with_retry(
-            session,
-            "POST",
-            f"{ENSEMBL_REST}/variation/{SPECIES}",
-            params={"pops": 1, "phenotypes": 1},
-            json={"ids": ids},
-        )
-        data = r.json()
-    except Exception as exc:
-        err = f"{type(exc).__name__}: {exc}"
-        return pd.DataFrame(
-            [
-                {
-                    "PRIMARY_RSID": rs,
-                    "ENSEMBL_VARIATION_STATUS": "API_ERROR",
-                    "ENSEMBL_VARIATION_ERROR": err,
-                }
-                for rs in ids
-            ]
-        )
-
-    for rs in ids:
-        obj = data.get(rs) if isinstance(data, dict) else None
-
-        if not isinstance(obj, dict) or not obj:
-            rows.append(
-                {
-                    "PRIMARY_RSID": rs,
-                    "ENSEMBL_VARIATION_STATUS": "NO_HIT",
-                }
-            )
-            continue
-
-        pops = obj.get("populations", []) or []
-        phen = obj.get("phenotypes", []) or []
-
-        rows.append(
-            {
-                "PRIMARY_RSID": rs,
-                "ENSEMBL_VARIATION_STATUS": "OK",
-                "ENSEMBL_VARIATION_AMBIGUITY": obj.get("ambiguity", ""),
-                "ENSEMBL_VARIATION_ANCESTRAL_ALLELE": obj.get(
-                    "ancestral_allele", ""
-                ),
-                "ENSEMBL_VARIATION_MINOR_ALLELE": obj.get("minor_allele", ""),
-                "ENSEMBL_VARIATION_MAF": obj.get(
-                    "MAF", obj.get("minor_allele_freq", "")
-                ),
-                "ENSEMBL_VARIATION_CLINICAL_SIGNIFICANCE": join_unique(
-                    obj.get("clinical_significance", []) or []
-                ),
-                "ENSEMBL_VARIATION_PHENOTYPES_JSON": compact_json(phen),
-                "ENSEMBL_VARIATION_POPULATIONS_JSON": compact_json(pops),
-                "ENSEMBL_VARIATION_MAPPINGS_JSON": compact_json(
-                    obj.get("mappings", []) or []
-                ),
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
-# =============================================================================
-# SCREEN / ENCODE GRAPHQL
+# OPTIONAL ONLINE PROVIDERS: SCREEN (GraphQL) and RegulomeDB
 # =============================================================================
 
 def screen_post(
@@ -2152,1320 +1433,906 @@ def worker_regulomedb(
 # CLINVAR / NCBI E-UTILITIES
 # =============================================================================
 
-def collect_recursive_values(obj: Any, tokens: Iterable[str]) -> dict[str, list[str]]:
-    wanted = tuple(x.lower() for x in tokens)
-    found: dict[str, list[str]] = {}
 
-    def walk(x: Any) -> None:
-        if isinstance(x, dict):
-            for k, v in x.items():
-                lk = str(k).lower()
-                if any(t in lk for t in wanted):
-                    if not isinstance(v, (dict, list)):
-                        found.setdefault(str(k), [])
-                        sv = str(v)
-                        if sv not in found[str(k)]:
-                            found[str(k)].append(sv)
-                walk(v)
-        elif isinstance(x, list):
-            for y in x:
-                walk(y)
+# =============================================================================
+# LOCAL RESOURCES
+# =============================================================================
 
-    walk(obj)
-    return found
+def tool(name: str) -> str | None:
+    local = PROJECT_ROOT / "envs" / "pipeline" / "bin" / name
+    return str(local) if local.exists() else shutil.which(name)
 
 
-def ncbi_sleep() -> None:
-    # Across many SLURM jobs there is no shared rate limiter.
-    # Generated ClinVar array defaults to max-parallel=1.
-    if os.environ.get("NCBI_API_KEY", "").strip():
-        time.sleep(0.12)
-    else:
-        time.sleep(0.38)
+def resource_table() -> list[dict[str, Any]]:
+    """Every local resource Step08 can use, with presence and the download group."""
+    rows = [
+        ("VEP cache", VEP_CACHE_DIR / SPECIES / f"{VEP_RELEASE}_{ASSEMBLY}", "vep", True),
+        ("GRCh38 FASTA (+.fai)", FASTA, "genome", True),
+        ("CADD v1.7 SNVs (+.tbi)", CADD_SNV, "cadd", False),
+        ("CADD v1.7 indels (+.tbi)", CADD_INDEL, "cadd", False),
+        ("AlphaMissense (+.tbi)", ALPHAMISSENSE, "annotation", False),
+        ("ClinVar VCF (+.tbi)", CLINVAR, "annotation", False),
+        ("ENCODE cCRE V4", CCRE_BED, "annotation", False),
+        ("phyloP 100-way bigWig", PHYLOP, "annotation", False),
+        ("gnomAD v4.1 constraint", CONSTRAINT, "annotation", False),
+    ]
+    out = []
+    for name, path, group, needed in rows:
+        index = {".gz": ".tbi", ".fa": ".fai"}.get(path.suffix)
+        present = path.exists() and (index is None or Path(str(path) + index).exists())
+        out.append({"RESOURCE": name, "PATH": str(path), "GROUP": group, "REQUIRED_FOR_VEP": needed,
+                    "PRESENT": present})
+    return out
 
 
-def query_one_clinvar(
-    rsid: str,
-    force: bool,
-    cache_root: Path,
-) -> dict[str, Any]:
-    cache = cache_root / f"{rsid}.json.gz"
-
-    if cache.exists() and not force:
-        try:
-            compact = read_gzip_json(cache)
-            return {
-                "PRIMARY_RSID": rsid,
-                **clinvar_columns(compact),
-                "CLINVAR_SOURCE": "CACHE",
-            }
-        except Exception:
-            pass
-
-    session = request_session()
-
-    common = {
-        "db": "clinvar",
-        "retmode": "json",
-        "tool": "GWAS2m",
-    }
-    email = os.environ.get("NCBI_EMAIL", "").strip()
-    api_key = os.environ.get("NCBI_API_KEY", "").strip()
-    if email:
-        common["email"] = email
-    if api_key:
-        common["api_key"] = api_key
-
-    try:
-        params = dict(common)
-        params.update(
-            {
-                "term": f"{rsid}[All Fields]",
-                "retmax": 20,
-            }
-        )
-        r = request_with_retry(
-            session,
-            "GET",
-            f"{NCBI_EUTILS}/esearch.fcgi",
-            params=params,
-            timeout=120,
-        )
-        ncbi_sleep()
-        search = r.json()
-        ids = (
-            search.get("esearchresult", {}).get("idlist", [])
-            if isinstance(search, dict)
-            else []
-        )
-
-        if not ids:
-            compact = {"status": "NO_HIT", "ids": [], "summaries": []}
-            atomic_write_gzip_json(cache, compact)
-            return {
-                "PRIMARY_RSID": rsid,
-                **clinvar_columns(compact),
-                "CLINVAR_SOURCE": "API",
-            }
-
-        params = dict(common)
-        params.update({"id": ",".join(ids)})
-        r = request_with_retry(
-            session,
-            "GET",
-            f"{NCBI_EUTILS}/esummary.fcgi",
-            params=params,
-            timeout=120,
-        )
-        ncbi_sleep()
-        summary = r.json()
-
-        records = []
-        result = summary.get("result", {}) if isinstance(summary, dict) else {}
-        for uid in ids:
-            obj = result.get(str(uid))
-            if isinstance(obj, dict):
-                records.append(obj)
-
-        compact = {
-            "status": "OK" if records else "NO_HIT",
-            "ids": ids,
-            "summaries": records,
-        }
-        atomic_write_gzip_json(cache, compact)
-
-        return {
-            "PRIMARY_RSID": rsid,
-            **clinvar_columns(compact),
-            "CLINVAR_SOURCE": "API",
-        }
-
-    except Exception as exc:
-        return {
-            "PRIMARY_RSID": rsid,
-            "CLINVAR_STATUS": "API_ERROR",
-            "CLINVAR_ERROR": f"{type(exc).__name__}: {exc}",
-        }
+def print_resources() -> None:
+    banner("STEP 08 - LOCAL ANNOTATION RESOURCES")
+    missing_groups = set()
+    for r in resource_table():
+        print(f"  {'OK     ' if r['PRESENT'] else 'MISSING'}  {r['RESOURCE']:<28} [{r['GROUP']}]  {r['PATH']}")
+        if not r["PRESENT"]:
+            missing_groups.add(r["GROUP"])
+    vep = tool("vep")
+    print(f"  {'OK     ' if vep else 'MISSING'}  {'vep executable':<28} [Step00_Installation]  {vep or ''}")
+    if missing_groups:
+        print("\nDownload the missing groups with:")
+        print("  envs/pipeline/bin/python Step00_Download_Resources.py --groups "
+              + " ".join(sorted(missing_groups)) + " --output Step00_Download_Step08.sh")
+        print("  sbatch Step00_Download_Step08.sh")
 
 
-def clinvar_columns(compact: dict[str, Any]) -> dict[str, Any]:
-    status = compact.get("status", "NO_HIT")
-    summaries = compact.get("summaries", []) or []
-
-    values = collect_recursive_values(
-        summaries,
-        (
-            "clinical_significance",
-            "description",
-            "variation_name",
-            "accession",
-            "trait",
-            "gene",
-            "review_status",
-            "title",
-        ),
-    )
-
-    clinical = []
-    traits = []
-    genes = []
-    accessions = []
-    names = []
-    review = []
-
-    for k, vals in values.items():
-        lk = k.lower()
-        if "clinical_significance" in lk or (
-            "description" in lk
-            and any(
-                x.lower() in {
-                    "pathogenic",
-                    "likely pathogenic",
-                    "benign",
-                    "likely benign",
-                    "uncertain significance",
-                }
-                for x in vals
-            )
-        ):
-            clinical.extend(vals)
-        if "trait" in lk:
-            traits.extend(vals)
-        if "gene" in lk:
-            genes.extend(vals)
-        if "accession" in lk:
-            accessions.extend(vals)
-        if "variation_name" in lk or k.lower() == "title":
-            names.extend(vals)
-        if "review_status" in lk:
-            review.extend(vals)
-
-    return {
-        "CLINVAR_STATUS": status,
-        "CLINVAR_UIDS": join_unique(compact.get("ids", [])),
-        "CLINVAR_CLINICAL_SIGNIFICANCE": join_unique(clinical),
-        "CLINVAR_TRAITS": join_unique(traits, limit=100),
-        "CLINVAR_GENES": join_unique(genes),
-        "CLINVAR_ACCESSIONS": join_unique(accessions),
-        "CLINVAR_VARIATION_NAMES": join_unique(names, limit=100),
-        "CLINVAR_REVIEW_STATUS": join_unique(review),
-        "CLINVAR_SUMMARY_JSON": compact_json(summaries),
-    }
-
-
-def worker_clinvar(
-    batch: pd.DataFrame,
-    args: argparse.Namespace,
-    output_file: Path,
-) -> pd.DataFrame:
-    cache_root = output_file.parent.parent.parent / "cache" / "clinvar"
-    cache_root.mkdir(parents=True, exist_ok=True)
-
-    rows = []
-
-    # Deliberately sequential within a task. NCBI has explicit request limits and
-    # the SLURM array already supplies concurrency.
-    for i, rs in enumerate(batch["PRIMARY_RSID"].astype(str), start=1):
-        rows.append(query_one_clinvar(rs.lower(), args.force, cache_root))
-        print(f"  ClinVar {i:,}/{len(batch):,} {rs}", flush=True)
-
-    return pd.DataFrame(rows)
+def tabix_contig(contigs: Iterable[str], chrom: int) -> str | None:
+    contigs = set(contigs)
+    for name in (str(chrom), f"chr{chrom}"):
+        if name in contigs:
+            return name
+    return None
 
 
 # =============================================================================
-# WORKER ROUTING
+# 1. ENSEMBL VEP (offline cache)
 # =============================================================================
 
-def load_task_batch(manifest_file: Path, task_id: int) -> tuple[pd.DataFrame, Path]:
-    manifest = pd.read_csv(manifest_file, sep="\t", dtype=str)
-    task_nums = pd.to_numeric(manifest["TASK_ID"], errors="coerce")
-    row = manifest.loc[task_nums == task_id]
-
-    if len(row) != 1:
-        raise RuntimeError(
-            f"Expected exactly one manifest row for TASK_ID={task_id}; found {len(row)}"
-        )
-
-    r = row.iloc[0]
-    input_file = Path(r["INPUT_FILE"]).resolve()
-    start = int(r["START_ROW"])
-    end = int(r["END_ROW"])
-    output_file = Path(r["OUTPUT_FILE"]).resolve()
-
-    data = read_tsv(input_file)
-    batch = data.iloc[start:end].copy().reset_index(drop=True)
-
-    expected = int(r["N_RECORDS"])
-    if len(batch) != expected:
-        raise RuntimeError(
-            f"Batch length mismatch: expected {expected}, observed {len(batch)}"
-        )
-
-    return batch, output_file
+def write_vep_input(universe: pd.DataFrame, path: Path) -> None:
+    rows = universe.sort_values(["CHR", "REFERENCE_POS"])
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
+        for r in rows.itertuples(index=False):
+            handle.write(f"{r.CHR}\t{r.REFERENCE_POS}\t{r.VARIANT_KEY}\t{r.REFERENCE_REF}\t{r.REFERENCE_ALT}\t.\t.\t.\n")
 
 
-def worker_mode(args: argparse.Namespace) -> None:
-    manifest_file = Path(args.manifest).resolve()
-    batch, output_file = load_task_batch(manifest_file, args.task_id)
+def write_synonyms(path: Path) -> Path | None:
+    """VEP input uses 1..22 like the cache; the GENCODE FASTA uses chr1..: map them."""
+    fai = Path(str(FASTA) + ".fai")
+    if not fai.exists():
+        return None
+    first = fai.read_text(encoding="utf-8", errors="replace").split("\t", 1)[0]
+    if not first.startswith("chr"):
+        return None
+    names = [str(c) for c in range(1, 23)] + ["X", "Y"]
+    path.write_text("".join(f"{c}\tchr{c}\n" for c in names) + "MT\tchrM\n", encoding="utf-8")
+    return path
 
-    banner(
-        f"STEP07 API WORKER — {args.provider.upper()} — TASK {args.task_id}"
-    )
-    print(f"Manifest     : {manifest_file}")
-    print(f"Records      : {len(batch):,}")
-    print(f"Output       : {output_file}")
-    print(f"Force        : {args.force}")
-    print(f"Host         : {os.uname().nodename}")
-    print(f"Started      : {utc_now()}")
 
-    if output_file.exists() and output_file.stat().st_size > 50 and not args.force:
-        print(f"[CACHE] Reusing existing shard: {output_file}")
-        return
+def vep_command(vcf: Path, out_json: Path, threads: int, args) -> list[str]:
+    vep = args.vep_path or tool("vep")
+    if not vep:
+        raise RuntimeError("vep not found. Run: python Step00_Installation.py")
+    command = [vep, "--input_file", str(vcf), "--format", "vcf", "--output_file", str(out_json), "--json",
+               "--force_overwrite", "--no_stats", "--species", SPECIES, "--assembly", ASSEMBLY,
+               "--fork", str(max(1, threads)), "--buffer_size", "5000",
+               "--hgvs", "--symbol", "--canonical", "--mane", "--biotype", "--numbers", "--domains",
+               "--uniprot", "--protein", "--variant_class", "--regulatory", "--sift", "b", "--polyphen", "b",
+               "--check_existing", "--af", "--af_gnomade", "--af_gnomadg", "--max_af", "--appris", "--tsl",
+               "--ccds", "--gene_phenotype"]
+    if args.vep_gtf:
+        # Testing only: gene models from a bgzipped + tabix-indexed GTF instead of the
+        # cache. Frequencies, rsIDs, SIFT/PolyPhen, UniProt, domains and regulatory
+        # features exist only in the cache, so those options are dropped here.
+        cache_only = {"--af", "--af_gnomade", "--af_gnomadg", "--max_af", "--check_existing", "--regulatory",
+                      "--domains", "--uniprot", "--appris", "--tsl", "--ccds", "--gene_phenotype", "--mane"}
+        keep, skip_next = [], False
+        for x in command:
+            if skip_next:
+                skip_next = False
+            elif x in ("--sift", "--polyphen"):
+                skip_next = True
+            elif x not in cache_only:
+                keep.append(x)
+        keep += ["--gtf", str(args.vep_gtf), "--fasta", str(FASTA)]
+        synonyms = write_synonyms(out_json.with_name("chr_synonyms.txt"))
+        return keep + (["--synonyms", str(synonyms)] if synonyms else [])
+    cache = VEP_CACHE_DIR / SPECIES / f"{VEP_RELEASE}_{ASSEMBLY}"
+    if not cache.exists():
+        raise RuntimeError(f"VEP cache missing: {cache}\nRun: Step00_Download_Resources.py --groups vep")
+    if not FASTA.exists():
+        raise RuntimeError(f"GRCh38 FASTA missing: {FASTA}\nRun: Step00_Download_Resources.py --groups genome")
+    command += ["--offline", "--cache", "--dir_cache", str(VEP_CACHE_DIR), "--cache_version", VEP_RELEASE,
+                "--fasta", str(FASTA)]
+    synonyms = write_synonyms(out_json.with_name("chr_synonyms.txt"))
+    if synonyms:
+        command += ["--synonyms", str(synonyms)]
+    return command
 
-    provider = args.provider.lower()
 
-    if provider == "ensembl_vep":
-        result = worker_ensembl_vep(batch, args)
-    elif provider == "ensembl_variation":
-        result = worker_ensembl_variation(batch, args)
-    elif provider == "screen":
-        result = worker_screen(batch, args, output_file)
-    elif provider == "regulomedb":
-        result = worker_regulomedb(batch, args, output_file)
-    elif provider == "clinvar":
-        result = worker_clinvar(batch, args, output_file)
-    else:
-        raise ValueError(f"Unknown provider: {provider}")
+def frequency_columns(item: dict[str, Any], alt: str) -> dict[str, Any]:
+    """gnomAD v4 / 1000G allele frequencies of the ALT allele (co-located variants)."""
+    out: dict[str, Any] = {}
+    rsids = []
+    for colocated in item.get("colocated_variants", []) or []:
+        if not isinstance(colocated, dict):
+            continue
+        cid = str(colocated.get("id", ""))
+        if cid.startswith("rs"):
+            rsids.append(cid)
+        freqs = (colocated.get("frequencies") or {}).get(alt) or {}
+        for key, column in (("gnomadg", "GNOMADG_AF"), ("gnomadg_nfe", "GNOMADG_NFE_AF"),
+                            ("gnomade", "GNOMADE_AF"), ("gnomade_nfe", "GNOMADE_NFE_AF"),
+                            ("af", "KG_AF"), ("eur", "KG_EUR_AF"), ("max_af", "MAX_AF")):
+            if key in freqs and column not in out:
+                out[column] = freqs[key]
+        if "max_af_pops" in freqs and "MAX_AF_POPS" not in out:
+            out["MAX_AF_POPS"] = ",".join(freqs["max_af_pops"]) if isinstance(freqs["max_af_pops"], list) \
+                else freqs["max_af_pops"]
+    out["VEP_RSIDS"] = join_unique(rsids)
+    return out
 
-    if result.empty:
-        raise RuntimeError(f"{provider} produced an empty result table")
 
-    write_tsv_gz(result, output_file)
+def annotate_vep(universe: pd.DataFrame, work: Path, threads: int, args) -> tuple[pd.DataFrame, dict]:
+    vcf, out_json = work / "vep_input.vcf", work / "vep_output.json"
+    write_vep_input(universe, vcf)
+    command = vep_command(vcf, out_json, threads, args)
+    print("$ " + " ".join(shlex.quote(x) for x in command), flush=True)
+    log = work / "vep.log"
+    with open(log, "w", encoding="utf-8") as handle:
+        result = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT)
+    if result.returncode != 0 or not out_json.exists():
+        tail = log.read_text(encoding="utf-8", errors="replace")[-3000:]
+        raise RuntimeError(f"VEP failed (exit {result.returncode}). Log: {log}\n{tail}")
 
-    status_cols = [c for c in result.columns if c.endswith("_STATUS")]
-    print()
-    print(f"Rows written : {len(result):,}")
-    if status_cols:
-        for c in status_cols:
-            print(f"\n{c}")
-            print(result[c].fillna("").value_counts(dropna=False).to_string())
-    print(f"\nFinished     : {utc_now()}")
+    alt_of = dict(zip(universe["VARIANT_KEY"], universe["REFERENCE_ALT"]))
+    rows, version = [], ""
+    with open(out_json, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            item = json.loads(line)
+            key = str(item.get("id", ""))
+            record = extract_ensembl_vep_record(item, key, key)
+            record.update(frequency_columns(item, alt_of.get(key, "")))
+            rows.append(record)
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        if "ensembl-vep" in line.lower() or "VEP version" in line:
+            version = line.strip()
+            break
+    table = pd.DataFrame(rows)
+    if not table.empty:
+        table = table.drop(columns=[c for c in ("API_ID",) if c in table.columns])
+        table = table.rename(columns={c: c.replace("ENSEMBL_", "VEP_", 1) for c in table.columns
+                                      if c.startswith("ENSEMBL_")})
+    info = {"source": "Ensembl VEP " + (f"--gtf {args.vep_gtf} (test)" if args.vep_gtf else f"{VEP_RELEASE} offline cache"),
+            "annotated": int(len(table)), "log_version_line": version}
+    return table, info
 
 
 # =============================================================================
-# MERGE
+# 2-4. TABIX LOOKUPS: CADD, ALPHAMISSENSE, CLINVAR
 # =============================================================================
 
-def read_provider_shards(directory: Path) -> pd.DataFrame:
-    files = sorted(directory.glob("batch_*.tsv.gz"))
-    if not files:
-        return pd.DataFrame()
+def tabix_lookup(universe: pd.DataFrame, path: Path, parse, label: str) -> tuple[pd.DataFrame, dict]:
+    """parse(fields, ref, alt) -> dict or None for every record at the variant position."""
+    import pysam
 
-    parts = []
-    for i, f in enumerate(files, start=1):
-        x = read_tsv(f)
-        parts.append(x)
-        if i == 1 or i % 50 == 0 or i == len(files):
-            print(
-                f"  {directory.name:<20s}: {i:,}/{len(files):,} shards",
-                flush=True,
-            )
+    if not path.exists() or not Path(str(path) + ".tbi").exists():
+        return pd.DataFrame({"VARIANT_KEY": universe["VARIANT_KEY"], f"{label}_STATUS": "NOT_AVAILABLE"}), \
+            {"source": str(path), "status": "NOT_AVAILABLE"}
+    rows, hits = [], 0
+    with pysam.TabixFile(str(path)) as tbx:
+        contigs = tbx.contigs
+        for r in universe.itertuples(index=False):
+            contig = tabix_contig(contigs, r.CHR)
+            out = {"VARIANT_KEY": r.VARIANT_KEY, f"{label}_STATUS": "NO_HIT"}
+            if contig is not None:
+                try:
+                    lines = tbx.fetch(contig, int(r.REFERENCE_POS) - 1, int(r.REFERENCE_POS))
+                except ValueError:
+                    lines = []
+                for line in lines:
+                    fields = line.split("\t")
+                    try:
+                        if int(fields[1]) != int(r.REFERENCE_POS):
+                            continue
+                    except (ValueError, IndexError):
+                        continue
+                    value = parse(fields, r.REFERENCE_REF, r.REFERENCE_ALT)
+                    if value:
+                        out.update(value)
+                        out[f"{label}_STATUS"] = "OK"
+                        hits += 1
+                        break
+            rows.append(out)
+    return pd.DataFrame(rows), {"source": str(path), "status": "OK", "hits": hits}
 
-    return pd.concat(parts, ignore_index=True)
+
+def parse_cadd(fields, ref, alt):
+    # #Chrom Pos Ref Alt RawScore PHRED
+    if len(fields) >= 6 and fields[2] == ref and fields[3] == alt:
+        return {"CADD_RAW": float(fields[4]), "CADD_PHRED": float(fields[5])}
+    return None
 
 
-def combine_unique_annotation(base: pd.DataFrame, extra: pd.DataFrame, key: str) -> pd.DataFrame:
-    if extra.empty:
-        return base
-    extra = extra.sort_values(key, kind="stable").drop_duplicates(key, keep="first")
-    overlap = [c for c in extra.columns if c in base.columns and c != key]
-    if overlap:
-        extra = extra.drop(columns=overlap)
-    return base.merge(extra, on=key, how="left", validate="one_to_one")
+def annotate_cadd(universe: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    snv = (universe["REFERENCE_REF"].str.len() == 1) & (universe["REFERENCE_ALT"].str.len() == 1)
+    a, info_a = tabix_lookup(universe[snv], CADD_SNV, parse_cadd, "CADD")
+    b, info_b = tabix_lookup(universe[~snv], CADD_INDEL, parse_cadd, "CADD")
+    status = "OK" if "OK" in (info_a["status"], info_b["status"]) else "NOT_AVAILABLE"
+    return pd.concat([a, b], ignore_index=True), {"snv": info_a, "indel": info_b, "version": "CADD v1.7",
+                                                  "status": status}
 
 
-def first_nonempty(series: pd.Series) -> str:
-    for x in series:
-        if pd.notna(x) and str(x).strip() not in {"", "nan", "None"}:
-            return str(x)
+def parse_alphamissense(fields, ref, alt):
+    # #CHROM POS REF ALT genome uniprot_id transcript_id protein_variant am_pathogenicity am_class
+    if len(fields) >= 10 and fields[2] == ref and fields[3] == alt:
+        return {"AM_PATHOGENICITY": float(fields[8]), "AM_CLASS": fields[9].strip(),
+                "AM_UNIPROT": fields[5], "AM_TRANSCRIPT": fields[6], "AM_PROTEIN_VARIANT": fields[7]}
+    return None
+
+
+def parse_clinvar(fields, ref, alt):
+    # VCF: CHROM POS ID REF ALT QUAL FILTER INFO
+    if len(fields) < 8 or fields[3] != ref or alt not in fields[4].split(","):
+        return None
+    info = dict(x.split("=", 1) for x in fields[7].split(";") if "=" in x)
+    return {"CLINVAR_VARIATION_ID": fields[2],
+            "CLINVAR_SIGNIFICANCE": info.get("CLNSIG", "").replace("_", " "),
+            "CLINVAR_REVIEW_STATUS": info.get("CLNREVSTAT", "").replace("_", " "),
+            "CLINVAR_CONDITIONS": info.get("CLNDN", "").replace("_", " "),
+            "CLINVAR_ALLELE_ID": info.get("ALLELEID", "")}
+
+
+def clinvar_release() -> str:
+    if not CLINVAR.exists():
+        return ""
+    with gzip.open(CLINVAR, "rt", errors="replace") as handle:
+        for line in handle:
+            if line.startswith("##fileDate="):
+                return line.strip().split("=", 1)[1]
+            if not line.startswith("##"):
+                break
     return ""
 
 
-def locus_summary(master: pd.DataFrame) -> pd.DataFrame:
+# =============================================================================
+# 5-7. INTERVALS / TRACKS: cCRE, phyloP, gene constraint
+# =============================================================================
+
+_CCRE_CACHE: dict | None = None
+
+
+def load_ccres() -> dict | None:
+    global _CCRE_CACHE
+    if _CCRE_CACHE is not None or not CCRE_BED.exists():
+        return _CCRE_CACHE
+    bed = pd.read_csv(CCRE_BED, sep="\t", header=None, usecols=[0, 1, 2, 4, 5],
+                      names=["CHR", "START", "END", "ACCESSION", "CLASS"], dtype={"CHR": str})
+    bed["CHR"] = bed["CHR"].str.replace("chr", "", regex=False)
+    _CCRE_CACHE = {}
+    for chrom, group in bed.groupby("CHR"):
+        group = group.sort_values("START")
+        _CCRE_CACHE[chrom] = (group["START"].to_numpy(), group["END"].to_numpy(),
+                              group["ACCESSION"].to_numpy(), group["CLASS"].to_numpy())
+    return _CCRE_CACHE
+
+
+def annotate_ccre(universe: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    ccres = load_ccres()
+    if ccres is None:
+        return pd.DataFrame({"VARIANT_KEY": universe["VARIANT_KEY"], "CCRE_STATUS": "NOT_AVAILABLE"}), \
+            {"source": str(CCRE_BED), "status": "NOT_AVAILABLE"}
     rows = []
+    for r in universe.itertuples(index=False):
+        out = {"VARIANT_KEY": r.VARIANT_KEY, "CCRE_ACCESSION": "", "CCRE_CLASS": "", "IN_CCRE": False}
+        data = ccres.get(str(r.CHR))
+        if data is not None:
+            starts, ends, acc, cls = data
+            i = np.searchsorted(starts, r.REFERENCE_POS - 1, side="right") - 1   # BED 0-based, half-open
+            if i >= 0 and r.REFERENCE_POS <= ends[i]:
+                out.update({"CCRE_ACCESSION": acc[i], "CCRE_CLASS": cls[i], "IN_CCRE": True})
+        rows.append(out)
+    table = pd.DataFrame(rows)
+    return table, {"source": str(CCRE_BED), "status": "OK", "in_ccre": int(table["IN_CCRE"].sum())}
 
-    for (study, locus), g in master.groupby(
-        ["STUDY_ACCESSION", "LOCUS_ID"], sort=False, dropna=False
-    ):
-        g = g.copy()
-        pips = pd.to_numeric(g["PIP"], errors="coerce")
-        top_idx = pips.idxmax() if pips.notna().any() else g.index[0]
-        top = g.loc[top_idx]
 
-        classes = (
-            g.get("FINAL_FUNCTIONAL_CLASS", pd.Series("", index=g.index))
-            .fillna("")
-            .astype(str)
-        )
+def annotate_phylop(universe: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    if not PHYLOP.exists():
+        return pd.DataFrame({"VARIANT_KEY": universe["VARIANT_KEY"], "PHYLOP_STATUS": "NOT_AVAILABLE"}), \
+            {"source": str(PHYLOP), "status": "NOT_AVAILABLE"}
+    import pyBigWig
+    rows = []
+    with pyBigWig.open(str(PHYLOP)) as bw:
+        chroms = bw.chroms()
+        for r in universe.itertuples(index=False):
+            name = tabix_contig(chroms.keys(), r.CHR)
+            value = np.nan
+            if name is not None:
+                start = int(r.REFERENCE_POS) - 1
+                end = start + max(1, len(str(r.REFERENCE_REF)))
+                vals = [v for v in bw.values(name, start, min(end, chroms[name])) if v == v]
+                value = float(np.max(vals)) if vals else np.nan
+            rows.append({"VARIANT_KEY": r.VARIANT_KEY, "PHYLOP_100WAY": value})
+    return pd.DataFrame(rows), {"source": str(PHYLOP), "status": "OK"}
 
-        rows.append(
-            {
-                "STUDY_ACCESSION": study,
-                "LOCUS_ID": locus,
-                "N_VARIANTS": len(g),
-                "MAX_PIP": float(pips.max()) if pips.notna().any() else np.nan,
-                "TOP_VARIANT": top.get("VARIANT_KEY", ""),
-                "TOP_RSID": top.get("PRIMARY_RSID", ""),
-                "TOP_GENE": top.get("ENSEMBL_GENE_SYMBOL", ""),
-                "TOP_CONSEQUENCE": top.get("ENSEMBL_BEST_CONSEQUENCE", ""),
-                "N_CODING": int((classes == "CODING").sum()),
-                "N_SPLICING": int((classes == "SPLICING").sum()),
-                "N_REGULATORY": int((classes == "REGULATORY").sum()),
-                "N_NONCODING_RNA": int((classes == "NONCODING_RNA").sum()),
-                "N_INTRONIC": int((classes == "INTRONIC").sum()),
-                "N_INTERGENIC": int((classes == "INTERGENIC").sum()),
-                "CANDIDATE_GENES": join_unique(
-                    g.get("ENSEMBL_ALL_SYMBOLS", pd.Series("", index=g.index))
-                ),
-                "SCREEN_CCRE_GROUPS": join_unique(
-                    g.get("SCREEN_CCRE_GROUPS", pd.Series("", index=g.index))
-                ),
-                "SCREEN_TARGET_GENES": join_unique(
-                    pd.concat(
-                        [
-                            g.get(
-                                "SCREEN_LINKED_GENES_EXPERIMENTAL",
-                                pd.Series("", index=g.index),
-                            ),
-                            g.get(
-                                "SCREEN_LINKED_GENES_COMPUTATIONAL",
-                                pd.Series("", index=g.index),
-                            ),
-                        ],
-                        ignore_index=True,
-                    )
-                ),
-                "CLINVAR_SIGNIFICANCE": join_unique(
-                    g.get(
-                        "CLINVAR_CLINICAL_SIGNIFICANCE",
-                        pd.Series("", index=g.index),
-                    )
-                ),
-                "REGULOMEDB_RANKINGS": join_unique(
-                    g.get("REGULOMEDB_RANKING", pd.Series("", index=g.index))
-                ),
-            }
-        )
 
+_CONSTRAINT_CACHE: pd.DataFrame | None = None
+
+
+def gene_constraint() -> pd.DataFrame | None:
+    """LOEUF / pLI / missense Z per Ensembl gene (canonical, else MANE transcript)."""
+    global _CONSTRAINT_CACHE
+    if _CONSTRAINT_CACHE is not None or not CONSTRAINT.exists():
+        return _CONSTRAINT_CACHE
+    c = pd.read_csv(CONSTRAINT, sep="\t", dtype=str,
+                    usecols=lambda x: x in ("gene", "gene_id", "canonical", "mane_select", "lof.oe_ci.upper",
+                                            "lof.pLI", "mis.z_score", "lof.oe"))
+    c = c[c["gene_id"].fillna("").str.startswith("ENSG")].copy()
+    c["_rank"] = np.where(c["canonical"].str.lower() == "true", 0,
+                          np.where(c["mane_select"].str.lower() == "true", 1, 2))
+    c = c.sort_values("_rank").drop_duplicates("gene_id")
+    _CONSTRAINT_CACHE = pd.DataFrame({
+        "GENE_ID_NOVERSION": c["gene_id"].str.split(".").str[0],
+        "GNOMAD_LOEUF": pd.to_numeric(c["lof.oe_ci.upper"], errors="coerce"),
+        "GNOMAD_PLI": pd.to_numeric(c.get("lof.pLI"), errors="coerce"),
+        "GNOMAD_MIS_Z": pd.to_numeric(c.get("mis.z_score"), errors="coerce"),
+    })
+    return _CONSTRAINT_CACHE
+
+
+# =============================================================================
+# OPTIONAL ONLINE (credible-set variants only)
+# =============================================================================
+
+def annotate_online(universe: pd.DataFrame, cs_keys: set, P: dict, accession: str, args) -> tuple[pd.DataFrame, dict]:
+    providers = [x.strip() for x in (args.online or "").split(",") if x.strip()]
+    if not providers:
+        return pd.DataFrame({"VARIANT_KEY": universe["VARIANT_KEY"]}), {}
+    batch = universe[universe["VARIANT_KEY"].isin(cs_keys)].copy()
+    anchor = P["out"] / "_online" / accession / "shard.tsv"   # cache: <out>/cache/<provider>
+    anchor.parent.mkdir(parents=True, exist_ok=True)
+    online_args = argparse.Namespace(force=False, regulomedb_workers=2, screen_detail_workers=2,
+                                     screen_active_z=args.screen_active_z)
+    result, info = pd.DataFrame({"VARIANT_KEY": universe["VARIANT_KEY"]}), {}
+    for provider in providers:
+        if batch.empty:
+            break
+        if provider == "screen":
+            table = worker_screen(batch, online_args, anchor)
+        elif provider == "regulomedb":
+            table = worker_regulomedb(batch, online_args, anchor)
+        else:
+            raise SystemExit(f"Unknown --online provider {provider!r} (screen, regulomedb)")
+        info[provider] = {"variants_queried": int(len(batch))}
+        if not table.empty and "VARIANT_KEY" in table.columns:
+            result = result.merge(table.drop_duplicates("VARIANT_KEY"), on="VARIANT_KEY", how="left")
+    return result, info
+
+
+# =============================================================================
+# ONE STUDY
+# =============================================================================
+
+# Columns the summaries rely on; created empty when a source is skipped / missing.
+ANNOTATION_COLUMNS = {
+    "VEP_BEST_CONSEQUENCE": "", "VEP_FUNCTIONAL_CATEGORY": "NOT_ANNOTATED", "VEP_GENE_SYMBOL": "",
+    "VEP_GENE_ID": "", "VEP_HGVSC": "", "VEP_HGVSP": "", "CADD_PHRED": np.nan, "CADD_RAW": np.nan,
+    "AM_PATHOGENICITY": np.nan, "AM_CLASS": "", "CLINVAR_SIGNIFICANCE": "", "CCRE_ACCESSION": "",
+    "CCRE_CLASS": "", "IN_CCRE": False, "PHYLOP_100WAY": np.nan, "GNOMADG_AF": np.nan,
+    "GNOMADG_NFE_AF": np.nan, "GNOMAD_LOEUF": np.nan,
+}
+
+
+def ensure_columns(m: pd.DataFrame) -> pd.DataFrame:
+    for column, default in ANNOTATION_COLUMNS.items():
+        if column not in m.columns:
+            m[column] = default
+    m["VEP_FUNCTIONAL_CATEGORY"] = m["VEP_FUNCTIONAL_CATEGORY"].fillna("NOT_ANNOTATED")
+    return m
+
+
+LOF_TERMS = {"stop_gained", "frameshift_variant", "splice_acceptor_variant", "splice_donor_variant",
+             "start_lost", "stop_lost", "transcript_ablation"}
+
+
+def derive_flags(m: pd.DataFrame) -> pd.DataFrame:
+    cons = m.get("VEP_BEST_CONSEQUENCE", pd.Series("", index=m.index)).fillna("").astype(str)
+    m["IS_LOF"] = cons.apply(lambda s: bool(set(s.split(";")) & LOF_TERMS))
+    m["IS_MISSENSE"] = cons.str.contains("missense_variant")
+    m["IS_CODING"] = m.get("VEP_FUNCTIONAL_CATEGORY", "").astype(str).eq("CODING")
+    m["IS_SPLICE"] = m.get("VEP_FUNCTIONAL_CATEGORY", "").astype(str).eq("SPLICING")
+    m["CADD_GE_20"] = pd.to_numeric(m.get("CADD_PHRED"), errors="coerce") >= 20
+    m["AM_LIKELY_PATHOGENIC"] = m.get("AM_CLASS", pd.Series("", index=m.index)).fillna("").eq("likely_pathogenic")
+    sig = m.get("CLINVAR_SIGNIFICANCE", pd.Series("", index=m.index)).fillna("").str.lower()
+    m["CLINVAR_PATHOGENIC"] = sig.str.contains("pathogenic") & ~sig.str.contains("conflicting")
+    m["PHYLOP_CONSERVED"] = pd.to_numeric(m.get("PHYLOP_100WAY"), errors="coerce") >= 2.0
+    evidence = []
+    for _, r in m.iterrows():
+        e = []
+        if r["IS_LOF"]:
+            e.append("LoF")
+        elif r["IS_MISSENSE"]:
+            e.append("missense")
+        elif r["IS_SPLICE"]:
+            e.append("splice")
+        if r["AM_LIKELY_PATHOGENIC"]:
+            e.append("AlphaMissense likely pathogenic")
+        if r["CADD_GE_20"]:
+            e.append("CADD>=20")
+        if r["CLINVAR_PATHOGENIC"]:
+            e.append("ClinVar P/LP")
+        if str(r.get("IN_CCRE", "")) == "True":
+            e.append(f"cCRE {r.get('CCRE_CLASS', '')}")
+        if r["PHYLOP_CONSERVED"]:
+            e.append("conserved")
+        evidence.append("; ".join(e))
+    m["FUNCTIONAL_EVIDENCE"] = evidence
+    return m
+
+
+def locus_table(m: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    category = m.get("VEP_FUNCTIONAL_CATEGORY", pd.Series("NOT_ANNOTATED", index=m.index)).fillna("NOT_ANNOTATED")
+    for locus, g in m.groupby("LOCUS_ID", sort=True):
+        cs = g[g["IN_95_CREDIBLE_SET"]]
+        top = g.sort_values("PIP", ascending=False).iloc[0]
+        pip = g["PIP"].clip(lower=0)
+        total = float(pip.sum()) or 1.0
+        weights = pip.groupby(category.loc[g.index]).sum() / total
+        rows.append({
+            "LOCUS_ID": locus,
+            "CHR": int(top["CHR"]),
+            "N_VARIANTS": int(len(g)),
+            "N_CS_VARIANTS": int(len(cs)),
+            "TOP_VARIANT": top["VARIANT_KEY"],
+            "TOP_RSID": top.get("PRIMARY_RSID", ""),
+            "TOP_PIP": round(float(top["PIP"]), 4),
+            "TOP_GENE": top.get("VEP_GENE_SYMBOL", ""),
+            "TOP_CONSEQUENCE": top.get("VEP_BEST_CONSEQUENCE", ""),
+            "TOP_EVIDENCE": top.get("FUNCTIONAL_EVIDENCE", ""),
+            "CS_GENES": join_unique(cs.get("VEP_GENE_SYMBOL", [])),
+            "CS_CODING_VARIANTS": join_unique(cs.loc[cs["IS_CODING"], "VARIANT_KEY"]) if len(cs) else "",
+            "CS_LOF_OR_MISSENSE": join_unique(cs.loc[cs["IS_LOF"] | cs["IS_MISSENSE"], "VARIANT_KEY"]) if len(cs) else "",
+            "CS_CLINVAR_PATHOGENIC": join_unique(cs.loc[cs["CLINVAR_PATHOGENIC"], "VARIANT_KEY"]) if len(cs) else "",
+            "CS_MAX_CADD_PHRED": pd.to_numeric(cs.get("CADD_PHRED"), errors="coerce").max() if len(cs) else np.nan,
+            "CS_N_IN_CCRE": int((cs.get("IN_CCRE", pd.Series(dtype=object)).astype(str) == "True").sum()),
+            "CS_CCRE_CLASSES": join_unique(cs.get("CCRE_CLASS", [])),
+            **{f"PIP_FRACTION_{k}": round(float(v), 4) for k, v in weights.items()},
+        })
     return pd.DataFrame(rows)
 
 
-def derive_final_class(row: pd.Series) -> str:
-    """Primary transcript/consequence class retained for backwards compatibility."""
-    base = str(row.get("ENSEMBL_FUNCTIONAL_CATEGORY", "") or "").strip()
-    if base:
-        return base
-    screen_ok = str(row.get("SCREEN_STATUS", "")) == "OK"
-    reg_ok = str(row.get("REGULOMEDB_STATUS", "")) == "OK"
-    if screen_ok or reg_ok:
-        return "REGULATORY"
-    return "OTHER"
+def annotate_universe(universe: pd.DataFrame, work: Path, threads: int, args, P=None, accession="",
+                      cs_keys=frozenset()) -> tuple[pd.DataFrame, dict]:
+    provenance: dict[str, Any] = {}
+    merged = universe.copy()
+    steps = []
+    if not args.no_vep:
+        steps.append(("vep", lambda: annotate_vep(universe, work, threads, args)))
+    steps += [("cadd", lambda: annotate_cadd(universe)),
+              ("alphamissense", lambda: tabix_lookup(
+                  universe[(universe["REFERENCE_REF"].str.len() == 1) & (universe["REFERENCE_ALT"].str.len() == 1)],
+                  ALPHAMISSENSE, parse_alphamissense, "AM")),
+              ("clinvar", lambda: tabix_lookup(universe, CLINVAR, parse_clinvar, "CLINVAR")),
+              ("ccre", lambda: annotate_ccre(universe)),
+              ("phylop", lambda: annotate_phylop(universe))]
+    for name, run in steps:
+        started = time.time()
+        table, info = run()
+        info["seconds"] = round(time.time() - started, 1)
+        provenance[name] = info
+        print(f"  {name:<14} {info.get('status', 'OK'):<14} {info['seconds']:>7}s", flush=True)
+        if not table.empty:
+            merged = merged.merge(table.drop_duplicates("VARIANT_KEY"), on="VARIANT_KEY", how="left")
+    provenance["clinvar"]["release"] = clinvar_release()
+
+    constraint = gene_constraint()
+    if constraint is not None and "VEP_GENE_ID" in merged.columns:
+        merged["GENE_ID_NOVERSION"] = merged["VEP_GENE_ID"].fillna("").astype(str).str.split(".").str[0]
+        merged = merged.merge(constraint, on="GENE_ID_NOVERSION", how="left").drop(columns="GENE_ID_NOVERSION")
+        provenance["gnomad_constraint"] = {"source": str(CONSTRAINT), "status": "OK"}
+    else:
+        provenance["gnomad_constraint"] = {"source": str(CONSTRAINT),
+                                           "status": "NOT_AVAILABLE" if constraint is None else "NO_VEP_GENES"}
+
+    if P is not None and args.online:
+        table, info = annotate_online(universe, set(cs_keys), P, accession, args)
+        provenance["online"] = info
+        merged = merged.merge(table.drop_duplicates("VARIANT_KEY"), on="VARIANT_KEY", how="left")
+    return merged, provenance
 
 
-def derive_functional_classes(row: pd.Series) -> str:
-    """Multi-label functional interpretation so regulatory evidence is not lost.
-
-    A variant may simultaneously be intronic/non-coding-transcript AND overlap
-    an enhancer/cCRE.  A single mutually exclusive class hides that biology.
-    """
-    classes = []
-    base = str(row.get("ENSEMBL_FUNCTIONAL_CATEGORY", "") or "").strip()
-    if base and base != "OTHER":
-        classes.append(base)
-
-    if str(row.get("SCREEN_STATUS", "")) == "OK":
-        classes.append("REGULATORY")
-    if str(row.get("REGULOMEDB_STATUS", "")) == "OK":
-        classes.append("REGULATORY")
-
-    return join_unique(classes) or "OTHER"
-
-
-def allele_qc_from_variation(row: pd.Series) -> tuple[str, str, str]:
-    """Compare Step06/input REF/ALT with an Ensembl GRCh38 rsID mapping."""
-    rsid = str(row.get("PRIMARY_RSID", "") or "").strip()
-    raw = row.get("ENSEMBL_VARIATION_MAPPINGS_JSON", "")
-    if not rsid:
-        return "NO_RSID", "", ""
-    if raw is None or (isinstance(raw, float) and np.isnan(raw)) or not str(raw).strip():
-        return "NO_MAPPING", "", ""
-
-    try:
-        mappings = json.loads(str(raw))
-    except Exception:
-        return "MAPPING_PARSE_ERROR", "", ""
-    if not isinstance(mappings, list):
-        return "NO_MAPPING", "", ""
-
-    chrom = str(row.get("CHR", "")).replace("chr", "").strip()
-    pos = safe_int(row.get("REFERENCE_POS"), -1)
-    ref = str(row.get("REFERENCE_REF", "") or "").upper().strip()
-    alt = str(row.get("REFERENCE_ALT", "") or "").upper().strip()
-
-    candidates = []
-    for m in mappings:
-        if not isinstance(m, dict):
-            continue
-        assembly = str(m.get("assembly_name", ""))
-        seq = str(m.get("seq_region_name", "")).replace("chr", "")
-        start = safe_int(m.get("start"), -1)
-        if assembly.upper().startswith("GRCH38") and seq == chrom and start == pos:
-            candidates.append(m)
-
-    if not candidates:
-        return "NO_GRCH38_POSITION_MATCH", "", ""
-
-    m = candidates[0]
-    alleles = [x.upper().strip() for x in str(m.get("allele_string", "")).split("/") if x.strip()]
-    if not alleles:
-        return "NO_ALLELE_STRING", "", ""
-    reference = alleles[0]
-    alternatives = alleles[1:]
-
-    if ref == reference and alt in alternatives:
-        return "PASS", reference, ";".join(alternatives)
-    if alt == reference and ref in alternatives:
-        return "REF_ALT_SWAPPED", reference, ";".join(alternatives)
-    if ref in alleles and alt in alleles:
-        return "ALLELES_PRESENT_REFERENCE_MISMATCH", reference, ";".join(alternatives)
-    return "ALLELE_NOT_IN_RSID_MAPPING", reference, ";".join(alternatives)
-
-
-def merge_mode(args: argparse.Namespace) -> None:
-    plan_file = Path(args.plan_json).resolve()
-    plan = json.loads(plan_file.read_text(encoding="utf-8"))
-
-    universe_file = Path(plan["variant_universe"])
-    study_map_file = Path(plan["study_variant_map"])
-    rsid_file = Path(plan["rsid_universe"])
-    out_root = Path(plan["out_root"])
-    shards_root = Path(plan["shards_root"])
-
-    banner("STEP07 API FINAL MERGE")
-    print(f"Plan         : {plan_file}")
-    print(f"Variant file : {universe_file}")
-    print(f"Output root  : {out_root}")
-
-    universe = read_tsv(universe_file)
-    study_map = read_tsv(study_map_file)
-
-    global_master = universe.copy()
-
-    for provider in ("ensembl_vep", "screen", "regulomedb"):
-        extra = read_provider_shards(shards_root / provider)
-        if extra.empty:
-            print(f"[WARN] No shards found for {provider}")
-            continue
-        global_master = combine_unique_annotation(
-            global_master, extra, "VARIANT_KEY"
-        )
-
-    # rsID-keyed providers.
-    for provider in ("ensembl_variation", "clinvar"):
-        extra = read_provider_shards(shards_root / provider)
-        if extra.empty:
-            print(f"[WARN] No shards found for {provider}")
-            continue
-        extra["PRIMARY_RSID"] = extra["PRIMARY_RSID"].fillna("").astype(str).str.lower()
-        global_master["PRIMARY_RSID"] = (
-            global_master["PRIMARY_RSID"].fillna("").astype(str).str.lower()
-        )
-        extra = extra.sort_values("PRIMARY_RSID", kind="stable").drop_duplicates(
-            "PRIMARY_RSID", keep="first"
-        )
-        overlap = [
-            c
-            for c in extra.columns
-            if c in global_master.columns and c != "PRIMARY_RSID"
-        ]
-        if overlap:
-            extra = extra.drop(columns=overlap)
-        global_master = global_master.merge(
-            extra, on="PRIMARY_RSID", how="left", validate="many_to_one"
-        )
-
-    global_master["FINAL_FUNCTIONAL_CLASS"] = global_master.apply(
-        derive_final_class, axis=1
-    )
-    global_master["FINAL_FUNCTIONAL_CLASSES"] = global_master.apply(
-        derive_functional_classes, axis=1
-    )
-
-    qc = global_master.apply(allele_qc_from_variation, axis=1)
-    global_master["ALLELE_QC_STATUS"] = [x[0] for x in qc]
-    global_master["ENSEMBL_GRCH38_REFERENCE_ALLELE"] = [x[1] for x in qc]
-    global_master["ENSEMBL_GRCH38_ALTERNATE_ALLELES"] = [x[2] for x in qc]
-
-    global_master["HAS_SCREEN_CCRE"] = (
-        global_master.get("SCREEN_STATUS", "").astype(str) == "OK"
-        if "SCREEN_STATUS" in global_master.columns
-        else False
-    )
-    global_master["HAS_REGULOMEDB"] = (
-        global_master.get("REGULOMEDB_STATUS", "").astype(str) == "OK"
-        if "REGULOMEDB_STATUS" in global_master.columns
-        else False
-    )
-    global_master["HAS_CLINVAR"] = (
-        global_master.get("CLINVAR_STATUS", "").astype(str) == "OK"
-        if "CLINVAR_STATUS" in global_master.columns
-        else False
-    )
-
-    global_file = out_root / "all_unique_variants_annotation_master.tsv.gz"
-    write_tsv_gz(global_master, global_file)
-
-    combined = study_map.merge(
-        global_master,
-        on="VARIANT_KEY",
-        how="left",
-        suffixes=("", "_GLOBAL"),
-        validate="many_to_one",
-    )
-
-    # Prefer study-level rsID/coordinate columns where duplicated.
-    for col in [
-        "PRIMARY_RSID",
-        "CHR",
-        "REFERENCE_POS",
-        "REFERENCE_REF",
-        "REFERENCE_ALT",
-    ]:
-        gcol = col + "_GLOBAL"
-        if gcol in combined.columns:
-            if col in combined.columns:
-                combined[col] = combined[col].replace("", np.nan).fillna(combined[gcol])
-                combined = combined.drop(columns=[gcol])
-            else:
-                combined = combined.rename(columns={gcol: col})
-
-    combined_file = out_root / "all_studies_annotation_master.tsv.gz"
-    write_tsv_gz(combined, combined_file)
-
-    banner("WRITING PER-STUDY OUTPUTS")
-
-    study_count = 0
-
-    for accession, g in combined.groupby("STUDY_ACCESSION", sort=False):
-        study_count += 1
-        d = out_root / str(accession)
-        d.mkdir(parents=True, exist_ok=True)
-
-        study_file = d / f"{accession}_annotation_master.tsv.gz"
-        write_tsv_gz(g, study_file)
-
-        ls = locus_summary(g)
-        ls.to_csv(
-            d / f"{accession}_locus_annotation_summary.tsv",
-            sep="\t",
-            index=False,
-        )
-
-        # Useful functional subsets.
-        for cls, name in [
-            ("CODING", "coding_variants"),
-            ("SPLICING", "splicing_variants"),
-            ("REGULATORY", "regulatory_variants"),
-            ("NONCODING_RNA", "noncoding_rna_variants"),
-        ]:
-            sub = g[g["FINAL_FUNCTIONAL_CLASS"] == cls].copy()
-            write_tsv_gz(sub, d / f"{accession}_{name}.tsv.gz")
-
-        print(
-            f"[OK] {accession}: {len(g):,} variant-locus rows, "
-            f"{g['LOCUS_ID'].nunique():,} loci"
-        )
-
-    provider_status = []
-
-    for provider in (
-        "ensembl_vep",
-        "ensembl_variation",
-        "screen",
-        "regulomedb",
-        "clinvar",
-    ):
-        d = shards_root / provider
-        files = sorted(d.glob("batch_*.tsv.gz"))
-        provider_status.append(
-            {
-                "PROVIDER": provider,
-                "SHARDS": len(files),
-                "ROWS": sum(len(read_tsv(f)) for f in files),
-            }
-        )
-
-    pd.DataFrame(provider_status).to_csv(
-        out_root / "provider_completion_summary.tsv",
-        sep="\t",
-        index=False,
-    )
-
-    summary = {
-        "STEP": "07",
-        "VERSION": VERSION,
-        "STATUS": "COMPLETE",
-        "PHENOTYPE": plan["phenotype"],
-        "ANCESTRY_CODE": plan["ancestry_code"],
-        "ANCESTRY_LABEL": plan["ancestry_label"],
-        "N_UNIQUE_VARIANTS": len(global_master),
-        "N_STUDY_VARIANT_ROWS": len(combined),
-        "N_STUDIES": study_count,
-        "N_LOCI": combined[["STUDY_ACCESSION", "LOCUS_ID"]]
-        .drop_duplicates()
-        .shape[0],
-        "GLOBAL_MASTER": str(global_file),
-        "COMBINED_MASTER": str(combined_file),
-        "COMPLETED_UTC": utc_now(),
-    }
-    (out_root / "annotation_summary.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8"
-    )
-
-    banner("STEP07 API ANNOTATION COMPLETE")
-    for k, v in summary.items():
-        print(f"{k:<24s}: {v}")
-
-
-# =============================================================================
-# ONE-VARIANT LIVE SMOKE TEST
-# =============================================================================
-
-def parse_test_variant(text: str) -> tuple[int, int, str, str]:
-    """Parse CHR:POS:REF:ALT, e.g. 4:89704960:A:G."""
-    parts = str(text).replace("chr", "").replace("CHR", "").split(":")
-    if len(parts) != 4:
-        raise ValueError("--variant must be CHR:POS:REF:ALT, e.g. 4:89704960:A:G")
-    chrom, pos, ref, alt = parts
-    chrom_i = int(chrom)
-    pos_i = int(pos)
-    ref = ref.upper().strip()
-    alt = alt.upper().strip()
-    if chrom_i < 1 or chrom_i > 22 or pos_i < 1 or not ref or not alt:
-        raise ValueError(f"Invalid test variant: {text}")
-    return chrom_i, pos_i, ref, alt
-
-
-def print_annotation_block(title: str, df: pd.DataFrame) -> None:
-    banner(title)
-    if df is None or df.empty:
-        print("NO ROWS RETURNED")
+def annotate_study(P: dict, accession: str, args, threads: int) -> None:
+    out_dir = P["out"] / accession
+    out_dir.mkdir(parents=True, exist_ok=True)
+    final = out_dir / f"{accession}_annotated_variants.tsv.gz"
+    provenance_file = out_dir / "annotation_provenance.json"
+    if final.exists() and provenance_file.exists() and not args.force:
+        print(f"{accession}: already annotated (use --force to redo)")
         return
-    row = df.iloc[0]
-    width = max(28, min(60, max(len(str(c)) for c in df.columns)))
-    for col in df.columns:
-        value = row[col]
-        if isinstance(value, float) and np.isnan(value):
-            value = ""
-        text = str(value)
-        if len(text) > 4000:
-            text = text[:4000] + " ... [TRUNCATED ON SCREEN]"
-        print(f"{col:<{width}s} : {text}")
+
+    source = P["finemap"] / accession / f"{accession}_finemapped_variants.tsv.gz"
+    study = load_finemapped(source)
+    study["STUDY_ACCESSION"] = accession
+    if args.scope == "cs":
+        study = study[study["IN_95_CREDIBLE_SET"]]
+    elif args.scope == "pip":
+        study = study[study["PIP"] >= args.min_pip]
+    if "Z_REF" in study.columns:
+        study["Z_ALT"] = -pd.to_numeric(study["Z_REF"], errors="coerce")
+    if "BETA_REF" in study.columns:
+        study["BETA_ALT"] = -pd.to_numeric(study["BETA_REF"], errors="coerce")
+
+    universe = study[["VARIANT_KEY", "PRIMARY_RSID", "CHR", "REFERENCE_POS", "REFERENCE_REF", "REFERENCE_ALT"]] \
+        .drop_duplicates("VARIANT_KEY").reset_index(drop=True)
+    banner(f"STEP 08 - {accession}: {len(universe):,} unique variants ({args.scope}), {threads} threads")
+
+    work = out_dir / "work"
+    work.mkdir(exist_ok=True)
+    cs_keys = set(study.loc[study["IN_95_CREDIBLE_SET"], "VARIANT_KEY"])
+    annotation, provenance = annotate_universe(universe, work, threads, args, P, accession, cs_keys)
+
+    keep = [c for c in annotation.columns if c not in ("PRIMARY_RSID", "CHR", "REFERENCE_POS",
+                                                        "REFERENCE_REF", "REFERENCE_ALT")]
+    master = study.merge(annotation[keep], on="VARIANT_KEY", how="left")
+    master = derive_flags(ensure_columns(master))
+    front = ["STUDY_ACCESSION", "LOCUS_ID", "VARIANT_KEY", "PRIMARY_RSID", "CHR", "REFERENCE_POS",
+             "REFERENCE_REF", "REFERENCE_ALT", "PIP", "IN_95_CREDIBLE_SET", "CREDIBLE_SET", "P", "Z_ALT",
+             "BETA_ALT", "VEP_GENE_SYMBOL", "VEP_BEST_CONSEQUENCE", "VEP_FUNCTIONAL_CATEGORY",
+             "VEP_HGVSC", "VEP_HGVSP", "CADD_PHRED", "AM_PATHOGENICITY", "AM_CLASS", "CLINVAR_SIGNIFICANCE",
+             "CCRE_CLASS", "PHYLOP_100WAY", "GNOMADG_AF", "GNOMADG_NFE_AF", "GNOMAD_LOEUF",
+             "FUNCTIONAL_EVIDENCE"]
+    front = [c for c in front if c in master.columns]
+    master = master[front + [c for c in master.columns if c not in front]]
+    master = master.sort_values(["LOCUS_ID", "PIP"], ascending=[True, False], kind="stable")
+
+    master.to_csv(final.with_suffix(".tmp"), sep="\t", index=False, compression="gzip")
+    os.replace(final.with_suffix(".tmp"), final)
+    master[master["IN_95_CREDIBLE_SET"]].to_csv(out_dir / f"{accession}_credible_set_variants.tsv",
+                                               sep="\t", index=False)
+    loci = locus_table(master)
+    loci.to_csv(out_dir / f"{accession}_locus_annotation_summary.tsv", sep="\t", index=False)
+
+    provenance.update({
+        "study": accession, "version": VERSION, "scope": args.scope, "n_variants": int(len(master)),
+        "n_unique_variants": int(len(universe)), "n_credible_set_variants": int(master["IN_95_CREDIBLE_SET"].sum()),
+        "n_loci": int(master["LOCUS_ID"].nunique()), "input": str(source),
+        "completed_utc": datetime.now(timezone.utc).isoformat(),
+        "resources": resource_table(),
+    })
+    provenance_file.write_text(json.dumps(provenance, indent=2, default=str), encoding="utf-8")
+    (out_dir / "ANNOTATION_FAILED.txt").unlink(missing_ok=True)
+    if not args.keep_work:
+        shutil.rmtree(work, ignore_errors=True)
+    print(f"{accession}: {len(master):,} variants, {len(loci)} loci -> {final}")
 
 
-def test_one_variant_mode(args: argparse.Namespace) -> None:
-    chrom, pos, ref, alt = parse_test_variant(args.variant)
-    rsid = str(args.rsid or "").strip().lower()
-    if rsid and not re.fullmatch(r"rs\d+", rsid, flags=re.I):
-        raise ValueError("--rsid must look like rs356182")
+# =============================================================================
+# PATHS / STUDIES / SLURM
+# =============================================================================
 
-    vkey = variant_key(chrom, pos, ref, alt)
-    root = Path(args.root).expanduser().resolve()
-    test_root = root / "07_annotation_api" / "_one_variant_test" / slugify(vkey)
-    test_root.mkdir(parents=True, exist_ok=True)
+def project_paths(args) -> dict:
+    code, label = canonical_ancestry(args.ancestry)
+    p_slug, a_slug = slugify(args.phenotype), slugify(label)
+    return {"phenotype": args.phenotype.strip(), "code": code, "label": label, "p_slug": p_slug,
+            "a_slug": a_slug, "finemap": PROJECT_ROOT / "06_finemapping" / p_slug / a_slug,
+            "out": PROJECT_ROOT / "08_annotation" / p_slug / a_slug}
 
-    banner("STEP07 ONE-VARIANT LIVE API TEST")
-    print(f"Version          : {VERSION}")
-    print(f"Variant          : {vkey}")
-    print(f"rsID             : {rsid or 'NOT PROVIDED'}")
-    print(f"SCREEN API key   : {'SET' if os.environ.get('SCREEN_API_KEY', '').strip() else 'NOT SET'}")
-    print(f"NCBI API key     : {'SET' if os.environ.get('NCBI_API_KEY', '').strip() else 'NOT SET'}")
-    print(f"NCBI email       : {'SET' if os.environ.get('NCBI_EMAIL', '').strip() else 'NOT SET'}")
-    print(f"Test output      : {test_root}")
-    print("NOTE             : key VALUES are never printed or written to output.")
 
-    batch = pd.DataFrame([{
-        "VARIANT_KEY": vkey,
-        "PRIMARY_RSID": rsid,
-        "CHR": chrom,
-        "REFERENCE_POS": pos,
-        "REFERENCE_REF": ref,
-        "REFERENCE_ALT": alt,
-        "API_ID": "GWAS2M_TEST_000001",
-    }])
+def study_for_index(phenotype_slug: str, ancestry_slug: str, index: int) -> str:
+    """Accession of study N in the Step02 download manifest (the ARRAY_ID the
+    Step02 planner prints) - the same N in Steps 02, 05, 06, 07 and 08."""
+    path = PROJECT_ROOT / "01_gwas_catalog" / phenotype_slug / ancestry_slug / "GWAS_download_manifest.tsv"
+    if not path.is_file():
+        raise SystemExit(f"No Step02 download manifest: {path}\nRun the Step02 planner first.")
+    manifest = pd.read_csv(path, sep="\t", dtype=str)
+    ids = pd.to_numeric(manifest["ARRAY_ID"], errors="coerce")
+    selected = manifest[ids == index]
+    if selected.empty:
+        listing = "\n".join(f"  {int(i):>3}  {a}" for i, a in zip(ids, manifest["STUDY_ACCESSION"]) if pd.notna(i))
+        raise SystemExit(f"--index {index} is not in {path}\nAvailable:\n{listing}")
+    return str(selected.iloc[0]["STUDY_ACCESSION"]).strip()
 
-    all_results: list[tuple[str, pd.DataFrame]] = []
 
-    try:
-        vep = worker_ensembl_vep(batch.copy(), args)
-        print_annotation_block("1/5 ENSEMBL VEP", vep)
-        write_tsv_gz(vep, test_root / "ensembl_vep.tsv.gz")
-        all_results.append(("ensembl_vep", vep))
-    except Exception as exc:
-        banner("1/5 ENSEMBL VEP — FAILED")
-        print(f"{type(exc).__name__}: {exc}")
-
-    if rsid:
-        try:
-            variation = worker_ensembl_variation(
-                batch[["VARIANT_KEY", "PRIMARY_RSID"]].copy(), args
-            )
-            print_annotation_block("2/5 ENSEMBL VARIATION", variation)
-            write_tsv_gz(variation, test_root / "ensembl_variation.tsv.gz")
-            all_results.append(("ensembl_variation", variation))
-        except Exception as exc:
-            banner("2/5 ENSEMBL VARIATION — FAILED")
-            print(f"{type(exc).__name__}: {exc}")
-    else:
-        banner("2/5 ENSEMBL VARIATION — SKIPPED")
-        print("No --rsid supplied.")
-
-    if args.skip_screen:
-        banner("3/5 SCREEN / ENCODE — SKIPPED")
-        print("--skip-screen was supplied.")
-    elif not os.environ.get("SCREEN_API_KEY", "").strip():
-        banner("3/5 SCREEN / ENCODE — SKIPPED")
-        print("SCREEN_API_KEY is not set.")
-    else:
-        try:
-            screen = worker_screen(batch.copy(), args, test_root / "screen.tsv.gz")
-            print_annotation_block("3/5 SCREEN / ENCODE", screen)
-            write_tsv_gz(screen, test_root / "screen.tsv.gz")
-            all_results.append(("screen", screen))
-        except Exception as exc:
-            banner("3/5 SCREEN / ENCODE — FAILED")
-            print(f"{type(exc).__name__}: {exc}")
-
-    try:
-        reg = worker_regulomedb(batch.copy(), args, test_root / "regulomedb.tsv.gz")
-        print_annotation_block("4/5 REGULOMEDB", reg)
-        write_tsv_gz(reg, test_root / "regulomedb.tsv.gz")
-        all_results.append(("regulomedb", reg))
-    except Exception as exc:
-        banner("4/5 REGULOMEDB — FAILED")
-        print(f"{type(exc).__name__}: {exc}")
-
-    if rsid:
-        try:
-            clinvar = worker_clinvar(
-                batch[["VARIANT_KEY", "PRIMARY_RSID"]].copy(),
-                args,
-                test_root / "clinvar.tsv.gz",
-            )
-            print_annotation_block("5/5 CLINVAR / NCBI", clinvar)
-            write_tsv_gz(clinvar, test_root / "clinvar.tsv.gz")
-            all_results.append(("clinvar", clinvar))
-        except Exception as exc:
-            banner("5/5 CLINVAR / NCBI — FAILED")
-            print(f"{type(exc).__name__}: {exc}")
-    else:
-        banner("5/5 CLINVAR / NCBI — SKIPPED")
-        print("No --rsid supplied.")
-
-    master = batch.copy()
-    for provider, extra in all_results:
-        if extra is None or extra.empty:
+def finemapped_studies(P: dict) -> tuple[list[str], list[tuple[str, str]]]:
+    ready, skipped = [], []
+    if not P["finemap"].exists():
+        return ready, skipped
+    for d in sorted(p for p in P["finemap"].iterdir() if p.is_dir()):
+        summary = d / "finemapping_summary.json"
+        variants = d / f"{d.name}_finemapped_variants.tsv.gz"
+        if not summary.exists():
             continue
-        key = "PRIMARY_RSID" if provider in {"ensembl_variation", "clinvar"} else "VARIANT_KEY"
-        if key not in extra.columns:
-            continue
-        overlap = [c for c in extra.columns if c in master.columns and c != key]
-        z = extra.drop(columns=overlap, errors="ignore").drop_duplicates(key, keep="first")
-        master = master.merge(z, on=key, how="left", validate="many_to_one")
-
-    if "ENSEMBL_FUNCTIONAL_CATEGORY" in master.columns:
-        master["FINAL_FUNCTIONAL_CLASS"] = master.apply(derive_final_class, axis=1)
-        master["FINAL_FUNCTIONAL_CLASSES"] = master.apply(derive_functional_classes, axis=1)
-
-    qc = master.apply(allele_qc_from_variation, axis=1)
-    master["ALLELE_QC_STATUS"] = [x[0] for x in qc]
-    master["ENSEMBL_GRCH38_REFERENCE_ALLELE"] = [x[1] for x in qc]
-    master["ENSEMBL_GRCH38_ALTERNATE_ALLELES"] = [x[2] for x in qc]
-
-    print_annotation_block("FINAL ONE-VARIANT MERGED PREVIEW", master)
-    write_tsv_gz(master, test_root / "one_variant_annotation_master.tsv.gz")
-
-    banner("ONE-VARIANT TEST COMPLETE")
-    print(f"Master result : {test_root / 'one_variant_annotation_master.tsv.gz'}")
-    print("If these provider blocks look sensible, run normal planner mode next.")
+        info = json.loads(summary.read_text(encoding="utf-8"))
+        if info.get("STATUS") == "NO_SIGNIFICANT_LOCI" or int(info.get("N_LOCI_SUCCESS", 0) or 0) == 0:
+            skipped.append((d.name, "no fine-mapped loci"))
+        elif not variants.exists() or variants.stat().st_size < 100:
+            skipped.append((d.name, "fine-mapped variant file missing"))
+        else:
+            ready.append(d.name)
+    return ready, skipped
 
 
-# =============================================================================
-# PLANNER
-# =============================================================================
-
-def planner_mode(args: argparse.Namespace) -> None:
-    root = Path(args.root).expanduser().resolve()
-    phenotype = args.phenotype.strip()
-    phenotype_slug = slugify(phenotype)
-    ancestry_code, ancestry_label = canonical_ancestry(args.ancestry)
-    ancestry_slug = slugify(ancestry_label)
-
-    out_root = (
-        root
-        / "07_annotation_api"
-        / phenotype_slug
-        / ancestry_slug
-    )
-    manifests = out_root / "manifests"
-    shards = out_root / "shards"
-    logs = root / "logs" / "step07_api" / phenotype_slug / ancestry_slug
-    scripts = out_root / "slurm"
-
-    for d in (out_root, manifests, shards, logs, scripts):
-        d.mkdir(parents=True, exist_ok=True)
-
-    banner("STEP07 API-ONLY DISTRIBUTED ANNOTATION PLANNER")
-    print(f"Version         : {VERSION}")
-    print(f"Root            : {root}")
-    print(f"Phenotype       : {phenotype}")
-    print(f"Ancestry        : {ancestry_label} ({ancestry_code})")
-    print(f"Output          : {out_root}")
-    print("Reference DBs   : NONE DOWNLOADED")
-    print(f"SLURM partition : {args.partition}")
-    print(f"Array walltime  : {slurm_walltime_for_partition(args.partition, args.time, merge=False)}")
-    print(f"Merge walltime  : {slurm_walltime_for_partition(args.partition, args.merge_time, merge=True)}")
-    print()
-
-    studies, excluded = discover_studies(
-        root,
-        phenotype,
-        ancestry_label,
-        args.allow_partial,
-    )
-
-    universe, study_map = build_variant_universe(
-        studies,
-        phenotype,
-        ancestry_code,
-        ancestry_label,
-    )
-    rsids = build_rsid_universe(universe)
-
-    variant_file = manifests / "variant_universe.tsv.gz"
-    study_map_file = manifests / "study_variant_map.tsv.gz"
-    rsid_file = manifests / "rsid_universe.tsv.gz"
-
-    write_tsv_gz(universe, variant_file)
-    write_tsv_gz(study_map, study_map_file)
-    write_tsv_gz(rsids, rsid_file)
-
-    pd.DataFrame(excluded).to_csv(
-        manifests / "excluded_studies.tsv", sep="\t", index=False
-    )
-
-    print(f"Eligible studies       : {len(studies):,}")
-    print(f"Excluded studies       : {len(excluded):,}")
-    print(f"Study/locus rows       : {len(study_map):,}")
-    print(f"Unique variants        : {len(universe):,}")
-    print(f"Input rsIDs            : {len(rsids):,}")
-    print(f"Unique loci            : {study_map[['STUDY_ACCESSION','LOCUS_ID']].drop_duplicates().shape[0]:,}")
-
-    provider_defs = [
-        (
-            "ensembl_vep",
-            variant_file,
-            len(universe),
-            args.ensembl_batch_size,
-            args.ensembl_max_parallel,
-        ),
-        (
-            "ensembl_variation",
-            rsid_file,
-            len(rsids),
-            args.variation_batch_size,
-            args.variation_max_parallel,
-        ),
-        (
-            "screen",
-            variant_file,
-            0 if args.skip_screen else len(universe),
-            args.screen_batch_size,
-            args.screen_max_parallel,
-        ),
-        (
-            "regulomedb",
-            variant_file,
-            len(universe),
-            args.regulomedb_batch_size,
-            args.regulomedb_max_parallel,
-        ),
-        (
-            "clinvar",
-            rsid_file,
-            len(rsids),
-            args.clinvar_batch_size,
-            args.clinvar_max_parallel,
-        ),
-    ]
-
-    this_script = Path(__file__).resolve()
-    python_exe = args.python or sys.executable or "python"
-
-    providers_for_submit: list[tuple[str, Path, int]] = []
-    provider_plan = {}
-
-    banner("PROVIDER ARRAY PLAN")
-    print(
-        f"{'PROVIDER':22s} {'RECORDS':>12s} {'BATCH':>8s} "
-        f"{'TASKS':>8s} {'MAX_PARALLEL':>14s}"
-    )
-    print("-" * 72)
-
-    for provider, infile, n_rows, batch_size, max_parallel in provider_defs:
-        pdir = shards / provider
-        pdir.mkdir(parents=True, exist_ok=True)
-
-        manifest_file = manifests / f"{provider}_manifest.tsv"
-        manifest = create_batch_manifest(
-            infile,
-            n_rows,
-            batch_size,
-            provider,
-            pdir,
-            manifest_file,
-        )
-
-        n_tasks = len(manifest)
-        sbatch_file = scripts / f"{provider}.sbatch"
-
-        if n_tasks:
-            write_provider_sbatch(
-                sbatch_file,
-                python_exe,
-                this_script,
-                provider,
-                manifest_file,
-                n_tasks,
-                max_parallel,
-                root,
-                logs,
-                args,
-            )
-
-        providers_for_submit.append((provider, sbatch_file, n_tasks))
-
-        provider_plan[provider] = {
-            "records": n_rows,
-            "batch_size": batch_size,
-            "tasks": n_tasks,
-            "max_parallel": max_parallel,
-            "manifest": str(manifest_file),
-            "sbatch": str(sbatch_file),
-        }
-
-        print(
-            f"{provider:22s} {n_rows:12,d} {batch_size:8,d} "
-            f"{n_tasks:8,d} {max_parallel:14,d}"
-        )
-
-    plan_file = manifests / "step07_api_plan.json"
-    merge_sbatch = scripts / "merge.sbatch"
-
-    plan = {
-        "version": VERSION,
-        "root": str(root),
-        "phenotype": phenotype,
-        "phenotype_slug": phenotype_slug,
-        "ancestry_code": ancestry_code,
-        "ancestry_label": ancestry_label,
-        "ancestry_slug": ancestry_slug,
-        "out_root": str(out_root),
-        "manifests_root": str(manifests),
-        "shards_root": str(shards),
-        "variant_universe": str(variant_file),
-        "study_variant_map": str(study_map_file),
-        "rsid_universe": str(rsid_file),
-        "providers": provider_plan,
-        "created_utc": utc_now(),
-        "annotation_model": "API_ONLY",
-        "downloads_large_reference_databases": False,
-    }
-    plan_file.write_text(json.dumps(plan, indent=2), encoding="utf-8")
-
-    write_merge_sbatch(
-        merge_sbatch,
-        python_exe,
-        this_script,
-        plan_file,
-        root,
-        logs,
-        args,
-    )
-
-    submit_script = (
-        root
-        / f"Step07_Submit_API_{phenotype_slug}_{ancestry_slug}.sh"
-    )
-    write_submit_script(
-        submit_script,
-        providers_for_submit,
-        merge_sbatch,
-        screen_required=not args.skip_screen,
-    )
-
-    banner("WHAT THIS WILL QUERY")
-    print(
-        "ENSEMBL_VEP         : consequence/transcript + AlphaMissense/CADD/REVEL/"
-        "ProtVar/SpliceAI/SIFT/PolyPhen/UniProt/domains"
-    )
-    print(
-        "ENSEMBL_VARIATION   : populations + phenotypes + clinical significance"
-    )
-    print(
-        "SCREEN              : cCRE/promoter/enhancer + chromatin signals + "
-        "cell/tissue context + target genes"
-    )
-    print("REGULOMEDB          : regulatory score/supporting features")
-    print("CLINVAR             : NCBI ClinVar summary/traits/significance")
-    print()
-    print("Large reference downloads: 0")
-    print("Only returned API annotation shards are written.")
-
-    banner("GENERATED FILES")
-    print(f"Variant universe : {variant_file}")
-    print(f"Study map        : {study_map_file}")
-    print(f"rsID universe    : {rsid_file}")
-    print(f"Plan JSON        : {plan_file}")
-    print(f"SLURM scripts    : {scripts}")
-    print(f"Master submit    : {submit_script}")
-
-    print()
-    print("BEFORE SUBMITTING SCREEN:")
-    print("  export SCREEN_API_KEY='YOUR_SCREEN_KEY'")
-    print()
-    print("OPTIONAL FOR NCBI:")
-    print("  export NCBI_EMAIL='your@email'")
-    print("  export NCBI_API_KEY='your_ncbi_key'")
-    print()
-    print("NEXT COMMAND:")
-    print(f"  bash {submit_script}")
-
-    if args.submit:
-        if not args.skip_screen and not os.environ.get("SCREEN_API_KEY", "").strip():
-            raise RuntimeError(
-                "--submit requested but SCREEN_API_KEY is not set. "
-                "Export the key first, or use --skip-screen."
-            )
-        shell(["bash", str(submit_script)])
+PER_JOB_KEYS = {"job-name", "output", "error", "array"}
 
 
-# =============================================================================
-# COMMAND LINE
-# =============================================================================
+def read_slurm_template(path):
+    values = {}
+    if Path(path).is_file():
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            match = re.match(r"^\s*#SBATCH\s+--([A-Za-z-]+)(?:[=\s]+(.*))?$", line)
+            if match and (match.group(2) or "").strip():
+                values[match.group(1)] = match.group(2).strip()
+    return values
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=(
-            "Distributed API-only annotation of all Step06 fine-mapped variants."
-        ),
-    )
 
-    p.add_argument("--root", default=".")
-    p.add_argument("--phenotype", default=None)
-    p.add_argument("--ancestry", default=None)
-    p.add_argument("--allow-partial", action="store_true")
-    p.add_argument("--submit", action="store_true")
-    p.add_argument("--force", action="store_true")
-
-    p.add_argument("--python", default=None)
-    p.add_argument(
-        "--partition",
-        default="general",
-        help=(
-            "SLURM partition. Default: general. Partition-aware time defaults: "
-            "general=24:00:00, asher=0 (unlimited)."
-        ),
-    )
-    p.add_argument(
-        "--time",
-        default=None,
-        help=(
-            "Provider-array walltime. If omitted: general=24:00:00, "
-            "asher=0 (unlimited), other partitions=04:00:00."
-        ),
-    )
-    p.add_argument("--memory", default="6G")
-    p.add_argument("--cpus", type=int, default=2)
-    p.add_argument(
-        "--merge-time",
-        default=None,
-        help=(
-            "Final merge walltime. If omitted: general=24:00:00, "
-            "asher=0 (unlimited), other partitions=02:00:00."
-        ),
-    )
-    p.add_argument("--merge-memory", default="16G")
-
-    p.add_argument(
-        "--ensembl-batch-size",
-        type=int,
-        default=DEFAULT_BATCHES["ensembl_vep"],
-    )
-    p.add_argument(
-        "--variation-batch-size",
-        type=int,
-        default=DEFAULT_BATCHES["ensembl_variation"],
-    )
-    p.add_argument(
-        "--screen-batch-size",
-        type=int,
-        default=DEFAULT_BATCHES["screen"],
-    )
-    p.add_argument(
-        "--regulomedb-batch-size",
-        type=int,
-        default=DEFAULT_BATCHES["regulomedb"],
-    )
-    p.add_argument(
-        "--clinvar-batch-size",
-        type=int,
-        default=DEFAULT_BATCHES["clinvar"],
-    )
-
-    p.add_argument(
-        "--ensembl-max-parallel",
-        type=int,
-        default=DEFAULT_MAX_PARALLEL["ensembl_vep"],
-    )
-    p.add_argument(
-        "--variation-max-parallel",
-        type=int,
-        default=DEFAULT_MAX_PARALLEL["ensembl_variation"],
-    )
-    p.add_argument(
-        "--screen-max-parallel",
-        type=int,
-        default=DEFAULT_MAX_PARALLEL["screen"],
-    )
-    p.add_argument(
-        "--regulomedb-max-parallel",
-        type=int,
-        default=DEFAULT_MAX_PARALLEL["regulomedb"],
-    )
-    p.add_argument(
-        "--clinvar-max-parallel",
-        type=int,
-        default=DEFAULT_MAX_PARALLEL["clinvar"],
-    )
-
-    p.add_argument("--screen-detail-workers", type=int, default=2)
-    p.add_argument("--screen-active-z", type=float, default=1.64)
-    p.add_argument("--regulomedb-workers", type=int, default=2)
-    p.add_argument("--skip-screen", action="store_true")
-
-    # One-variant live smoke test.
-    p.add_argument("--test-one", action="store_true",
-                   help="Query all providers for one variant and print returned annotations.")
-    p.add_argument("--variant", default=None,
-                   help="For --test-one: CHR:POS:REF:ALT, e.g. 4:89704960:A:G")
-    p.add_argument("--rsid", default=None,
-                   help="For --test-one: optional rsID, e.g. rs356182")
-
-    # Worker mode.
-    p.add_argument("--worker", action="store_true")
-    p.add_argument(
-        "--provider",
-        choices=(
-            "ensembl_vep",
-            "ensembl_variation",
-            "screen",
-            "regulomedb",
-            "clinvar",
-        ),
-        default=None,
-    )
-    p.add_argument("--manifest", default=None)
-    p.add_argument("--task-id", type=int, default=None)
-
-    # Merge mode.
-    p.add_argument("--merge", action="store_true")
-    p.add_argument("--plan-json", default=None)
-
-    args = p.parse_args()
-
-    modes = int(args.worker) + int(args.merge) + int(args.test_one)
-    if modes > 1:
-        p.error("--worker, --merge and --test-one are mutually exclusive")
-
-    if args.test_one:
-        if not args.variant:
-            p.error("--test-one requires --variant CHR:POS:REF:ALT")
-    elif args.worker:
-        if not args.provider:
-            p.error("--worker requires --provider")
-        if not args.manifest:
-            p.error("--worker requires --manifest")
-        if args.task_id is None or args.task_id < 1:
-            p.error("--worker requires --task-id >= 1")
-    elif args.merge:
-        if not args.plan_json:
-            p.error("--merge requires --plan-json")
-    else:
-        if not args.phenotype:
-            p.error("planner mode requires --phenotype")
-        if not args.ancestry:
-            p.error("planner mode requires --ancestry")
-
-    for name in (
-        "ensembl_batch_size",
-        "variation_batch_size",
-        "screen_batch_size",
-        "regulomedb_batch_size",
-        "clinvar_batch_size",
-    ):
-        if getattr(args, name) < 1:
-            p.error(f"--{name.replace('_','-')} must be >= 1")
-
-    if args.ensembl_batch_size > 200:
-        p.error("--ensembl-batch-size cannot exceed Ensembl POST maximum of 200")
-    if args.variation_batch_size > 200:
-        p.error("--variation-batch-size cannot exceed 200")
-    if args.screen_batch_size > 200:
-        p.error("--screen-batch-size cannot exceed 200")
-
-    for name in (
-        "ensembl_max_parallel",
-        "variation_max_parallel",
-        "screen_max_parallel",
-        "regulomedb_max_parallel",
-        "clinvar_max_parallel",
-    ):
-        if getattr(args, name) < 1:
-            p.error(f"--{name.replace('_','-')} must be >= 1")
-
+def resolve_slurm(args):
+    values = {"nodes": "1", "ntasks": "1", "cpus-per-task": "8", "mem": "32G", "time": "12:00:00"}
+    values.update({k: v for k, v in read_slurm_template(PROJECT_ROOT / args.template).items()
+                   if k not in PER_JOB_KEYS})
+    for key, value in (("partition", args.partition), ("qos", args.qos), ("account", args.account),
+                       ("cpus-per-task", args.cpus), ("mem", args.mem), ("time", args.time)):
+        if value not in (None, ""):
+            values[key] = str(value)
+    args.slurm_values = values
+    args.cpus = int(values["cpus-per-task"])
     return args
 
 
-def main() -> None:
-    args = parse_args()
+def sbatch_header_block(args, job_name, output, error, n_tasks):
+    array = f"1-{n_tasks}" if n_tasks > 1 else "1"
+    if args.max_parallel and int(args.max_parallel) > 0:
+        array += f"%{int(args.max_parallel)}"
+    directives = {**args.slurm_values, "job-name": str(job_name)[:100], "array": array,
+                  "output": output, "error": error}
+    order = ["job-name", "account", "partition", "qos", "nodes", "ntasks",
+             "cpus-per-task", "mem", "time", "array", "output", "error"]
+    lines = [f"#SBATCH --{k}={directives[k]}" for k in order if directives.get(k)]
+    lines += [f"#SBATCH --{k}={v}" for k, v in directives.items() if k not in order and v]
+    return "\n".join(lines)
 
+
+def passthrough_options(args) -> list[str]:
+    options = ["--scope", args.scope, "--min-pip", str(args.min_pip)]
+    if args.online:
+        options += ["--online", args.online]
+    if args.no_vep:
+        options.append("--no-vep")
+    if args.force:
+        options.append("--force")
+    return options
+
+
+# =============================================================================
+# MODES
+# =============================================================================
+
+def planner_mode(args) -> None:
+    P = project_paths(args)
+    print_resources()
+    ready, skipped = finemapped_studies(P)
+    banner(f"STEP 08 PLANNER - {P['phenotype']} / {P['label']} ({P['code']})")
+    for accession, reason in skipped:
+        print(f"SKIPPED  {accession}: {reason}")
+    if not ready:
+        raise SystemExit(f"No fine-mapped studies under {P['finemap']} - run Step06 first.")
+    if not args.no_vep and not args.vep_gtf and not all(
+            r["PRESENT"] for r in resource_table() if r["REQUIRED_FOR_VEP"]):
+        raise SystemExit("VEP cache / FASTA missing (see above), or add --no-vep to annotate without VEP.")
+
+    P["out"].mkdir(parents=True, exist_ok=True)
+    n_tasks = min(len(ready), MAX_ARRAY_TASKS)
+    manifest = pd.DataFrame({"TASK_ID": [i % n_tasks + 1 for i in range(len(ready))], "STUDY_ACCESSION": ready})
+    manifest_file = P["out"] / "annotation_manifest.tsv"
+    manifest.to_csv(manifest_file, sep="\t", index=False)
+
+    log_dir = PROJECT_ROOT / "logs" / "step08_annotation" / P["p_slug"] / P["a_slug"]
+    log_dir.mkdir(parents=True, exist_ok=True)
+    header = sbatch_header_block(args, f"ANNOT_{P['p_slug']}_{P['code'].lower()}",
+                                 f"{log_dir}/annot.%A_%a.out", f"{log_dir}/annot.%A_%a.err", n_tasks)
+    python = PROJECT_ROOT / "envs" / "pipeline" / "bin" / "python"
+    command = [str(python), str(Path(__file__).resolve()), "--phenotype", P["phenotype"], "--ancestry", P["code"],
+               "--worker-manifest", str(manifest_file)] + passthrough_options(args)
+    bash_file = PROJECT_ROOT / f"Step08_Annotate_{P['p_slug']}_{P['a_slug']}.sh"
+    bash_file.write_text(f"""#!/bin/bash --login
+{header}
+
+set -euo pipefail
+cd {shlex.quote(str(PROJECT_ROOT))}
+export PATH={shlex.quote(str(PROJECT_ROOT / 'envs' / 'pipeline' / 'bin'))}:"$PATH"
+{'export SCREEN_API_KEY="${SCREEN_API_KEY:-}"' if 'screen' in (args.online or '') else ''}
+
+{' '.join(shlex.quote(x) for x in command)}
+""", encoding="utf-8", newline="\n")
+    bash_file.chmod(0o755)
+
+    for accession in ready:
+        print(f"READY    {accession}")
+    base = f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(P['phenotype'])} --ancestry {P['code']}"
+    print(f"\nStudies: {len(ready)}  (array 1-{n_tasks})\nManifest: {manifest_file}\n\nRUN:\n  sbatch {bash_file.name}")
+    print(f"THEN:\n  {base} --status\n  {base} --stats")
+
+
+def worker_mode(args) -> None:
+    P = project_paths(args)
+    task = int(os.environ.get("SLURM_ARRAY_TASK_ID", "1"))
+    manifest = pd.read_csv(args.worker_manifest, sep="\t", dtype=str)
+    selected = manifest[pd.to_numeric(manifest["TASK_ID"]) == task]
+    threads = int(os.environ.get("SLURM_CPUS_PER_TASK", args.cpus))
+    failed = []
+    for accession in selected["STUDY_ACCESSION"]:
+        try:
+            annotate_study(P, accession, args, threads)
+        except Exception as error:
+            (P["out"] / accession).mkdir(parents=True, exist_ok=True)
+            (P["out"] / accession / "ANNOTATION_FAILED.txt").write_text(
+                f"{type(error).__name__}: {error}\n\n{traceback.format_exc()}", encoding="utf-8")
+            print(f"[FAILED] {accession}: {error}", file=sys.stderr)
+            failed.append(accession)
+    if failed:
+        raise SystemExit(f"Annotation failed for: {', '.join(failed)}")
+
+
+def index_mode(args) -> None:
+    P = project_paths(args)
+    accession = study_for_index(P["p_slug"], P["a_slug"], args.index)
+    ready, skipped = finemapped_studies(P)
+    if accession not in ready:
+        reason = dict(skipped).get(accession, "Step06 not run for this study")
+        raise SystemExit(f"Study {args.index} ({accession}) cannot be annotated: {reason}. Run:\n"
+                         f"  envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "
+                         f"{shlex.quote(P['phenotype'])} --ancestry {P['code']} --index {args.index}")
     try:
-        if args.test_one:
-            test_one_variant_mode(args)
-        elif args.worker:
-            worker_mode(args)
-        elif args.merge:
-            merge_mode(args)
-        else:
-            planner_mode(args)
+        annotate_study(P, accession, args, int(os.environ.get("SLURM_CPUS_PER_TASK", args.cpus)))
+    except Exception as error:
+        (P["out"] / accession).mkdir(parents=True, exist_ok=True)
+        (P["out"] / accession / "ANNOTATION_FAILED.txt").write_text(
+            f"{type(error).__name__}: {error}\n\n{traceback.format_exc()}", encoding="utf-8")
+        raise
 
-    except Exception as exc:
-        banner("STEP07 FAILED")
-        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
-        traceback.print_exc()
-        sys.exit(1)
+
+def status_mode(args) -> None:
+    P = project_paths(args)
+    ready, skipped = finemapped_studies(P)
+    banner(f"STEP 08 STATUS - {P['phenotype']} / {P['label']} ({P['code']})")
+    counts: dict[str, int] = {}
+    print(f"{'STUDY':<15}{'STATE':<10}{'VARIANTS':>10}{'LOCI':>6}  DETAIL")
+    for accession in ready + [a for a, _ in skipped]:
+        d = P["out"] / accession
+        provenance = d / "annotation_provenance.json"
+        if accession not in ready:
+            state, detail, n, loci = "SKIPPED", dict(skipped)[accession], "", ""
+        elif provenance.exists():
+            info = json.loads(provenance.read_text(encoding="utf-8"))
+            state, n, loci = "DONE", f"{info.get('n_variants', 0):,}", info.get("n_loci", "")
+            missing = [k for k, v in info.items() if isinstance(v, dict) and v.get("status") == "NOT_AVAILABLE"]
+            detail = f"scope {info.get('scope')}" + (f"; not available: {', '.join(missing)}" if missing else "")
+        elif (d / "ANNOTATION_FAILED.txt").exists():
+            state, n, loci = "FAILED", "", ""
+            detail = (d / "ANNOTATION_FAILED.txt").read_text(encoding="utf-8", errors="replace").splitlines()[0][:80]
+        else:
+            state, detail, n, loci = "PENDING", "", "", ""
+        counts[state] = counts.get(state, 0) + 1
+        print(f"{accession:<15}{state:<10}{n!s:>10}{loci!s:>6}  {detail}")
+    print("\nStudies : " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+
+
+def stats_mode(args) -> None:
+    P = project_paths(args)
+    banner(f"STEP 08 STATISTICS - {P['phenotype']} / {P['label']} ({P['code']})")
+    rows = []
+    for d in sorted(p for p in P["out"].iterdir() if p.is_dir()) if P["out"].exists() else []:
+        final = d / f"{d.name}_annotated_variants.tsv.gz"
+        if not final.exists():
+            continue
+        m = pd.read_csv(final, sep="\t", low_memory=False)
+        cs = m[m["IN_95_CREDIBLE_SET"].astype(str) == "True"]
+        loci = pd.read_csv(d / f"{d.name}_locus_annotation_summary.tsv", sep="\t").fillna("")
+        b = lambda frame, col: int((frame.get(col, pd.Series(dtype=str)).astype(str) == "True").sum())  # noqa: E731
+        category = cs.get("VEP_FUNCTIONAL_CATEGORY", pd.Series(dtype=str)).fillna("NOT_ANNOTATED")
+        pip_by_class = (cs["PIP"].groupby(category).sum() / max(cs["PIP"].sum(), 1e-12)).round(3)
+        row = {"STUDY_ACCESSION": d.name, "N_VARIANTS": len(m), "N_LOCI": len(loci), "N_CS_VARIANTS": len(cs),
+               "CS_CODING": b(cs, "IS_CODING"), "CS_LOF": b(cs, "IS_LOF"), "CS_MISSENSE": b(cs, "IS_MISSENSE"),
+               "CS_SPLICE": b(cs, "IS_SPLICE"), "CS_AM_LIKELY_PATHOGENIC": b(cs, "AM_LIKELY_PATHOGENIC"),
+               "CS_CADD_GE_20": b(cs, "CADD_GE_20"), "CS_CLINVAR_PATHOGENIC": b(cs, "CLINVAR_PATHOGENIC"),
+               "CS_IN_CCRE": b(cs, "IN_CCRE"), "CS_CONSERVED": b(cs, "PHYLOP_CONSERVED"),
+               **{f"CS_PIP_FRACTION_{k}": v for k, v in pip_by_class.items()}}
+        rows.append(row)
+        print(f"\n{d.name}: {len(m):,} variants in {len(loci)} loci; {len(cs):,} in 95% credible sets")
+        print(f"   credible-set variants: coding {row['CS_CODING']} (LoF {row['CS_LOF']}, missense "
+              f"{row['CS_MISSENSE']}), splice {row['CS_SPLICE']}, AlphaMissense likely pathogenic "
+              f"{row['CS_AM_LIKELY_PATHOGENIC']}, CADD>=20 {row['CS_CADD_GE_20']}, ClinVar P/LP "
+              f"{row['CS_CLINVAR_PATHOGENIC']}, in cCRE {row['CS_IN_CCRE']}, conserved {row['CS_CONSERVED']}")
+        print("   PIP mass in credible sets by class: "
+              + ", ".join(f"{k} {v:.0%}" for k, v in pip_by_class.sort_values(ascending=False).items()))
+        top = loci.sort_values("TOP_PIP", ascending=False).head(8)
+        for _, r in top.iterrows():
+            print(f"   {r['LOCUS_ID']}: {r['TOP_VARIANT']} {r.get('TOP_RSID', '') or ''} PIP {r['TOP_PIP']} "
+                  f"{r.get('TOP_GENE', '') or ''} {r.get('TOP_CONSEQUENCE', '') or ''} | {r.get('TOP_EVIDENCE', '') or ''}")
+    if not rows:
+        print("No annotated studies yet (see --status).")
+        return
+    output = P["out"] / "annotation_stats.tsv"
+    pd.DataFrame(rows).to_csv(output, sep="\t", index=False)
+    print(f"\nTable: {output}")
+
+
+def test_variant_mode(args) -> None:
+    match = re.fullmatch(r"(?:chr)?(\d{1,2})[:_-](\d+)[:_-]([ACGTN]+)[:_-]([ACGTN]+)", args.test_variant.strip(), re.I)
+    if not match:
+        raise SystemExit("--test-variant must look like 4:89822321:G:A (GRCh38)")
+    chrom, pos, ref, alt = int(match.group(1)), int(match.group(2)), match.group(3).upper(), match.group(4).upper()
+    universe = pd.DataFrame([{"VARIANT_KEY": variant_key(chrom, pos, ref, alt), "PRIMARY_RSID": "", "CHR": chrom,
+                              "REFERENCE_POS": pos, "REFERENCE_REF": ref, "REFERENCE_ALT": alt}])
+    work = PROJECT_ROOT / "08_annotation" / "_test_variant" / slugify(universe.at[0, "VARIANT_KEY"])
+    work.mkdir(parents=True, exist_ok=True)
+    print_resources()
+    banner(f"STEP 08 TEST VARIANT {universe.at[0, 'VARIANT_KEY']}")
+    table, _ = annotate_universe(universe, work, args.cpus, args)
+    for key, value in table.iloc[0].items():
+        if str(value) not in ("", "nan", "None"):
+            print(f"  {key:<40} {str(value)[:110]}")
+
+
+def arguments(argv=None):
+    parser = argparse.ArgumentParser(description="Local annotation of Step06 fine-mapped variants.")
+    parser.add_argument("--phenotype", required=True)
+    parser.add_argument("--ancestry", required=True)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--index", type=int, default=None,
+                       help="Study N of the Step02 download manifest: annotate it on this machine.")
+    modes.add_argument("--status", action="store_true", help="READ-ONLY: done / failed / pending per study.")
+    modes.add_argument("--stats", action="store_true", help="Credible-set functional summary per study.")
+    modes.add_argument("--check-resources", action="store_true", help="Which local resources are present.")
+    modes.add_argument("--test-variant", default=None, help="Annotate one GRCh38 variant, e.g. 4:89822321:G:A.")
+    modes.add_argument("--worker-manifest", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--scope", choices=["all", "cs", "pip"], default="all",
+                        help="all fine-mapped variants (default), 95%% credible sets only, or PIP >= --min-pip.")
+    parser.add_argument("--min-pip", type=float, default=0.01)
+    parser.add_argument("--online", default="",
+                        help="Optional web lookups for credible-set variants: screen,regulomedb.")
+    parser.add_argument("--screen-active-z", type=float, default=1.64)
+    parser.add_argument("--no-vep", action="store_true", help="Skip VEP (CADD / AlphaMissense / ClinVar / ... only).")
+    parser.add_argument("--vep-gtf", default=None, help=argparse.SUPPRESS)  # testing: GTF gene models, no cache
+    parser.add_argument("--vep-path", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--force", action="store_true", help="Re-annotate studies that are already done.")
+    parser.add_argument("--keep-work", action="store_true", help="Keep the VEP input / output / log files.")
+    slurm = parser.add_argument_group("SLURM (default: the #SBATCH header of HPC_CPU.sh)")
+    slurm.add_argument("--template", default="HPC_CPU.sh")
+    slurm.add_argument("--partition", default=None)
+    slurm.add_argument("--qos", default=None)
+    slurm.add_argument("--account", default=None)
+    slurm.add_argument("--cpus", type=int, default=None)
+    slurm.add_argument("--mem", "--memory", dest="mem", default=None)
+    slurm.add_argument("--time", default=None)
+    slurm.add_argument("--max-parallel", type=int, default=0)
+    return resolve_slurm(parser.parse_args(argv))
+
+
+def main() -> None:
+    args = arguments()
+    if args.check_resources:
+        print_resources()
+    elif args.test_variant:
+        test_variant_mode(args)
+    elif args.status:
+        status_mode(args)
+    elif args.stats:
+        stats_mode(args)
+    elif args.worker_manifest:
+        worker_mode(args)
+    elif args.index is not None:
+        index_mode(args)
+    else:
+        planner_mode(args)
 
 
 if __name__ == "__main__":

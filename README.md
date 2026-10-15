@@ -25,7 +25,7 @@ PD=(--phenotype "Parkinson's disease" --ancestry EUR)
 
 # 0. once per installation: software, then the 1000 Genomes inputs + GENCODE (gene tracks)
 python Step00_Installation.py
-envs/pipeline/bin/python Step00_Download_Resources.py --groups gwas_catalog 1000g genome --output Step00_Download_QuickStart.sh
+envs/pipeline/bin/python Step00_Download_Resources.py --groups gwas_catalog 1000g genome vep annotation cadd --output Step00_Download_QuickStart.sh
 sbatch Step00_Download_QuickStart.sh
 envs/pipeline/bin/python Step00_Download_Resources.py --status   # wait until 1000g + genome are complete
 
@@ -40,14 +40,16 @@ envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR
 sbatch Step04_Prepare_1000G_EUR_GRCh38.sh                 # or: for c in $(seq 1 22); do $RUN ... --index $c; done
 envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --status
 
-# 4. clumping -> 5. fine-mapping -> 6. figures, all for study 2
+# 4. clumping -> 5. fine-mapping -> 6. figures -> 7. variant annotation, all for study 2
 $RUN envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py   "${PD[@]}" --index 2
 $RUN envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py "${PD[@]}" --index 2
 $RUN envs/pipeline/bin/python Step07_Plots.py             "${PD[@]}" --index 2
+$RUN envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py "${PD[@]}" --index 2
 
 # results
 envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py   "${PD[@]}" --stats    # leads, loci
 envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py "${PD[@]}" --stats    # credible sets, PIPs, locus QC
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py "${PD[@]}" --stats   # coding / LoF / ClinVar / cCRE in credible sets
 ls 07_plots/parkinson_s_disease/european/GCST90475830/                      # Manhattan, ideogram, loci/
 ```
 
@@ -445,6 +447,42 @@ Options: `--max-loci N` (locus figures per study), `--ld-max 120` (variants in t
 GTF from `--groups genome` (offline, same release as the rest of the pipeline). Studies that were
 not fine-mapped (e.g. NEEDS_REVIEW) still get a Manhattan plot and ideogram from their Step05 leads.
 
+## 9. Variant annotation (Step08, local)
+
+Annotates **every** fine-mapped variant from local, versioned files (no web service, works on
+compute nodes without internet, reproducible). Download once:
+`Step00_Download_Resources.py --groups vep genome annotation cadd`.
+
+```bash
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR   # plan
+sbatch Step08_Annotate_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --test-variant 12:40340400:G:A
+```
+
+| Source (local file) | Annotation |
+|---|---|
+| Ensembl VEP 116 offline cache + GRCh38 FASTA (`vep`, `genome`) | consequence on every transcript, most severe / MANE / canonical, gene, biotype, exon / intron, HGVS c./p., amino acids, protein domains, UniProt, SIFT, PolyPhen, regulatory features, rsIDs, gnomAD v4 and 1000G allele frequencies |
+| CADD v1.7 SNVs + indels (`cadd`) | raw score, PHRED |
+| AlphaMissense hg38 (`annotation`, tabix-indexed by the downloader) | missense pathogenicity and class |
+| ClinVar VCF (`annotation`, release date recorded) | significance, review status, condition |
+| ENCODE SCREEN cCRE V4 (`annotation`) | overlapping cCRE and its class (PLS, pELS, dELS, CA-CTCF, ...) |
+| phyloP 100-way (`annotation`) | conservation |
+| gnomAD v4.1 constraint (`annotation`) | LOEUF, pLI, missense Z of the gene |
+
+Optional web lookups for 95% credible-set variants only: `--online screen,regulomedb` (SCREEN
+cell-type cCRE activity and cCRE-gene links, needs `SCREEN_API_KEY`; RegulomeDB score). `--scope cs`
+or `--scope pip --min-pip 0.01` limits the annotation to credible sets / PIP.
+
+Outputs in `08_annotation/<phenotype>/<ancestry>/<GCST>/`: `<GCST>_annotated_variants.tsv.gz` (all
+variants, fine-mapping + annotation, `Z_ALT`/`BETA_ALT` = GWAS effect of the ALT allele),
+`<GCST>_credible_set_variants.tsv`, `<GCST>_locus_annotation_summary.tsv` (top variant, gene,
+coding / LoF / missense / ClinVar / cCRE evidence in the credible set, PIP-weighted functional
+composition) and `annotation_provenance.json` (every file used, ClinVar release, counts).
+
 ## Resource groups
 
 | Group | Contents | Approx. download |
@@ -460,7 +498,7 @@ not fine-mapped (e.g. NEEDS_REVIEW) still get a Manhattan plot and ideogram from
 | `qtl_celltype` | Jerber_2021 cell-type eQTL, dense + `.tbi` + SuSiE | 62 GB |
 | `molecular_qtl` | ADSP FunGen brain pQTL / sQTL / haQTL + Kumasaka caQTL, MD5-verified | 230 GB |
 | `meqtl` | ADSP FunGen brain mQTL, MD5-verified | 1.5 TB |
-| `annotation` | AlphaMissense, ClinVar, ENCODE SCREEN cCREs v4, gnomAD v4.1 constraint, UCSC liftover chains, phyloP100way | 11 GB |
+| `annotation` | AlphaMissense (+ tabix index), ClinVar, ENCODE SCREEN cCREs v4, gnomAD v4.1 constraint, UCSC liftover chains, phyloP100way | 11 GB |
 | `cadd` | CADD v1.7 GRCh38 SNVs + gnomAD4 indels (+ `.tbi`) | 89 GB |
 | `qtl_catalogue_susie` *(only when named)* | eQTL Catalogue SuSiE lbf / cs for the Step11 contexts | 316 GB |
 | `adsp_eqtl` *(only when named)* | ADSP FunGen brain bulk + single-nucleus eQTL | 720 GB |
