@@ -27,7 +27,7 @@ Every later command uses the project's own interpreter, **`envs/pipeline/bin/pyt
 
 | Location | Contents |
 |---|---|
-| `envs/pipeline` | Python/R stack, GWASLab, plink2, bcftools, samtools, htslib, bedtools, VEP 116, susieR, coloc, hyprcoloc, gseapy, pyranges, pyliftover, CrossMap |
+| `envs/pipeline` | Python/R stack, GWASLab, plink2, bcftools, samtools, htslib, bedtools, VEP 116, susieR, coloc, hyprcoloc, gseapy, pyranges, pyliftover, CrossMap; figures: ggplot2, patchwork, ggrastr, ggrepel, svglite, ComplexHeatmap, karyoploteR |
 | `envs/spliceai` | SpliceAI 1.3.1 (TensorFlow 2.15) |
 | `envs/pangolin` | Pangolin (pinned commit) |
 | `envs/ldsc` | LDSC / S-LDSC 1.0.1 (Python 2.7) |
@@ -365,6 +365,34 @@ sampling noise alone gives `ESTIMATE_S_RSS` around 0.5 and can create spurious P
 above flag those loci. Interpret WARN loci with care and, where available, repeat with a larger
 ancestry-matched panel or in-sample LD. Rare variants (MAF < 1% in the panel, e.g. many
 high-penetrance coding variants) are not fine-mapped with this panel.
+
+## 8. Publication figures (Step07)
+
+Reads Step02/05/06 outputs (nothing is recomputed) and draws every figure in R; dense point
+layers are rasterised, text and gene models stay vector.
+
+```bash
+envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR                    # pdf + png
+envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR --formats pdf,svg,png
+envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR --status
+envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR --slurm            # then sbatch the .sh
+```
+
+| Figure (`07_plots/<phenotype>/<ancestry>/`) | Content | Package |
+|---|---|---|
+| `<GCST>/manhattan` | genome-wide association, independent leads labelled with the nearest gene, fine-mapping windows shaded, λGC | ggplot2 + ggrastr + ggrepel |
+| `<GCST>/ideogram` | chromosomes 1–22 (hg38 cytobands) with every locus | karyoploteR |
+| `<GCST>/loci/<L>_region` | one genomic axis: −log10 P coloured by r² with the index variant · SuSiE PIP with 95% credible sets · gene models (canonical GENCODE transcripts) · LD r² triangle; title carries the locus QC (s, allele flips, artefacts) | ggplot2 + patchwork |
+| `<GCST>/all_loci_multipage.pdf` | every locus figure in one PDF | |
+| `combined/ideogram_all_gwas` | all loci of all GWAS, one coloured band per GWAS | karyoploteR |
+| `combined/locus_by_gwas` | loci × GWAS matrix: min P and max PIP (number of credible sets) | ComplexHeatmap |
+| `combined/shared_loci/<chr>_<pos>_<gene>` | loci found in ≥ 2 GWAS: one association panel per GWAS on a shared axis, PIPs of all GWAS, genes | ggplot2 + patchwork |
+| `combined/locus_summary.tsv` | the table behind the matrix | |
+
+Options: `--max-loci N` (locus figures per study), `--ld-max 120` (variants in the LD triangle),
+`--ld-window-kb 500` (largest pair distance shown), `--dpi 300`. Gene tracks use the local GENCODE
+GTF from `--groups gencode` (offline, same release as the rest of the pipeline). Studies that were
+not fine-mapped (e.g. NEEDS_REVIEW) still get a Manhattan plot and ideogram from their Step05 leads.
 
 ## Resource groups
 

@@ -13,6 +13,8 @@ GWAS
  -> ancestry-specific LD  (plink2)
  -> clumping              (plink2)
  -> SuSiE                 (R susieR)
+ -> figures               (R ggplot2, patchwork, ggrastr, ggrepel, svglite,
+                           ComplexHeatmap, karyoploteR; matplotlib)
  -> VEP                   (ensembl-vep 116)
  -> GTEx / eQTL Catalogue (tabix, pandas, aria2c)
  -> SpliceAI              (isolated env: TensorFlow 2.15 / Keras 2.15)
@@ -288,6 +290,16 @@ dependencies:
   - r-pheatmap
   - r-rcolorbrewer
 
+  # Publication figures (Step07_Plots.py)
+  - r-ggplot2
+  - r-patchwork
+  - r-ggrastr
+  - r-ggrepel
+  - r-scales
+  - r-svglite
+  - bioconductor-complexheatmap
+  - bioconductor-karyoploter
+
   # Toolchain for compiling R packages from source inside the environment
   - compilers
   - make
@@ -365,6 +377,14 @@ R_PACKAGES = [
     ("susieR", True, 6, "r-susier", "Step06 SuSiE-RSS"),
     ("coloc", True, 11, "r-coloc", "Step11 coloc.bf_bf"),
     ("data.table", True, 11, "r-data.table", "coloc dependency"),
+    ("ggplot2", True, 7, "r-ggplot2", "Step07 figures"),
+    ("patchwork", True, 7, "r-patchwork", "Step07 multi-panel locus figures"),
+    ("ggrastr", True, 7, "r-ggrastr", "Step07 rasterised dense point layers"),
+    ("ggrepel", True, 7, "r-ggrepel", "Step07 variant / gene labels"),
+    ("scales", True, 7, "r-scales", "Step07 axes"),
+    ("svglite", True, 7, "r-svglite", "Step07 SVG output"),
+    ("ComplexHeatmap", True, 7, "bioconductor-complexheatmap", "Step07 locus x GWAS matrix"),
+    ("karyoploteR", True, 7, "bioconductor-karyoploter", "Step07 chromosome ideograms"),
 ]
 
 # -----------------------------------------------------------------------------

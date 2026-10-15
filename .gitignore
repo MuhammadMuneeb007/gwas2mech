@@ -14,6 +14,7 @@ fuma_reproducibility/
 02_summary_stats/
 05_ld_clumping/
 06_finemapping/
+07_plots/
 
 # Run state, manifests and logs
 setup_manifests/
@@ -30,6 +31,7 @@ Step02_QC_*.sh
 Step04_Prepare_1000G_*.sh
 Step05_Clump_GWAS_*.sh
 Step06_FineMap_GWAS_*.sh
+Step07_Plots_*.sh
 Setup_*.sh
 environment.yml
 resource_paths.env
