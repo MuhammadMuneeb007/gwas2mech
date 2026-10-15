@@ -250,7 +250,8 @@ envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry 
 # PubMed ID -> DOI only
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --pmid-to-doi 34737426 33987465
 
-# one QC task directly on this machine
+# study N of the download manifest end to end on this machine: download (if needed) + QC
+# (only the planner has to have run; on a login node wrap it in srun)
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --index 1
 ```
 

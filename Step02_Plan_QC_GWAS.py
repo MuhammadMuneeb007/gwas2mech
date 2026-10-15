@@ -35,7 +35,8 @@ Step03_QC_One_GWAS.py, logic unchanged) plus status / statistics:
     # minimum P, lambda GC, available fields) -> GWAS_publication_stats.tsv
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --stats
 
-    # One QC task directly on this machine
+    # Study 1 of the download manifest end to end on this machine: download it
+    # (if needed) and QC it - only the planner above has to have run
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --index 1
 
     # PubMed ID -> DOI
@@ -5133,113 +5134,84 @@ def worker_mode():
 # =============================================================================
 
 def direct_index_mode(args):
-    """Run one QC_TASK_ID from an existing phenotype/ancestry QC manifest."""
-
-    if args.index is None:
-        raise ValueError("--index is required for direct single-index mode.")
+    """--index N: the whole job for study N of the download manifest (ARRAY_ID N),
+    on this machine: download (resumes a .part file; skipped when complete), then
+    the same GWASLab QC worker the SLURM array runs. Only the planner (without
+    --qc) has to have run before."""
 
     if args.index < 1:
-        raise ValueError("--index must be >= 1.")
+        raise SystemExit("--index must be >= 1.")
 
-    phenotype = args.phenotype.strip()
-    if not phenotype:
-        raise ValueError("--phenotype cannot be empty.")
+    P = project_paths(args)
+    manifest = read_download_manifest(P)
+    ids = pd.to_numeric(manifest["ARRAY_ID"], errors="coerce")
+    selected = manifest[ids == args.index]
 
-    ancestry_code, ancestry_label = canonical_ancestry_pair(args.ancestry)
-    phenotype_slug = slugify(phenotype)
-    ancestry_slug = slugify(ancestry_label)
-
-    working_directory = Path.cwd().resolve()
-    manifest_file = (
-        working_directory
-        / "01_gwas_catalog"
-        / phenotype_slug
-        / ancestry_slug
-        / "GWAS_QC_manifest.tsv"
-    ).resolve()
-
-    if not manifest_file.exists() or manifest_file.stat().st_size <= 0:
-        raise FileNotFoundError(
-            "\nStep 03 QC manifest not found:\n"
-            f"{manifest_file}\n\n"
-            "Run Step02_Plan_QC_GWAS.py --qc first to generate "
-            "the QC manifest and SLURM script."
-        )
-
-    manifest = pd.read_csv(
-        manifest_file,
-        sep="\t",
-        dtype=str,
-        low_memory=False,
-    )
-
-    required = ["QC_TASK_ID", "STUDY_ACCESSION"]
-    missing = [column for column in required if column not in manifest.columns]
-    if missing:
-        raise RuntimeError(
-            f"QC manifest is missing required columns: {missing}"
-        )
-
-    task_numbers = pd.to_numeric(
-        manifest["QC_TASK_ID"],
-        errors="coerce",
-    )
-    selected = manifest.loc[task_numbers == args.index]
-
-    if len(selected) != 1:
-        available = sorted(
-            int(value)
-            for value in task_numbers.dropna().astype(int).unique().tolist()
-        )
-        if available:
-            available_text = (
-                f"{available[0]}-{available[-1]}"
-                if available == list(range(available[0], available[-1] + 1))
-                else ", ".join(map(str, available))
-            )
-        else:
-            available_text = "none"
-
-        raise RuntimeError(
-            f"Expected exactly one QC manifest row for --index {args.index}; "
-            f"found {len(selected)}. Available indices: {available_text}"
-        )
+    if selected.empty:
+        listing = "\n".join(f"  {int(i):>3}  {a}" for i, a in zip(ids, manifest["STUDY_ACCESSION"]) if pd.notna(i))
+        raise SystemExit(f"--index {args.index} is not in {P['download_manifest']}\nAvailable:\n{listing}")
 
     row = selected.iloc[0]
     accession = str(row["STUDY_ACCESSION"]).strip()
+    file_name = str(row["FILE_NAME"]).strip()
+    url = str(row.get("DOWNLOAD_URL", "")).strip()
 
-    banner("STEP 03 - DIRECT SINGLE-INDEX MODE")
-    print(f"Manifest : {manifest_file}")
-    print(f"Index    : {args.index}")
-    print(f"Study    : {accession}")
-    print(f"Phenotype: {phenotype}")
-    print(f"Ancestry : {ancestry_label} ({ancestry_code})")
-    print(f"CPUs     : {os.environ.get('SLURM_CPUS_PER_TASK', CPUS_PER_TASK)}")
-    print()
-    print(
-        "NOTE: direct --index mode runs on the machine/node where this "
-        "Python command is executed. On an HPC login node, use srun or "
-        "sbatch --wrap to place the same command on a compute node."
+    banner(f"STEP 02 - INDEX {args.index}: {accession} (download + QC on this machine)")
+    print(f"Phenotype : {P['phenotype']}")
+    print(f"Ancestry  : {P['label']} ({P['code']})")
+    print(f"File      : {file_name}")
+    print(f"CPUs      : {os.environ.get('SLURM_CPUS_PER_TASK', CPUS_PER_TASK)}")
+    if not os.environ.get("SLURM_JOB_ID"):
+        print("NOTE: running here, not as a SLURM job. On a login node use e.g.\n"
+              f"  srun --cpus-per-task=8 --mem=64G --time=4:00:00 envs/pipeline/bin/python "
+              f"{Path(__file__).name} --phenotype \"{P['phenotype']}\" --ancestry {P['code']} --index {args.index}")
+
+    # 1. download -----------------------------------------------------------------
+    raw = find_downloaded_file(P["raw"], accession, file_name)
+
+    if raw is None:
+        if not url:
+            raise SystemExit(f"No DOWNLOAD_URL for {accession} in the download manifest.")
+        target = P["raw"] / accession / file_name
+        banner("DOWNLOADING")
+        print(f"{url}\n-> {target}")
+        download_study_file(url, target)
+        raw = target
+    else:
+        print(f"Already downloaded: {raw}")
+
+    # 2. QC (one-row manifest for the normal worker) --------------------------------
+    qc_row = build_qc_row(
+        task_id=1,
+        accession=accession,
+        input_file=raw,
+        output_directory=P["qc"] / accession,
+        phenotype=P["phenotype"],
+        ancestry_code=P["code"],
+        ancestry_label=P["label"],
+        extra=normalise_trait(manifest_trait(row), accession),
     )
+    single = P["analysis"] / f".index_{args.index}_qc_manifest.tsv"
+    pd.DataFrame([qc_row]).to_csv(single, sep="\t", index=False)
 
-    old_task = os.environ.get("SLURM_ARRAY_TASK_ID")
-    old_manifest = os.environ.get("GWAS_QC_MANIFEST")
-
-    os.environ["SLURM_ARRAY_TASK_ID"] = str(args.index)
-    os.environ["GWAS_QC_MANIFEST"] = str(manifest_file)
+    saved = {k: os.environ.get(k) for k in ("SLURM_ARRAY_TASK_ID", "GWAS_QC_MANIFEST")}
+    os.environ["SLURM_ARRAY_TASK_ID"] = "1"
+    os.environ["GWAS_QC_MANIFEST"] = str(single)
 
     try:
         worker_mode()
     finally:
-        if old_task is None:
-            os.environ.pop("SLURM_ARRAY_TASK_ID", None)
-        else:
-            os.environ["SLURM_ARRAY_TASK_ID"] = old_task
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        single.unlink(missing_ok=True)
 
-        if old_manifest is None:
-            os.environ.pop("GWAS_QC_MANIFEST", None)
-        else:
-            os.environ["GWAS_QC_MANIFEST"] = old_manifest
+    print()
+    print(f"Index {args.index} ({accession}) finished. Progress of all studies:")
+    print(f"  envs/pipeline/bin/python {Path(__file__).name} --phenotype \"{P['phenotype']}\" "
+          f"--ancestry {P['code']} --status")
 
 
 # =============================================================================
@@ -5812,7 +5784,8 @@ def arguments(argv=None):
     modes.add_argument("--qc", action="store_true",
                        help="QC planner: QC manifest + SLURM array for the GWAS downloaded so far.")
     modes.add_argument("--index", type=int, default=None,
-                       help="Run QC task N of the existing QC manifest on this machine.")
+                       help="Study N of the download manifest (ARRAY_ID): download it if needed, then QC it, "
+                            "on this machine.")
     modes.add_argument("--status", action="store_true",
                        help="READ-ONLY: downloaded / partial / pending and QC done / failed / pending.")
     modes.add_argument("--stats", action="store_true",
