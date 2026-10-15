@@ -15,7 +15,8 @@ GWAS2Mech STEP 06 - Regional extraction + ancestry-matched LD + SuSiE-RSS
     envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --stats
     envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --plots
 
-    # one task directly on this machine
+    # study 1 (the number the Step02 planner prints) on this machine; only its
+    # Step05 clumping has to be done
     envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --index 1
 
 Inputs
@@ -343,7 +344,8 @@ def arguments(argv=None):
 
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--index", type=int, default=None,
-                       help="Run array task N of the existing fine-mapping manifest on this machine.")
+                       help="Study N of the Step02 download manifest (the number Step02 prints): "
+                            "fine-map it on this machine; other studies need not be ready.")
     modes.add_argument("--status", action="store_true",
                        help="READ-ONLY: fine-mapping done / partial / failed / pending / excluded per study.")
     modes.add_argument("--stats", action="store_true",
@@ -2152,76 +2154,79 @@ def project_manifest_path(args) -> Path:
     )
 
 
-def direct_index_mode(args) -> None:
-    """Run one manifest task directly, without requiring SLURM array variables."""
-    manifest_file = project_manifest_path(args)
-
-    if not manifest_file.exists():
-        banner("FINEMAPPING MANIFEST NOT FOUND")
-        print(f"Expected: {manifest_file}")
-        print("Generating the Step 06 planner/manifest first...")
-        planner_mode(args)
-
-    if not manifest_file.exists():
-        raise FileNotFoundError(
-            "Fine-mapping manifest was not created. Complete the planner inputs "
-            "and rerun the command."
-        )
-
-    manifest = pd.read_csv(manifest_file, sep="\t", dtype=str)
-    if "FINEMAP_TASK_ID" not in manifest.columns:
-        raise RuntimeError(f"FINEMAP_TASK_ID missing from manifest: {manifest_file}")
-
-    task_numbers = pd.to_numeric(manifest["FINEMAP_TASK_ID"], errors="coerce")
-    selected = manifest[task_numbers == int(args.index)]
+def study_for_index(phenotype_slug: str, ancestry_slug: str, index: int) -> str:
+    """Accession of study N in the Step02 download manifest (the ARRAY_ID the
+    Step02 planner prints) - the same N in Step02, Step05, Step06 and Step07."""
+    path = PROJECT_ROOT / "01_gwas_catalog" / phenotype_slug / ancestry_slug / "GWAS_download_manifest.tsv"
+    if not path.is_file():
+        raise SystemExit(f"No Step02 download manifest: {path}\nRun the Step02 planner first.")
+    manifest = pd.read_csv(path, sep="\t", dtype=str)
+    ids = pd.to_numeric(manifest["ARRAY_ID"], errors="coerce")
+    selected = manifest[ids == index]
     if selected.empty:
-        available = sorted(
-            int(x) for x in task_numbers.dropna().astype(int).unique().tolist()
-        )
-        raise RuntimeError(
-            f"--index {args.index} has no manifest rows. "
-            f"Available indices: {available}"
-        )
+        listing = "\n".join(f"  {int(i):>3}  {a}" for i, a in zip(ids, manifest["STUDY_ACCESSION"]) if pd.notna(i))
+        raise SystemExit(f"--index {index} is not in {path}\nAvailable:\n{listing}")
+    return str(selected.iloc[0]["STUDY_ACCESSION"]).strip()
 
-    accession = ", ".join(selected["STUDY_ACCESSION"].astype(str))
-    banner("STEP 06 - DIRECT SINGLE-INDEX MODE")
-    print(f"Manifest : {manifest_file}")
-    print(f"Index    : {args.index}")
-    print(f"Study    : {accession}")
-    print(f"CPUs     : {args.cpus}")
-    print()
-    print(
-        "NOTE: direct --index mode runs on the machine/node where this Python "
-        "command is executed. On an HPC login node, use srun or sbatch --wrap "
-        "to place this same command on a compute node."
-    )
 
-    old_manifest = os.environ.get("GWAS_FINEMAP_MANIFEST")
-    old_task = os.environ.get("SLURM_ARRAY_TASK_ID")
-    old_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
+def direct_index_mode(args) -> None:
+    """--index N: study N of the Step02 download manifest, fine-mapped on this
+    machine with the normal worker. Only this study has to be through Step05."""
+    root = PROJECT_ROOT
+    phenotype = args.phenotype.strip()
+    ancestry_code, ancestry_label = resolve_ancestry(args.ancestry)
+    p_slug, a_slug = slugify(phenotype), slugify(ancestry_label)
+    accession = study_for_index(p_slug, a_slug, args.index)
+    quoted = shlex.quote(phenotype)
 
-    os.environ["GWAS_FINEMAP_MANIFEST"] = str(manifest_file.resolve())
-    os.environ["SLURM_ARRAY_TASK_ID"] = str(args.index)
-    if old_cpus is None:
-        os.environ["SLURM_CPUS_PER_TASK"] = str(args.cpus)
+    clump_root = root / "05_ld_clumping" / p_slug / a_slug
+    if not (clump_root / accession / "lead_variants.tsv").is_file():
+        raise SystemExit(
+            f"Step05 clumping of study {args.index} ({accession}) is not done yet. Run:\n"
+            f"  envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype {quoted} "
+            f"--ancestry {ancestry_code} --index {args.index}")
 
+    pipeline_python, plink2, rscript = resolve_finemap_tools(root)
+    verify_reference(root, ancestry_code)
+    reference_n = count_reference_samples(root, ancestry_code)
+    meta = read_study_metadata(study_metadata_file(root, p_slug, a_slug)).get(accession)
+    output_root = root / "06_finemapping" / p_slug / a_slug
+    output_root.mkdir(parents=True, exist_ok=True)
+    qc_file = root / "02_summary_stats" / p_slug / a_slug / "qc" / accession / f"{accession}_GRCh38_QC.tsv.gz"
+
+    row, missing, problem = build_finemap_row(
+        args, accession=accession, qc_file=qc_file, clump_root=clump_root, output_root=output_root,
+        meta=meta, reference_n=reference_n, rscript=rscript, plink2=plink2, phenotype=phenotype,
+        ancestry_code=ancestry_code, ancestry_label=ancestry_label)
+    if missing:
+        raise SystemExit(f"Missing inputs for {accession}:\n  " + "\n  ".join(missing))
+    if problem:
+        raise SystemExit(f"{accession} is not fine-mapped: {problem}\n"
+                         "(--include-unreviewed fine-maps it anyway; not recommended)")
+
+    banner(f"STEP 06 - INDEX {args.index}: {accession} (SuSiE-RSS on this machine)")
+    print(f"{row['PHENOTYPE_TYPE']}  N={row['GWAS_N']:,}  [{row['GWAS_N_SOURCE']}]")
+    row["FINEMAP_TASK_ID"] = 1
+    single = output_root / f".index_{args.index}_finemap_manifest.tsv"
+    pd.DataFrame([row]).to_csv(single, sep="\t", index=False)
+
+    saved = {k: os.environ.get(k) for k in ("SLURM_ARRAY_TASK_ID", "GWAS_FINEMAP_MANIFEST", "SLURM_CPUS_PER_TASK")}
+    os.environ["SLURM_ARRAY_TASK_ID"] = "1"
+    os.environ["GWAS_FINEMAP_MANIFEST"] = str(single)
+    os.environ.setdefault("SLURM_CPUS_PER_TASK", str(args.cpus))
     try:
         worker_mode()
     finally:
-        if old_manifest is None:
-            os.environ.pop("GWAS_FINEMAP_MANIFEST", None)
-        else:
-            os.environ["GWAS_FINEMAP_MANIFEST"] = old_manifest
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        single.unlink(missing_ok=True)
 
-        if old_task is None:
-            os.environ.pop("SLURM_ARRAY_TASK_ID", None)
-        else:
-            os.environ["SLURM_ARRAY_TASK_ID"] = old_task
-
-        if old_cpus is None:
-            os.environ.pop("SLURM_CPUS_PER_TASK", None)
-        else:
-            os.environ["SLURM_CPUS_PER_TASK"] = old_cpus
+    base = f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {quoted} --ancestry {ancestry_code}"
+    print(f"\nResults: {base} --stats\nFigures: envs/pipeline/bin/python Step07_Plots.py --phenotype {quoted} "
+          f"--ancestry {ancestry_code} --index {args.index}")
 
 
 # =============================================================================
@@ -2258,6 +2263,26 @@ def project_paths(args) -> dict:
     }
 
 
+def finished_studies(P) -> list[str]:
+    """Studies with Step06 output, including ones run only with --index."""
+    if not P["output_root"].exists():
+        return []
+    return sorted(d.name for d in P["output_root"].iterdir() if (d / "finemapping_summary.json").exists())
+
+
+def study_records(P) -> dict:
+    """accession -> manifest row (or the study's finemapping_summary.json)."""
+    records = {}
+    if P["manifest"].is_file():
+        for _, m in pd.read_csv(P["manifest"], sep="\t", dtype=str).iterrows():
+            records[m["STUDY_ACCESSION"]] = m.to_dict()
+    for accession in finished_studies(P):
+        if accession not in records:
+            records[accession] = json.loads(
+                (P["output_root"] / accession / "finemapping_summary.json").read_text(encoding="utf-8"))
+    return records
+
+
 def finemap_state(output_dir: Path, accession: str) -> tuple[str, dict]:
     summary_json = output_dir / "finemapping_summary.json"
     if (output_dir / "FINEMAPPING_FAILED.txt").exists() and not summary_json.exists():
@@ -2281,7 +2306,8 @@ def status_mode(args) -> None:
     clumped = pd.read_csv(P["clump_manifest"], sep="\t", dtype=str) if P["clump_manifest"].is_file() else pd.DataFrame()
 
     accessions = list(dict.fromkeys(
-        list(clumped.get("STUDY_ACCESSION", [])) + list(planned.get("STUDY_ACCESSION", []))))
+        list(clumped.get("STUDY_ACCESSION", [])) + list(planned.get("STUDY_ACCESSION", []))
+        + finished_studies(P)))
     if not accessions:
         print("No Step05 / Step06 manifest yet. Run Step05, then the Step06 planner.")
         return
@@ -2296,7 +2322,7 @@ def status_mode(args) -> None:
         state, info = finemap_state(out, accession)
         if state == "PENDING" and accession in reasons:
             state = "EXCLUDED"
-        elif state == "PENDING" and accession not in in_plan:
+        elif state == "PENDING" and accession not in in_plan and not (P["output_root"] / accession).exists():
             state = "NOT_PLANNED"
         counts[state] += 1
 
@@ -2331,13 +2357,8 @@ def status_mode(args) -> None:
 def stats_mode(args) -> None:
     P = project_paths(args)
     banner(f"STEP 06 STATISTICS - {P['phenotype']} / {P['label']} ({P['code']})")
-    if not P["manifest"].is_file():
-        print("No fine-mapping manifest yet.")
-        return
-
     rows = []
-    for _, m in pd.read_csv(P["manifest"], sep="\t", dtype=str).iterrows():
-        accession = m["STUDY_ACCESSION"]
+    for accession, m in study_records(P).items():
         out = P["output_root"] / accession
         state, info = finemap_state(out, accession)
         if state in ("PENDING", "FAILED"):
@@ -2623,16 +2644,12 @@ def plots_mode(args) -> None:
 
     P = project_paths(args)
     banner(f"STEP 06 PLOTS - {P['phenotype']} / {P['label']} ({P['code']})")
-    if not P["manifest"].is_file():
-        print("No fine-mapping manifest yet.")
-        return
-
     genes = gene_table()
     if genes.empty:
         print("No GENCODE GTF under resources/gencode/ - regional plots have no gene track "
-              "(Step00_Download_Resources.py --groups gencode).")
+              "(Step00_Download_Resources.py --groups genome).")
 
-    for accession in pd.read_csv(P["manifest"], sep="\t", dtype=str)["STUDY_ACCESSION"]:
+    for accession in study_records(P):
         state, _ = finemap_state(P["output_root"] / accession, accession)
         if state not in ("DONE", "PARTIAL"):
             print(f"{accession}: {state} - skipped")

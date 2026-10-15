@@ -194,6 +194,21 @@ def nearest_gene(genes, chrom, pos):
 # DATA PREPARATION (one compact folder per study for the R script)
 # =============================================================================
 
+def study_for_index(phenotype_slug, ancestry_slug, index):
+    """Accession of study N in the Step02 download manifest (the ARRAY_ID the
+    Step02 planner prints) - the same N in Step02, Step05, Step06 and Step07."""
+    path = PROJECT_ROOT / "01_gwas_catalog" / phenotype_slug / ancestry_slug / "GWAS_download_manifest.tsv"
+    if not path.is_file():
+        raise SystemExit(f"No Step02 download manifest: {path}\nRun the Step02 planner first.")
+    manifest = pd.read_csv(path, sep="\t", dtype=str)
+    ids = pd.to_numeric(manifest["ARRAY_ID"], errors="coerce")
+    selected = manifest[ids == index]
+    if selected.empty:
+        listing = "\n".join(f"  {int(i):>3}  {a}" for i, a in zip(ids, manifest["STUDY_ACCESSION"]) if pd.notna(i))
+        raise SystemExit(f"--index {index} is not in {path}\nAvailable:\n{listing}")
+    return str(selected.iloc[0]["STUDY_ACCESSION"]).strip()
+
+
 def lead_table(P, accession):
     leads = read_tsv(P["clump"] / accession / "lead_variants.tsv")
     if leads.empty:
@@ -339,13 +354,20 @@ def prepare(P, args):
 
     studies = sorted(p.name for p in P["clump"].iterdir() if (p / "lead_variants.tsv").exists()) \
         if P["clump"].exists() else []
+    if args.index is not None:
+        wanted = study_for_index(P["p_slug"], P["a_slug"], args.index)
+        if wanted not in studies:
+            raise SystemExit(f"Study {args.index} ({wanted}) has no Step05 result yet. Run:\n"
+                             f"  envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "
+                             f"{shlex.quote(P['phenotype'])} --ancestry {P['code']} --index {args.index}")
+        studies = [wanted]
     if not studies:
         raise SystemExit(f"No Step05 results under {P['clump']} - run Step05 (and Step06) first.")
 
     genes = gene_models()
     if genes.empty:
         print("No GENCODE GTF under resources/gencode/ - figures have no gene track / gene names "
-              "(Step00_Download_Resources.py --groups gencode).")
+              "(Step00_Download_Resources.py --groups genome).")
 
     study_rows, locus_rows, windows = [], [], []
     for accession in studies:
@@ -365,7 +387,10 @@ def prepare(P, args):
         study_dir = P["finemap"] / accession
         summary = read_tsv(study_dir / f"{accession}_finemapping_summary.tsv")
         loci = read_tsv(study_dir / "loci_definition.tsv")
-        done = accession in finemapped and not loci.empty and (study_dir / "finemapping_summary.json").exists()
+        summary_json = study_dir / "finemapping_summary.json"
+        done = not loci.empty and summary_json.exists()
+        if done and accession not in finemapped:   # fine-mapped with Step06 --index
+            finemapped[accession] = json.loads(summary_json.read_text(encoding="utf-8"))
 
         if done:
             if not summary.empty:
@@ -947,6 +972,7 @@ def write_slurm(P, args):
     command = [str(PROJECT_ROOT / "envs" / "pipeline" / "bin" / "python"), str(Path(__file__).resolve()),
                "--phenotype", P["phenotype"], "--ancestry", P["code"], "--formats", args.formats,
                "--dpi", str(args.dpi), "--max-loci", str(args.max_loci), "--ld-max", str(args.ld_max),
+               *(["--index", str(args.index)] if args.index is not None else []),
                "--ld-window-kb", str(args.ld_window_kb)]
     bash_file = PROJECT_ROOT / f"Step07_Plots_{P['p_slug']}_{P['a_slug']}.sh"
     bash_file.write_text(f"""#!/bin/bash --login
@@ -970,6 +996,8 @@ def arguments(argv=None):
     parser = argparse.ArgumentParser(description="Publication figures for Step05 loci and Step06 fine-mapping.")
     parser.add_argument("--phenotype", required=True)
     parser.add_argument("--ancestry", required=True)
+    parser.add_argument("--index", type=int, default=None,
+                        help="Only study N of the Step02 download manifest (the number Step02 prints).")
     parser.add_argument("--formats", default="pdf,png",
                         help="Comma-separated: pdf, svg, png (default pdf,png).")
     parser.add_argument("--dpi", type=int, default=300, help="PNG resolution (default 300).")

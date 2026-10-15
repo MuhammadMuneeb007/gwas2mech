@@ -9,6 +9,56 @@ Everything is installed and downloaded **inside the directory you run the script
 so the same commands work on a laptop, a workstation or any SLURM cluster.
 Run every command from the repository directory.
 
+## Quick start: one Parkinson's disease GWAS, end to end
+
+`--index N` runs **one study** through a step on the current machine. N is the study number the
+Step02 planner prints, and it is the **same N in Step02, Step05, Step06 and Step07**; only that
+study has to be through the previous step. In Step04, `--index N` builds LD panel chromosome N.
+Each command skips work that is already finished, so it can be re-run safely.
+
+Heavy steps should run on a compute node, not the login node. Set `RUN` once with your
+cluster's values (the ones in `HPC_CPU.sh`):
+
+```bash
+RUN="srun --account=a_ace --partition=general --qos=normal --cpus-per-task=8 --mem=64G --time=12:00:00"
+PD=(--phenotype "Parkinson's disease" --ancestry EUR)
+
+# 0. once per installation: software, then the 1000 Genomes inputs + GENCODE (gene tracks)
+python Step00_Installation.py
+envs/pipeline/bin/python Step00_Download_Resources.py --groups gwas_catalog 1000g genome --output Step00_Download_QuickStart.sh
+sbatch Step00_Download_QuickStart.sh
+envs/pipeline/bin/python Step00_Download_Resources.py --status   # wait until 1000g + genome are complete
+
+# 1. find the Parkinson's GWAS; prints the numbered study list (ARRAY_ID)
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py "${PD[@]}"
+
+# 2. study 2 = GCST90475830 (8,704 cases / 440,252 controls): download + QC
+$RUN envs/pipeline/bin/python Step02_Plan_QC_GWAS.py "${PD[@]}" --index 2
+
+# 3. EUR LD panels, chromosomes 1-22 (once; shared by every phenotype)
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR
+sbatch Step04_Prepare_1000G_EUR_GRCh38.sh                 # or: for c in $(seq 1 22); do $RUN ... --index $c; done
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --status
+
+# 4. clumping -> 5. fine-mapping -> 6. figures, all for study 2
+$RUN envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py   "${PD[@]}" --index 2
+$RUN envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py "${PD[@]}" --index 2
+$RUN envs/pipeline/bin/python Step07_Plots.py             "${PD[@]}" --index 2
+
+# results
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py   "${PD[@]}" --stats    # leads, loci
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py "${PD[@]}" --stats    # credible sets, PIPs, locus QC
+ls 07_plots/parkinson_s_disease/european/GCST90475830/                      # Manhattan, ideogram, loci/
+```
+
+Study numbers come from the planner's list in step 1 (largest GWAS first). Study 1,
+GCST90104087, includes 5,379 **proxy cases** (family history), so Step02 flags it for review and
+Step06 does not fine-map it until `VERIFIED_PHENOTYPE_TYPE` is filled in
+`01_gwas_catalog/parkinson_s_disease/european/phenotype_type_review.tsv`. If you planned with an
+older Step02, re-run step 1 once so the classification columns are current.
+
+To run **all** studies, use the generated SLURM arrays instead of `--index` (sections 4–8).
+
 ## 1. Install the software
 
 Requirements: Linux (or macOS), Python ≥ 3.7, and `mamba`, `conda` or `micromamba`
@@ -392,7 +442,7 @@ envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR --s
 
 Options: `--max-loci N` (locus figures per study), `--ld-max 120` (variants in the LD triangle),
 `--ld-window-kb 500` (largest pair distance shown), `--dpi 300`. Gene tracks use the local GENCODE
-GTF from `--groups gencode` (offline, same release as the rest of the pipeline). Studies that were
+GTF from `--groups genome` (offline, same release as the rest of the pipeline). Studies that were
 not fine-mapped (e.g. NEEDS_REVIEW) still get a Manhattan plot and ideogram from their Step05 leads.
 
 ## Resource groups

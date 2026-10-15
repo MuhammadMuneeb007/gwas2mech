@@ -15,7 +15,8 @@ GWAS2Mech STEP 05 - Ancestry-matched LD clumping / independent lead variants
     envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --stats
     envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --plots
 
-    # one task directly on this machine
+    # study 1 (the number the Step02 planner prints) on this machine; only its
+    # Step02 QC has to be done
     envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --index 1
 
 Inputs
@@ -242,7 +243,8 @@ def arguments(argv=None):
 
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--index", type=int, default=None,
-                       help="Run array task N of the existing clumping manifest on this machine.")
+                       help="Study N of the Step02 download manifest (the number Step02 prints): "
+                            "clump it on this machine; other studies need not be ready.")
     modes.add_argument("--status", action="store_true",
                        help="READ-ONLY: clumping done / failed / pending per study.")
     modes.add_argument("--stats", action="store_true",
@@ -1236,113 +1238,72 @@ def clump_one_study(row, task_id, root, plink2) -> None:
 # =============================================================================
 
 
-def direct_index_mode(args) -> None:
-    """Run one existing Step 05 manifest row using the normal worker logic.
+def study_for_index(phenotype_slug: str, ancestry_slug: str, index: int) -> str:
+    """Accession of study N in the Step02 download manifest (the ARRAY_ID the
+    Step02 planner prints) - the same N in Step02, Step05, Step06 and Step07."""
+    path = PROJECT_ROOT / "01_gwas_catalog" / phenotype_slug / ancestry_slug / "GWAS_download_manifest.tsv"
+    if not path.is_file():
+        raise SystemExit(f"No Step02 download manifest: {path}\nRun the Step02 planner first.")
+    manifest = pd.read_csv(path, sep="\t", dtype=str)
+    ids = pd.to_numeric(manifest["ARRAY_ID"], errors="coerce")
+    selected = manifest[ids == index]
+    if selected.empty:
+        listing = "\n".join(f"  {int(i):>3}  {a}" for i, a in zip(ids, manifest["STUDY_ACCESSION"]) if pd.notna(i))
+        raise SystemExit(f"--index {index} is not in {path}\nAvailable:\n{listing}")
+    return str(selected.iloc[0]["STUDY_ACCESSION"]).strip()
 
-    This is intentionally the same scientific worker used by the SLURM array.
-    The only difference is that the requested task ID and manifest path are
-    supplied locally through the same environment variables the generated
-    SLURM script would normally set.
-    """
+
+def direct_index_mode(args) -> None:
+    """--index N: study N of the Step02 download manifest, clumped on this
+    machine with the normal worker. Only this study has to be QC'd."""
     validate_arguments(args)
 
-    root = Path.cwd().resolve()
+    root = PROJECT_ROOT
     phenotype = args.phenotype.strip()
-    phenotype_slug = slugify(phenotype)
     ancestry_code, ancestry_label = canonical_ancestry(args.ancestry)
-    ancestry_slug = slugify(ancestry_label)
+    p_slug, a_slug = slugify(phenotype), slugify(ancestry_label)
+    accession = study_for_index(p_slug, a_slug, args.index)
+    quoted = shlex.quote(phenotype)
 
-    manifest_file = (
-        root
-        / "05_ld_clumping"
-        / phenotype_slug
-        / ancestry_slug
-        / "clumping_manifest.tsv"
-    ).resolve()
+    qc_file = root / "02_summary_stats" / p_slug / a_slug / "qc" / accession / f"{accession}_GRCh38_QC.tsv.gz"
+    if not qc_file.is_file():
+        raise SystemExit(
+            f"Step02 QC of study {args.index} ({accession}) is not done yet. Run:\n"
+            f"  envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype {quoted} "
+            f"--ancestry {ancestry_code} --index {args.index}")
 
-    if not manifest_file.exists() or manifest_file.stat().st_size <= 0:
-        raise FileNotFoundError(
-            "Clumping manifest not found or empty:\n"
-            f"  {manifest_file}\n\n"
-            "Run Step 05 once without --index first to generate the manifest."
-        )
+    if not (root / "envs" / "pipeline" / "bin" / "plink2").exists():
+        raise SystemExit("plink2 missing in envs/pipeline. Run: python Step00_Installation.py")
+    validate_reference(root, ancestry_code)
 
-    manifest = pd.read_csv(
-        manifest_file,
-        sep="\t",
-        dtype=str,
-        low_memory=False,
-    )
+    output_root = root / "05_ld_clumping" / p_slug / a_slug
+    output_root.mkdir(parents=True, exist_ok=True)
+    row, exclusion = build_clump_row(args, task_id=1, accession=accession, qc_file=qc_file,
+                                     output_root=output_root, phenotype=phenotype,
+                                     ancestry_code=ancestry_code, ancestry_label=ancestry_label)
+    if exclusion is not None:
+        raise SystemExit(f"{accession} is not clumped: {exclusion['REASON']}")
 
-    if "CLUMP_TASK_ID" not in manifest.columns:
-        raise RuntimeError(
-            f"Clumping manifest is missing CLUMP_TASK_ID: {manifest_file}"
-        )
+    banner(f"STEP 05 - INDEX {args.index}: {accession} (clumping on this machine)")
+    single = output_root / f".index_{args.index}_clump_manifest.tsv"
+    pd.DataFrame([row]).to_csv(single, sep="\t", index=False)
 
-    task_numbers = pd.to_numeric(
-        manifest["CLUMP_TASK_ID"],
-        errors="coerce",
-    )
-    selected = manifest.loc[task_numbers == int(args.index)]
-
-    if selected.empty:
-        available = sorted(
-            int(x)
-            for x in task_numbers.dropna().astype(int).unique().tolist()
-        )
-        if available:
-            available_text = (
-                f"{available[0]}-{available[-1]}"
-                if available == list(range(available[0], available[-1] + 1))
-                else ", ".join(str(x) for x in available)
-            )
-        else:
-            available_text = "none"
-        raise RuntimeError(
-            f"No manifest rows for --index {args.index}. Available indices: {available_text}"
-        )
-
-    accession = ", ".join(selected["STUDY_ACCESSION"].astype(str))
-
-    banner("STEP 05 - DIRECT SINGLE-INDEX MODE")
-    print(f"Manifest : {manifest_file}")
-    print(f"Index    : {args.index}")
-    print(f"Study    : {accession}")
-    print(f"Phenotype: {phenotype}")
-    print(f"Ancestry : {ancestry_label} ({ancestry_code})")
-    print(f"CPUs     : {args.cpus}")
-    print()
-    print(
-        "NOTE: direct --index mode runs on the machine/node where this "
-        "Python command is executed. On an HPC login node, use srun or "
-        "sbatch --wrap to place this same command on a compute node."
-    )
-
-    old_task = os.environ.get("SLURM_ARRAY_TASK_ID")
-    old_manifest = os.environ.get("GWAS_CLUMP_MANIFEST")
-    old_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
-
-    os.environ["SLURM_ARRAY_TASK_ID"] = str(args.index)
-    os.environ["GWAS_CLUMP_MANIFEST"] = str(manifest_file)
-    os.environ["SLURM_CPUS_PER_TASK"] = str(args.cpus)
-
+    saved = {k: os.environ.get(k) for k in ("SLURM_ARRAY_TASK_ID", "GWAS_CLUMP_MANIFEST", "SLURM_CPUS_PER_TASK")}
+    os.environ["SLURM_ARRAY_TASK_ID"] = "1"
+    os.environ["GWAS_CLUMP_MANIFEST"] = str(single)
+    os.environ.setdefault("SLURM_CPUS_PER_TASK", str(args.cpus))
     try:
         worker_mode()
     finally:
-        if old_task is None:
-            os.environ.pop("SLURM_ARRAY_TASK_ID", None)
-        else:
-            os.environ["SLURM_ARRAY_TASK_ID"] = old_task
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        single.unlink(missing_ok=True)
 
-        if old_manifest is None:
-            os.environ.pop("GWAS_CLUMP_MANIFEST", None)
-        else:
-            os.environ["GWAS_CLUMP_MANIFEST"] = old_manifest
-
-        if old_cpus is None:
-            os.environ.pop("SLURM_CPUS_PER_TASK", None)
-        else:
-            os.environ["SLURM_CPUS_PER_TASK"] = old_cpus
+    print(f"\nNext: envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype {quoted} "
+          f"--ancestry {ancestry_code} --index {args.index}")
 
 
 # =============================================================================

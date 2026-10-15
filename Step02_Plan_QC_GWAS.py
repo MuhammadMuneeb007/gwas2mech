@@ -217,8 +217,15 @@ def normalise_trait(trait, accession=""):
 
     trait = dict(trait)
 
-    if "PHENOTYPE_TYPE_SOURCE" in trait:   # older manifests
-        trait.setdefault("CLASSIFICATION_SOURCE", trait.pop("PHENOTYPE_TYPE_SOURCE"))
+    # older manifests: TRAIT_TYPE / TRAIT_TYPE_SOURCE / PHENOTYPE_TYPE_SOURCE
+    if not str(trait.get("PHENOTYPE_TYPE", "") or "").strip() and "TRAIT_TYPE" in trait:
+        trait["PHENOTYPE_TYPE"] = trait["TRAIT_TYPE"]
+    trait.pop("TRAIT_TYPE", None)
+    for old in ("PHENOTYPE_TYPE_SOURCE", "TRAIT_TYPE_SOURCE"):
+        if old in trait:
+            value = trait.pop(old)
+            if not str(trait.get("CLASSIFICATION_SOURCE", "") or "").strip():
+                trait["CLASSIFICATION_SOURCE"] = value
 
     value = phenotype_type_value(trait.get("PHENOTYPE_TYPE"))
     source = str(trait.get("CLASSIFICATION_SOURCE", "") or "")
@@ -3706,7 +3713,7 @@ def planner_mode(args):
                 ancestry_label=ancestry_label,
                 extra=normalise_trait({
                     field: row.get(field, "")
-                    for field in TRAIT_FIELDS + ["PHENOTYPE_TYPE_SOURCE"]
+                    for field in TRAIT_FIELDS + ["PHENOTYPE_TYPE_SOURCE", "TRAIT_TYPE", "TRAIT_TYPE_SOURCE"]
                     if field in row
                 }, accession),
             )
@@ -4352,7 +4359,7 @@ def worker_mode():
         # would otherwise drop those variants (fine-mapping needs them all).
         trait = normalise_trait({
             field: row.get(field, "")
-            for field in TRAIT_FIELDS + ["PHENOTYPE_TYPE_SOURCE"]
+            for field in TRAIT_FIELDS + ["PHENOTYPE_TYPE_SOURCE", "TRAIT_TYPE", "TRAIT_TYPE_SOURCE"]
             if field in row
         }, accession)
 
@@ -5346,7 +5353,7 @@ def manifest_trait(row):
 
     return {
         field: row.get(field, "")
-        for field in TRAIT_FIELDS + ["PHENOTYPE_TYPE_SOURCE"]
+        for field in TRAIT_FIELDS + ["PHENOTYPE_TYPE_SOURCE", "TRAIT_TYPE", "TRAIT_TYPE_SOURCE"]
         if field in row
     }
 
@@ -5382,7 +5389,7 @@ def write_review_file(analysis_dir, manifest):
         accession = str(item["STUDY_ACCESSION"]).strip()
         flagged = (
             str(item.get("NEEDS_REVIEW", "")).strip().lower() == "true"
-            or phenotype_type_value(item.get("PHENOTYPE_TYPE")) == "Unknown"
+            or phenotype_type_value(item.get("PHENOTYPE_TYPE") or item.get("TRAIT_TYPE")) == "Unknown"
         )
 
         if not flagged and accession not in old:

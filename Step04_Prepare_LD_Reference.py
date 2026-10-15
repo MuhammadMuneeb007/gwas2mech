@@ -34,7 +34,7 @@ Usage:
     envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --status
     envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --stats
 
-    # one chromosome task directly on this machine
+    # chromosome 22 directly on this machine (no planner needed)
     envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --index 22
 
 Each chromosome: bcftools subsets the ancestry samples, plink2 converts to
@@ -571,14 +571,30 @@ def worker_mode():
 
 
 def direct_index_mode(args):
+    """--index N: chromosome N of every requested ancestry, built on this machine
+    (no planner needed; a finished panel is skipped)."""
 
-    if not manifest_file(args.codes).is_file():
-        raise SystemExit("No Step04 manifest yet. Run the planner first (without --index).")
+    if not 1 <= args.index <= 22:
+        raise SystemExit("For Step04, --index is a chromosome number (1-22).")
 
-    os.environ["SLURM_ARRAY_TASK_ID"] = str(args.index)
-    os.environ["LD_REFERENCE_MANIFEST"] = str(manifest_file(args.codes))
-    os.environ.setdefault("SLURM_CPUS_PER_TASK", str(args.cpus))
-    worker_mode()
+    threads = int(os.environ.get("SLURM_CPUS_PER_TASK", args.cpus))
+
+    for code in args.codes:
+        sample_file, _ = create_sample_list(code)
+        filename = chromosome_filename(args.index)
+        process_chromosome({
+            "CHR": args.index,
+            "ANCESTRY_CODE": code,
+            "SAMPLE_FILE": str(sample_file),
+            "RAW_VCF": str(RAW_DIR / filename),
+            "RAW_TBI": str(RAW_DIR / (filename + ".tbi")),
+            "OUTPUT_PREFIX": str(panel_prefix(code, args.index)),
+            "TMP_DIR": str(REFERENCE_ROOT / "tmp" / code),
+        }, threads)
+        collect_reference_summaries(code)
+
+    print(f"\nchr{args.index} done for {', '.join(args.codes)}. Progress: "
+          f"envs/pipeline/bin/python {Path(__file__).name} --ancestry {' '.join(args.codes)} --status")
 
 
 # =============================================================================
@@ -659,7 +675,8 @@ def arguments(argv=None):
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--status", action="store_true", help="READ-ONLY: built / failed / pending panels.")
     modes.add_argument("--stats", action="store_true", help="Samples per population and variants per chromosome.")
-    modes.add_argument("--index", type=int, default=None, help="Run array task N of the manifest here.")
+    modes.add_argument("--index", type=int, default=None,
+                       help="Build chromosome N (1-22) on this machine; no planner needed.")
 
     add_slurm_arguments(parser)
 
