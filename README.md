@@ -22,6 +22,9 @@ python Step00_Installation.py --verify-only
 python Step00_Download_Resources.py        # plans what is missing, writes the job script
 sbatch Step00_Download_Resources.sh        # or without SLURM: bash Step00_Download_Resources.sh local 4
 python Step00_Download_Resources.py --finalize   # re-check every file + report
+
+# 3. Check every downloaded file is readable and print its header
+envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py          # add --full for a complete read
 ```
 
 ## Software installed by `Step00_Installation.py`
@@ -37,9 +40,30 @@ python Step00_Download_Resources.py --finalize   # re-check every file + report
 
 ## Shared resources downloaded by `Step00_Download_Resources.py`
 
-GENCODE 50 GRCh38 genome + annotation, 1000 Genomes GRCh38 (2019) VCFs, Ensembl VEP 116 cache,
-GTEx v11 eQTL/sQTL (+ SuSiE), eQTL Catalogue metadata, Open Targets Platform 26.09
-(study, credible sets, L2G, colocalisation) and GWAS Catalog metadata (~65 GB download).
+One SLURM array task per file; pick groups with `--groups` / `--skip-groups`.
+
+| Group | Contents | Approx. download |
+|---|---|---|
+| `gwas_catalog` | GWAS Catalog studies + ancestry tables | 0.2 GB |
+| `genome` | GENCODE 50 GRCh38 FASTA (+ `.fai`) and GTF | 0.9 GB |
+| `1000g` | 1000 Genomes GRCh38 (2019) VCF + TBI + sample panel | 13 GB |
+| `vep` | Ensembl VEP 116 GRCh38 cache (extracted) | 26 GB |
+| `gtex` | GTEx v11 eQTL / sQTL / apaQTL + SuSiE (extracted), variant lookup, GENCODE 47 | 7 GB |
+| `eqtl_catalogue` | eQTL Catalogue metadata tables | < 1 GB |
+| `opentargets` | Open Targets Platform 26.09 study / credible sets / L2G / colocalisation | 19 GB |
+| `qtl_catalogue` | eQTL Catalogue dense + `.tbi` for Step11: GTEx v8 eQTL / exonQTL / isoQTL / sQTL + Sun_2018 pQTL | 320 GB |
+| `qtl_celltype` | Jerber_2021 cell-type eQTL, dense + `.tbi` + SuSiE (Setup_11B) | 62 GB |
+| `molecular_qtl` | ADSP FunGen brain pQTL / sQTL / haQTL (NIAGADS NG00184) + Kumasaka caQTL, MD5-verified | 230 GB |
+| `meqtl` | ADSP FunGen brain mQTL (NIAGADS NG00184), MD5-verified | 1.5 TB |
+| `annotation` | AlphaMissense, ClinVar, ENCODE SCREEN cCREs v4, gnomAD v4.1 constraint, UCSC liftover chains, phyloP100way | 11 GB |
+| `cadd` | CADD v1.7 GRCh38 SNVs + gnomAD4 indels (+ `.tbi`) | 89 GB |
+| `qtl_catalogue_susie` *(opt-in)* | eQTL Catalogue SuSiE lbf / cs for the Step11 contexts | 316 GB |
+| `adsp_eqtl` *(opt-in)* | ADSP FunGen brain bulk + single-nucleus eQTL | 720 GB |
+
+Very large archives (molecular QTL) are deleted after a verified extraction. The brain mQTL
+archive alone is 1.47 TB; it can be planned as its own job with a longer walltime:
+`python Step00_Download_Resources.py --groups meqtl --time 7-00:00:00 --output Step00_Download_meQTL.sh`.
+REVEL cannot be downloaded automatically (its servers block scripted downloads).
 
 ## Configuration
 

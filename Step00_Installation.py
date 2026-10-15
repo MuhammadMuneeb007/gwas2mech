@@ -23,16 +23,9 @@ GWAS
  -> pathways / intervals  (gseapy, pyranges)
  -> liftover              (pyliftover, CrossMap)
  -> Open Targets / FUMA   (duckdb, pyarrow, polars, rsync)
+ -> resource downloads    (aria2c, curl, wget, pigz, samtools, tabix)
 
-and by the Setup_* resource downloaders:
-
-  Setup_07D_Download_ENCODE.py              requests
-  Setup_10_Download_Molecular_QTL.py        wget / curl (aws CLI optional)
-  Setup_11B_Download_CellType_QTL.py        pandas, aria2c / curl / wget, tabix
-  Setup_11B_Download_ContextSpecific_eQTL   pandas, aria2c, tabix
-
-Everything is created beneath the CURRENT WORKING DIRECTORY, using exactly the
-same layout as Step00_Check_Resources.py:
+Everything is created beneath the CURRENT WORKING DIRECTORY:
 
     envs/pipeline        main pipeline stack (from environment.yml)
     envs/spliceai        SpliceAI 1.3.1 (incompatible with main env)
@@ -69,7 +62,7 @@ Re-running is safe: existing environments are updated/repaired, never rebuilt
 unless --force-recreate is given. Only SOFTWARE is installed. Reference DATA
 (genome, GTEx, 1000G, VEP cache, MAGMA gene locations, LDSC baseline / weights,
 PoPS features, liftover chain files, ...) is NOT downloaded here; use
-Step00_Check_Resources.py --resources-only for shared resources.
+Step00_Download_Resources.py for shared resources.
 
 Launch with any Python >= 3.7 (e.g. the one that comes with conda/Miniforge).
 
@@ -138,7 +131,7 @@ CONDA_SUBDIR = "osx-64" if IS_MAC and platform.machine() == "arm64" else None
 
 
 # =============================================================================
-# VERSIONS (identical to Step00_Check_Resources.py / gwas2m_resources.py)
+# VERSIONS
 # =============================================================================
 
 VEP_RELEASE = "116"
@@ -214,9 +207,7 @@ EXPECTED_DISK_GB = 30
 
 
 # =============================================================================
-# MAIN ENVIRONMENT SPECIFICATION
-# (byte-for-byte the same as the environment.yml written by Step00, so the two
-#  scripts never fight over envs/pipeline)
+# MAIN ENVIRONMENT SPECIFICATION (written to environment.yml)
 # =============================================================================
 
 ENVIRONMENT_YML_TEXT = f"""name: pipeline
@@ -231,7 +222,6 @@ dependencies:
   - python=3.11
 
   # Core Python scientific stack
-  # (single source of truth: gwas2m_resources.PYTHON_PACKAGES)
   - pandas
   - numpy
   - scipy
@@ -306,7 +296,7 @@ dependencies:
   - git
   - pip
 
-  # pip-only packages (also installed explicitly by Setup_00_Install_Software.sh)
+  # pip-only packages
   - pip:
       - {GWASLAB_SPEC}
       - {POLARS_SPEC}
@@ -314,10 +304,7 @@ dependencies:
 
 
 # =============================================================================
-# SOFTWARE REGISTRY
-#   Copy of gwas2m_resources.{TOOLS, PYTHON_PACKAGES, R_PACKAGES}. If
-#   gwas2m_resources.py sits next to this script, ITS registry is used instead,
-#   so anything added there is verified here automatically.
+# SOFTWARE CHECKED AFTER INSTALLATION
 # =============================================================================
 
 # name, env, version command, required, step, purpose, install spec
@@ -343,12 +330,12 @@ TOOLS = [
 
 # import name, distribution name, env, required, step, install method, spec, used by
 PYTHON_PACKAGES = [
-    ("pandas", "pandas", "pipeline", True, 1, "conda", "pandas", "all steps, Setup_11B"),
+    ("pandas", "pandas", "pipeline", True, 1, "conda", "pandas", "all steps"),
     ("numpy", "numpy", "pipeline", True, 1, "conda", "numpy", "all steps"),
-    ("requests", "requests", "pipeline", True, 1, "conda", "requests", "Step01, Step06, Setup_07D"),
+    ("requests", "requests", "pipeline", True, 1, "conda", "requests", "Step01, Step06"),
     ("urllib3", "urllib3", "pipeline", True, 1, "conda", "urllib3", "Step01, Step06"),
     ("gwaslab", "gwaslab", "pipeline", True, 3, "pip", GWASLAB_SPEC, "Step03 QC"),
-    ("yaml", "PyYAML", "pipeline", False, 6, "conda", "pyyaml", "Step06 metadata, config/slurm.yaml"),
+    ("yaml", "PyYAML", "pipeline", False, 6, "conda", "pyyaml", "Step06 metadata"),
     ("scipy", "scipy", "pipeline", False, None, "conda", "scipy", "Pipeline_Report, Step13, Step14"),
     ("polars", "polars", "pipeline", False, None, "pip", POLARS_SPEC, "Diagnose_Step11, Pipeline_Report"),
     ("orjson", "orjson", "pipeline", False, None, "conda", "orjson", "Diagnose_Step11"),
@@ -381,8 +368,7 @@ R_PACKAGES = [
 ]
 
 # -----------------------------------------------------------------------------
-# GWAS -> mechanism add-ons (always appended, also when gwas2m_resources.py is
-# used, so they are verified either way). Same tuple layouts as above.
+# GWAS -> mechanism add-ons. Same tuple layouts as above.
 # -----------------------------------------------------------------------------
 
 EXTRA_TOOLS = [
@@ -434,35 +420,15 @@ COMMAND_CHECKS = [
     ("magma", "magma --version", [MAGMA_BIN, "--version"]),
 ]
 
-# Optional host tools used by Setup_* scripts; never installed here.
+# Host tools used by the SLURM job scripts; never installed here.
 HOST_TOOLS = [
-    ("aws", "Setup_10 s3:// downloads (falls back to public HTTPS when absent)"),
-    ("sbatch", "Setup_11B / Step00 resource jobs submit SLURM arrays"),
-    ("squeue", "Setup_11B job monitoring"),
+    ("sbatch", "submits the Step00_Download_Resources.sh job arrays"),
+    ("squeue", "job monitoring"),
 ]
 
-REGISTRY_SOURCE = "embedded copy (gwas2m_resources.py not found)"
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    import gwas2m_resources as _registry  # noqa: E402
-
-    TOOLS = list(_registry.TOOLS)
-    PYTHON_PACKAGES = list(_registry.PYTHON_PACKAGES)
-    R_PACKAGES = list(_registry.R_PACKAGES)
-    REGISTRY_SOURCE = f"gwas2m_resources.py ({Path(_registry.__file__).resolve()})"
-except Exception:
-    pass
-
-
-def _merge(base: list, extra: list, key) -> list:
-    seen = {key(item) for item in base}
-    return base + [item for item in extra if key(item) not in seen]
-
-
-TOOLS = _merge(TOOLS, EXTRA_TOOLS, key=lambda t: (t[1], t[0]))
-PYTHON_PACKAGES = _merge(PYTHON_PACKAGES, EXTRA_PYTHON_PACKAGES, key=lambda p: (p[2], p[0]))
-R_PACKAGES = _merge(R_PACKAGES, EXTRA_R_PACKAGES, key=lambda r: r[0])
+TOOLS = TOOLS + EXTRA_TOOLS
+PYTHON_PACKAGES = PYTHON_PACKAGES + EXTRA_PYTHON_PACKAGES
+R_PACKAGES = R_PACKAGES + EXTRA_R_PACKAGES
 
 # Conda environments under envs/, plus MAGMA (a binary under external_tools/).
 CONDA_COMPONENTS = ["pipeline", "spliceai", "pangolin", "ldsc", "pops"]
@@ -721,7 +687,6 @@ def preflight(pms: list[str]) -> bool:
     log(f"Host             : {socket.gethostname()}")
     log(f"Platform         : {platform.system()} {platform.release()} ({platform.machine()})")
     log(f"Launcher python  : {sys.executable} ({platform.python_version()})")
-    log(f"Registry         : {REGISTRY_SOURCE}")
     log(f"Components       : {', '.join(SELECTED)}")
     log(f"Log file         : {LOG_FILE}")
 
@@ -803,7 +768,7 @@ def preflight(pms: list[str]) -> bool:
                 log(f"[WARN]    network: {name} unreachable ({type(exc).__name__}); installs may fail")
 
     log()
-    log("Host tools used by Setup_* scripts (not installed here):")
+    log("Host tools (SLURM; not installed here):")
     for name, purpose in HOST_TOOLS:
         path = shutil.which(name)
         log(f"  {'[OK]     ' if path else '[ABSENT] '} {name:<8} {path or ''}  - {purpose}")
@@ -1183,7 +1148,7 @@ def location(component: str) -> str:
 # =============================================================================
 
 def _first_line(name: str, output: str) -> str:
-    """Same version-line rules as gwas2m_resources._version_line()."""
+    """The informative version line of a tool's --version / --help output."""
     import re
 
     lines = [x.strip() for x in output.splitlines() if x.strip()]
@@ -1219,7 +1184,7 @@ def verify_tools(env_ids: list[str]) -> list[dict]:
         rows.append(dict(env=env, type="tool", name=name, status=status, version=version,
                          required=required, step=step, used_by=purpose, spec=spec))
 
-    # gwas2m_resources: wget and curl are each optional, but Step02 needs one of them.
+    # wget and curl are each optional, but downloads need at least one of them.
     if "pipeline" in env_ids:
         either = any(r["status"] == "OK" for r in rows if r["env"] == "pipeline" and r["name"] in ("wget", "curl"))
         rows.append(dict(env="pipeline", type="tool", name="GWAS downloader (wget or curl)",
@@ -1335,7 +1300,7 @@ def verify(env_ids: list[str]) -> list[dict]:
         elif not (ENVS / env).exists():
             status = "MISSING"
         elif not env_exists(ENVS / env) or not env_bin(ENVS / env, "python").exists():
-            status = "BROKEN"   # gwas2m_resources.check_environment(): conda-meta + bin/python
+            status = "BROKEN"   # a usable env needs conda-meta/ and bin/python
         else:
             status = "OK"
         rows.append(dict(env=env, type="environment", name=location(env), status=status, version="",

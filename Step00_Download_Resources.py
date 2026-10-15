@@ -11,10 +11,8 @@ GWAS2m STEP 00 - DOWNLOAD SHARED RESOURCES (SLURM: ONE ARRAY TASK PER FILE)
 
 This script only PLANS; it never downloads data itself. It:
 
-  1. lists every shared resource FILE the pipeline needs, with the paths,
-     URLs and validation rules of gwas2m_resources.py and
-     gwas2m_setup_downloads.py (used directly when they sit next to this
-     script; an identical built-in copy is used otherwise);
+  1. lists every shared resource FILE the pipeline needs (paths and URLs
+     are defined in this script);
   2. skips files that are already VALID - non-empty, no <file>.aria2 control
      file and, when the remote size is known, exactly that size - and archives
      already extracted / FASTA already indexed (re-running only re-plans what
@@ -24,47 +22,75 @@ This script only PLANS; it never downloads data itself. It:
   4. writes setup_manifests/download_resources.tsv (one row = one file) and
      Step00_Download_Resources.sh.
 
-SLURM settings, highest priority first:
-     command-line options
-  >  config/slurm.yaml, stage "setup_download" (via gwas2m_config.py)
-  >  the #SBATCH header of HPC_CPU.sh
+SLURM settings: EVERY generated job (download tasks, the controller that
+submits the next array, the final check) uses the #SBATCH header of
+HPC_CPU.sh - account, partition, qos, nodes, ntasks, cpus-per-task, mem, time.
+Only --job-name / --output / --error / --array are set per job. Highest
+priority first:
+     command-line options (--account --partition --qos --cpus --mem --time)
+  >  the #SBATCH header of HPC_CPU.sh (or --template FILE)
   >  built-in defaults (2 CPUs, 16G, 24:00:00)
 
 In the generated script ONE ARRAY TASK DOWNLOADS EXACTLY ONE FILE. No more
-than --max-jobs (default: array_limit = 1000) jobs are ever queued: larger
+than --max-jobs (default 1000) jobs are ever queued: larger
 plans are split into chained arrays of (max-jobs - 1) tasks; a 1-task
 controller job submits the next array only after the previous one finished,
 and a last job verifies everything (python ... --finalize).
 
 Per task: resumable download (aria2c, else curl/wget into <file>.part) ->
-exact-size check -> integrity check (gzip -t / tar -t / parquet footer) ->
-post-processing (FASTA decompress + samtools faidx; tar extraction for GTEx
-and the VEP cache). A corrupt file is deleted so the next run fetches it again.
+exact-size check -> integrity check (gzip -t / tar -t / parquet footer / MD5)
+-> post-processing (FASTA decompress + samtools faidx; tar extraction for
+GTEx, the VEP cache and the molecular-QTL archives - the very large ones are
+deleted after a verified extraction). A corrupt file is deleted so the next
+run fetches it again.
 
-Resource groups (--groups / --skip-groups):
+Resource groups (--groups / --skip-groups); sizes are approximate downloads:
 
-  gwas_catalog    GWAS Catalog studies + ancestry tables (Step01)
-  genome          GENCODE 50 GRCh38 FASTA (+ .fai) and GTF
-  1000g           1000 Genomes GRCh38 VCF + TBI + panel (only while the
-                  PGEN panels still have to be built, as gwas2m plans it)
-  vep             Ensembl VEP 116 GRCh38 indexed cache (extracted)
-  gtex            GTEx v11 eQTL / sQTL / SuSiE archives (extracted) + references
-  eqtl_catalogue  eQTL Catalogue metadata tables + repair of dense / SuSiE
-                  files referenced locally or listed in
-                  setup_manifests/eqtl_catalogue_datasets.txt
-  opentargets     Open Targets Platform study / credible_set / l2g_prediction /
-                  colocalisation (one task per parquet file)
+  gwas_catalog        GWAS Catalog studies + ancestry tables                  ~0.2 GB
+  genome              GENCODE 50 GRCh38 FASTA (+ .fai) and GTF                ~0.9 GB
+  1000g               1000 Genomes GRCh38 VCF + TBI + panel (skipped once the
+                      population PGEN panels under resources/1000G/ exist)    ~13 GB
+  vep                 Ensembl VEP 116 GRCh38 indexed cache (extracted)        ~26 GB
+  gtex                GTEx v11 eQTL / sQTL / apaQTL + SuSiE (extracted),
+                      variant lookup, GENCODE 47                              ~7 GB
+  eqtl_catalogue      eQTL Catalogue metadata tables + repair of dense / SuSiE
+                      files referenced locally or listed in
+                      setup_manifests/eqtl_catalogue_datasets.txt
+  opentargets         Open Targets Platform study / credible_set /
+                      l2g_prediction / colocalisation (one task per parquet)  ~19 GB
+  qtl_catalogue       eQTL Catalogue dense .tsv.gz + .tbi for the Step11
+                      contexts (GTEx v8 eQTL / exonQTL / isoQTL / sQTL
+                      (leafcutter) + Sun_2018 pQTL)                           ~320 GB
+  qtl_celltype        Setup_11B contexts: Jerber_2021 cell-type eQTL,
+                      dense + .tbi + SuSiE lbf / credible sets                ~62 GB
+  molecular_qtl       ADSP FunGen xQTL brain pQTL / sQTL / haQTL (NIAGADS
+                      NG00184, GRCh38) + Kumasaka caQTL (GRCh38), MD5-checked ~230 GB
+  meqtl               ADSP FunGen xQTL brain mQTL / meQTL (NG00184, GRCh38)   ~1.5 TB
+  annotation          AlphaMissense, ClinVar, ENCODE SCREEN cCREs v4,
+                      gnomAD v4.1 constraint, UCSC liftover chains, phyloP    ~11 GB
+  cadd                CADD v1.7 GRCh38 SNVs + gnomAD4 indels (+ .tbi)         ~89 GB
+  Only when named in --groups:
+  qtl_catalogue_susie eQTL Catalogue SuSiE lbf / cs for the Step11 contexts   ~316 GB
+  adsp_eqtl           ADSP FunGen brain bulk eQTL + single-nucleus eQTL       ~720 GB
+
+Layouts match the pipeline: dense QTL files under
+resources/coloc/eqtl_catalogue/dense/<dataset_id>/ (as Step11 / Setup_11B
+expect), other molecular QTL under resources/molecular_qtl/<type>/<source>/,
+annotation under resources/annotation/<source>/.
 
 NOT done here: derived resources (1000G PGEN panels, sample lists, Pangolin
-DB) -> python Step00_Check_Resources.py --resources-only (it detects these
-downloads and skips them); molecular QTL -> Setup_10_*; ENCODE -> Setup_07D_*;
-phenotype GWAS summary statistics -> Step01 / Step02.
+DB), REVEL (its server blocks automated downloads), and phenotype GWAS
+summary statistics.
+
+After the downloads: python Step01_Download_Resources_Checkheaders.py
 
 Usage:
 
     python Step00_Download_Resources.py
     python Step00_Download_Resources.py --groups genome vep gtex
-    python Step00_Download_Resources.py --skip-groups opentargets
+    python Step00_Download_Resources.py --skip-groups meqtl cadd
+    python Step00_Download_Resources.py --groups qtl_catalogue --catalogue-study-regex '^Sun_2018$'
+    python Step00_Download_Resources.py --groups meqtl --time 7-00:00:00 --output Step00_Download_meQTL.sh
     python Step00_Download_Resources.py --max-jobs 500 --parallel 50
     python Step00_Download_Resources.py --account a_myproject
     python Step00_Download_Resources.py --finalize      # re-check + report
@@ -80,6 +106,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import re
 import shutil
 import sys
@@ -93,51 +120,37 @@ from pathlib import Path
 
 
 # =============================================================================
-# ROOT / SHARED MODULES
+# ROOT
 # =============================================================================
 
 ROOT = Path.cwd().resolve()
-HERE = Path(__file__).resolve().parent
-
-sys.path.insert(0, str(HERE))
-try:
-    import gwas2m_resources as gr  # paths, URLs, validators (single source of truth)
-except Exception:
-    gr = None
-try:
-    import gwas2m_config as gc     # config/slurm.yaml
-except Exception:
-    gc = None
 
 MANIFESTS = ROOT / "setup_manifests"
 LOGS = ROOT / "logs" / "resource_setup"
-MANIFEST = MANIFESTS / "download_resources.tsv"
-PLAN = MANIFESTS / "download_resources_plan.tsv"
-REPORT = MANIFESTS / "download_resources_report.tsv"
+DEFAULT_OUTPUT = "Step00_Download_Resources.sh"
 
 
 # =============================================================================
-# VERSIONS / SOURCES (taken from gwas2m_resources when available)
+# VERSIONS / SOURCES
 # =============================================================================
 
-GENCODE_RELEASE = getattr(gr, "GENCODE_RELEASE", "50")
-VEP_RELEASE = getattr(gr, "VEP_RELEASE", "116")
-GTEX_RELEASE = getattr(gr, "GTEX_RELEASE", "v11")
-OPEN_TARGETS_RELEASE = getattr(gr, "OPEN_TARGETS_RELEASE", "26.09")
-LD_ANCESTRIES = tuple(getattr(gr, "LD_ANCESTRIES", ("EUR", "AFR", "EAS", "SAS", "AMR")))
+GENCODE_RELEASE = "50"
+VEP_RELEASE = "116"
+GTEX_RELEASE = "v11"
+OPEN_TARGETS_RELEASE = "26.09"
+LD_ANCESTRIES = ("EUR", "AFR", "EAS", "SAS", "AMR")
 
-GENCODE_BASE = getattr(gr, "GENCODE_BASE",
-                       f"https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_{GENCODE_RELEASE}")
-ONE_K_BASE = getattr(gr, "ONE_K_BASE",
-                     "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/"
-                     "1000_genomes_project/release/20190312_biallelic_SNV_and_INDEL")
-GTEX_BASE = getattr(gr, "GTEX_BASE", "https://storage.googleapis.com/adult-gtex")
+GENCODE_BASE = f"https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_{GENCODE_RELEASE}"
+ONE_K_BASE = ("https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/"
+              "1000_genomes_project/release/20190312_biallelic_SNV_and_INDEL")
+GTEX_BASE = "https://storage.googleapis.com/adult-gtex"
+GWAS_CATALOG_BASE = "https://ftp.ebi.ac.uk/pub/databases/gwas/releases/latest"
 EQTL_RAW = "https://raw.githubusercontent.com/eQTL-Catalogue/eQTL-Catalogue-resources/master"
 OT_HTTPS = "https://ftp.ebi.ac.uk/pub/databases/opentargets/platform"
 OT_DATASETS = ("study", "credible_set", "l2g_prediction", "colocalisation")
 
 EQTL_ROOT = Path("resources") / "coloc" / "eqtl_catalogue"
-EQTL_METADATA = {  # same files/locations as gwas2m_setup_downloads / Step11
+EQTL_METADATA = {
     "tabix_ftp_paths.tsv": f"{EQTL_RAW}/tabix/tabix_ftp_paths.tsv",
     "tabix_ftp_paths_imported.tsv": f"{EQTL_RAW}/tabix/tabix_ftp_paths_imported.tsv",
     "dataset_metadata_r8_beta.tsv": f"{EQTL_RAW}/data_tables/dataset_metadata_r8_beta.tsv",
@@ -146,7 +159,33 @@ EQTL_METADATA = {  # same files/locations as gwas2m_setup_downloads / Step11
 EXTRA_EQTL_DATASETS = MANIFESTS / "eqtl_catalogue_datasets.txt"
 PARTIAL_SUFFIXES = (".aria2", ".part", ".tmp")
 
-GROUPS = ["gwas_catalog", "genome", "1000g", "vep", "gtex", "eqtl_catalogue", "opentargets"]
+# --- Molecular QTL: ADSP FunGen xQTL Atlas (NIAGADS NG00184.v1, brain, GRCh38) ---
+# NIAGADS file id -> file; MD5s from the NG00184.v1 file manifest.
+NIAGADS = "https://st1.niagads.org/portal/v1/download-public/NG00184/fileset"
+ADSP_ARCHIVES = [
+    # qtl, group, (manifest id, md5), (archive id, md5)
+    ("pQTL", "molecular_qtl", (57082, "04a815b631ed31b841a82209dd2bca4b"), (57083, "383d52607d05f007a74012f20e619a6f")),
+    ("sQTL", "molecular_qtl", (57092, "ddaea5121cc43f1c3311324795ad7bec"), (57093, "041b7360ab415504f68a88c605e154cb")),
+    ("haQTL", "molecular_qtl", (57062, "5b31f3d3a33794913a291603f7bf81b6"), (57063, "aab954ce983522608de12fa93376350c")),
+    ("mQTL", "meqtl", (57072, "6dd59e7c712437b0995f6a6bc1012515"), (57073, "8c0b98d5fd35bb7c534f17dc52f4fc8f")),
+    ("eQTL", "adsp_eqtl", (57052, "cf39475b1078b3151fe9f3da6438cecc"), (57053, "e410de967d14e9268a256d8c6f4185d8")),
+    ("snuc-eQTL", "adsp_eqtl", (57102, "2088e99e091aa4a523316fd7679bf17c"), (57103, "ed248beca9f0b2c72b0f401ec77b8012")),
+]
+KUMASAKA = "https://zenodo.org/records/13848268/files"   # caQTL, GRCh38 re-analysis (QTD100018)
+
+# --- Annotation resources ---
+ALPHAMISSENSE = "https://storage.googleapis.com/dm_alphamissense"
+CLINVAR = "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38"
+SCREEN_CCRES = "https://downloads.wenglab.org/Registry-V4/GRCh38-cCREs.bed"
+GNOMAD_CONSTRAINT = ("https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/constraint/"
+                     "gnomad.v4.1.constraint_metrics.tsv")
+UCSC = "https://hgdownload.soe.ucsc.edu/goldenPath"
+CADD = "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38"
+
+GROUPS = ["gwas_catalog", "genome", "1000g", "vep", "gtex", "eqtl_catalogue", "opentargets",
+          "qtl_catalogue", "qtl_celltype", "molecular_qtl", "meqtl", "annotation", "cadd",
+          "qtl_catalogue_susie", "adsp_eqtl"]
+OPTIONAL_GROUPS = {"qtl_catalogue_susie", "adsp_eqtl"}   # only when named in --groups
 
 
 # =============================================================================
@@ -156,20 +195,20 @@ GROUPS = ["gwas_catalog", "genome", "1000g", "vep", "gtex", "eqtl_catalogue", "o
 parser = argparse.ArgumentParser(
     description="Plan shared-resource downloads and write a SLURM array script (one task per file)."
 )
-parser.add_argument("--groups", nargs="+", choices=GROUPS, default=GROUPS,
-                    help="Resource groups to include (default: all).")
+parser.add_argument("--groups", nargs="+", choices=GROUPS,
+                    default=[g for g in GROUPS if g not in OPTIONAL_GROUPS],
+                    help="Resource groups to include (default: all except qtl_catalogue_susie, adsp_eqtl).")
 parser.add_argument("--skip-groups", nargs="+", choices=GROUPS, default=[],
                     help="Resource groups to leave out.")
 parser.add_argument("--template", default="HPC_CPU.sh",
                     help="SLURM template whose #SBATCH header is the base (default: HPC_CPU.sh).")
-parser.add_argument("--slurm-config", default=None,
-                    help="SLURM config (default: config/slurm.yaml, or $GWAS2M_SLURM_CONFIG).")
-parser.add_argument("--output", default="Step00_Download_Resources.sh",
-                    help="Generated SLURM script (default: Step00_Download_Resources.sh).")
-parser.add_argument("--max-jobs", type=int, default=None,
-                    help="Most jobs ever queued at once incl. 1 controller (default: array_limit, else 1000).")
-parser.add_argument("--parallel", type=int, default=None,
-                    help="Cap on simultaneously RUNNING tasks, array %%N (default: max_parallel, else none).")
+parser.add_argument("--output", default=DEFAULT_OUTPUT,
+                    help=f"Generated SLURM script (default: {DEFAULT_OUTPUT}). A different name gets its own "
+                         "task manifest, so e.g. a long meqtl-only plan can run next to the main one.")
+parser.add_argument("--max-jobs", type=int, default=1000,
+                    help="Most jobs ever queued at once incl. 1 controller (default 1000).")
+parser.add_argument("--parallel", type=int, default=0,
+                    help="Cap on simultaneously RUNNING tasks, array %%N (default 0 = no cap).")
 parser.add_argument("--cpus", type=int, default=None, help="CPUs per download task.")
 parser.add_argument("--mem", default=None, help="Memory per download task, e.g. 16G.")
 parser.add_argument("--time", default=None, help="Walltime per download task, e.g. 24:00:00.")
@@ -184,12 +223,29 @@ parser.add_argument("--force", action="store_true",
                     help="Re-plan every file, even valid ones.")
 parser.add_argument("--finalize", action="store_true",
                     help="Verify the planned files, write the report and Open Targets markers; plan nothing.")
+# eQTL Catalogue selections (same defaults as Step11 / Setup_11B)
+parser.add_argument("--catalogue-study-regex", default="",
+                    help="qtl_catalogue: study_label regex (default: Step11's GTEx-labelled + Sun_2018).")
+parser.add_argument("--catalogue-all-studies", action="store_true",
+                    help="qtl_catalogue: every catalogue study (very large).")
+parser.add_argument("--catalogue-qtl-types", default="eQTL,sQTL,isoQTL,exonQTL,pQTL,apaQTL",
+                    help="qtl_catalogue: QTL classes to include (default: all Step11 classes).")
+parser.add_argument("--celltype-study-regex", default=r"^Jerber_2021$",
+                    help="qtl_celltype: study_label regex (default: Setup_11B's ^Jerber_2021$).")
+parser.add_argument("--celltype-qtl-types", default="eQTL",
+                    help="qtl_celltype: QTL classes to include (default eQTL).")
 args = parser.parse_args()
 
 SELECTED_GROUPS = [g for g in GROUPS if g in args.groups and g not in args.skip_groups]
 OT_RELEASE = args.opentargets_release
 OT_ROOT = Path("resources") / "opentargets" / OT_RELEASE
-OT_EXPECTED = MANIFESTS / f"opentargets_{OT_RELEASE}_expected.tsv"   # gwas2m_setup_downloads format
+OT_EXPECTED = MANIFESTS / f"opentargets_{OT_RELEASE}_expected.tsv"   # expected file sizes
+
+# Task manifest / plan / report belong to one generated script.
+_SUFFIX = "" if args.output == DEFAULT_OUTPUT else "_" + re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(args.output).stem)
+MANIFEST = MANIFESTS / f"download_resources{_SUFFIX}.tsv"
+PLAN = MANIFESTS / f"download_resources{_SUFFIX}_plan.tsv"
+REPORT = MANIFESTS / f"download_resources{_SUFFIX}_report.tsv"
 
 
 # =============================================================================
@@ -231,7 +287,7 @@ def basename(url: str) -> str:
 
 
 def local_file_valid(path: Path, expected_size: int | None = None) -> bool:
-    """gwas2m_setup_downloads rule: non-empty, no .aria2, exact size when known."""
+    """Valid = non-empty, no .aria2 control file, exact size when known."""
     if not path.is_file() or path.stat().st_size == 0:
         return False
     if Path(str(path) + ".aria2").exists():
@@ -253,14 +309,8 @@ def item(resource, group, url, dest, *, check="-", post="-", post_dir="-", post_
                 post_dir=str(post_dir), post_marker=post_marker, mutable=mutable, size=size)
 
 
-def registry(resource_id: str, key: str, default: str) -> str:
-    if gr is not None and resource_id in getattr(gr, "RESOURCE_BY_ID", {}):
-        return gr.RESOURCE_BY_ID[resource_id].get(key) or default
-    return default
-
-
 def plan_preparation() -> dict:
-    """Same rule as gwas2m_setup_downloads.plan_preparation(): which 1000G inputs are still needed."""
+    """Which 1000G inputs are still needed (raw files are only inputs to the PGEN panels)."""
     g = ROOT / "resources" / "1000G"
 
     def panel_ok(prefix: Path) -> bool:
@@ -280,33 +330,23 @@ def plan_preparation() -> dict:
 def static_items(notes: list[str]) -> list[dict]:
     items: list[dict] = []
 
-    # --- GWAS Catalog metadata (Step01 discovery) ---
+    # --- GWAS Catalog metadata ---
     items += [
         item("GWAS_CATALOG_STUDIES", "gwas_catalog",
-             registry("GWAS_CATALOG_STUDIES", "url",
-                      "https://ftp.ebi.ac.uk/pub/databases/gwas/releases/latest/"
-                      "gwas-catalog-download-studies-v1.0.3.1.txt"),
-             registry("GWAS_CATALOG_STUDIES", "path", "reference_metadata/gwas_catalog/gwas_catalog_studies.tsv"),
-             mutable=True),
+             f"{GWAS_CATALOG_BASE}/gwas-catalog-download-studies-v1.0.3.1.txt",
+             "reference_metadata/gwas_catalog/gwas_catalog_studies.tsv", mutable=True),
         item("GWAS_CATALOG_ANCESTRY", "gwas_catalog",
-             registry("GWAS_CATALOG_ANCESTRY", "url",
-                      "https://ftp.ebi.ac.uk/pub/databases/gwas/releases/latest/"
-                      "gwas-catalog-download-ancestries-v1.0.3.1.txt"),
-             registry("GWAS_CATALOG_ANCESTRY", "path", "reference_metadata/gwas_catalog/gwas_catalog_ancestry.tsv"),
-             mutable=True),
+             f"{GWAS_CATALOG_BASE}/gwas-catalog-download-ancestries-v1.0.3.1.txt",
+             "reference_metadata/gwas_catalog/gwas_catalog_ancestry.tsv", mutable=True),
     ]
 
     # --- GENCODE genome + annotation ---
-    fasta = "resources/genome/GRCh38/GRCh38.primary_assembly.genome.fa"
-    gtf = registry("GENCODE_GTF", "path", f"resources/gencode/release{GENCODE_RELEASE}/"
-                                          f"gencode.v{GENCODE_RELEASE}.primary_assembly.annotation.gtf.gz")
+    gtf = f"gencode.v{GENCODE_RELEASE}.primary_assembly.annotation.gtf.gz"
     items += [
         item("GRCH38_FASTA", "genome", f"{GENCODE_BASE}/GRCh38.primary_assembly.genome.fa.gz",
-             fasta + ".gz", check="gzip", post="fasta"),
-        item("GENCODE_GTF", "genome",
-             registry("GENCODE_GTF", "url",
-                      f"{GENCODE_BASE}/gencode.v{GENCODE_RELEASE}.primary_assembly.annotation.gtf.gz"),
-             gtf, check="gzip"),
+             "resources/genome/GRCh38/GRCh38.primary_assembly.genome.fa.gz", check="gzip", post="fasta"),
+        item("GENCODE_GTF", "genome", f"{GENCODE_BASE}/{gtf}",
+             f"resources/gencode/release{GENCODE_RELEASE}/{gtf}", check="gzip"),
     ]
 
     # --- 1000 Genomes: raw files are only inputs to the PGEN panels ---
@@ -328,29 +368,30 @@ def static_items(notes: list[str]) -> list[dict]:
         notes.append("1000g: all population PGEN panels are built, raw 1000G files are not needed")
 
     # --- Ensembl VEP cache (extracted into resources/vep/cache) ---
-    vep_url = registry("VEP_CACHE", "url",
-                       f"https://ftp.ensembl.org/pub/release-{VEP_RELEASE}/variation/indexed_vep_cache/"
-                       f"homo_sapiens_vep_{VEP_RELEASE}_GRCh38.tar.gz")
+    vep_url = (f"https://ftp.ensembl.org/pub/release-{VEP_RELEASE}/variation/indexed_vep_cache/"
+               f"homo_sapiens_vep_{VEP_RELEASE}_GRCh38.tar.gz")
     items.append(item("VEP_CACHE", "vep", vep_url, f"resources/vep/{VEP_RELEASE}/{basename(vep_url)}",
                       check="tar", post="tar", post_dir="resources/vep/cache",
                       post_marker=f".vep{VEP_RELEASE}_GRCh38.complete"))
 
-    # --- GTEx v11 (same items/locations as gwas2m_setup_downloads.GTEX_ITEMS) ---
+    # --- GTEx v11 (archives extracted next to themselves) ---
     for rid, path, sub, name in [
         ("GTEX_EQTL", "bulk-qtl/v11/single-tissue-cis-qtl/GTEx_Analysis_v11_eQTL.tar", "qtl", "eQTL"),
         ("GTEX_SQTL", "bulk-qtl/v11/single-tissue-cis-qtl/GTEx_Analysis_v11_sQTL.tar", "qtl", "sQTL"),
         ("GTEX_EQTL_SUSIE", "bulk-qtl/v11/susie-qtl/GTEx_Analysis_v11_eQTL_SuSiE.tar", "susie", "eQTL_SuSiE"),
         ("GTEX_SQTL_SUSIE", "bulk-qtl/v11/susie-qtl/GTEx_Analysis_v11_sQTL_SuSiE.tar", "susie", "sQTL_SuSiE"),
+        # alternative polyadenylation QTL (read by Step11)
+        ("GTEX_APAQTL", "bulk-qtl/v11/single-tissue-cis-qtl/GTEx_Analysis_v11_apaQTL.tar", "qtl", "apaQTL"),
+        ("GTEX_APAQTL_SUSIE", "bulk-qtl/v11/susie-qtl/GTEx_Analysis_v11_apaQTL_SuSiE.tar", "susie", "apaQTL_SuSiE"),
     ]:
         directory = f"resources/gtex/{GTEX_RELEASE}/{sub}"
         items.append(item(rid, "gtex", f"{GTEX_BASE}/{path}", f"{directory}/{basename(path)}", check="tar",
                           post="tar", post_dir=f"{directory}/{name}", post_marker=".complete"))
-    for rid, default in [
+    for rid, url in [
         ("GTEX_VARIANT_LOOKUP", f"{GTEX_BASE}/references/v11/reference-tables/"
                                 "GTEx_Analysis_2021-02-11_v11_WholeGenomeSeq_953Indiv.lookup_table.txt.gz"),
         ("GTEX_GENCODE47", f"{GTEX_BASE}/references/v11/reference-tables/gencode.v47.genes.gtf"),
     ]:
-        url = registry(rid, "url", default)
         items.append(item(rid, "gtex", url, f"resources/gtex/{GTEX_RELEASE}/reference/{basename(url)}",
                           check="gzip" if url.endswith(".gz") else "-"))
 
@@ -362,26 +403,37 @@ def static_items(notes: list[str]) -> list[dict]:
 
 
 # -----------------------------------------------------------------------------
-# eQTL Catalogue dense + provider SuSiE (repair; same rules as gwas2m_setup_downloads)
+# eQTL Catalogue dense + provider SuSiE (repair of files already referenced locally)
 # -----------------------------------------------------------------------------
+
+_TABLE_CACHE: dict[str, str] = {}
+
+
+def catalogue_table(name: str) -> str:
+    """An eQTL Catalogue path table: the local copy if present, else fetched (not saved)."""
+    if name not in _TABLE_CACHE:
+        local = ROOT / EQTL_ROOT / name
+        if local.is_file() and local.stat().st_size > 0:
+            _TABLE_CACHE[name] = local.read_text(encoding="utf-8", errors="replace")
+        else:
+            with http_open(EQTL_METADATA[name], timeout=120) as response:
+                _TABLE_CACHE[name] = response.read().decode("utf-8", errors="replace")
+    return _TABLE_CACHE[name]
+
 
 def read_catalogue() -> tuple[dict, dict]:
     aliases = {"dataset_id": ["dataset_id"], "ftp_path": ["ftp_path", "sumstats_path"],
                "ftp_cs_path": ["ftp_cs_path"], "ftp_lbf_path": ["ftp_lbf_path"]}
     by_basename, by_dataset = {}, {}
-    for name in ("tabix_ftp_paths.tsv", "tabix_ftp_paths_imported.tsv"):  # later file wins (as Step11)
-        path = ROOT / EQTL_ROOT / name
-        if not path.is_file():
-            continue
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            for row in csv.DictReader(handle, delimiter="\t"):
-                values = {k: next((row[a] for a in v if a in row and row[a]), "") for k, v in aliases.items()}
-                dataset = values["dataset_id"].strip()
-                if not dataset:
-                    continue
-                by_dataset[dataset] = values
-                if values["ftp_path"].strip():
-                    by_basename[basename(values["ftp_path"])] = (dataset, values["ftp_path"].strip())
+    for name in ("tabix_ftp_paths.tsv", "tabix_ftp_paths_imported.tsv"):  # later file wins
+        for row in csv.DictReader(io.StringIO(catalogue_table(name)), delimiter="\t"):
+            values = {k: next((row[a] for a in v if a in row and row[a]), "") for k, v in aliases.items()}
+            dataset = values["dataset_id"].strip()
+            if not dataset:
+                continue
+            by_dataset[dataset] = values
+            if values["ftp_path"].strip():
+                by_basename[basename(values["ftp_path"])] = (dataset, values["ftp_path"].strip())
     return by_basename, by_dataset
 
 
@@ -392,16 +444,18 @@ def usable_url(value: str) -> bool:
 def eqtl_catalogue_items(notes: list[str]) -> list[dict]:
     if "eqtl_catalogue" not in SELECTED_GROUPS:
         return []
-    by_basename, by_dataset = read_catalogue()
+    try:
+        by_basename, by_dataset = read_catalogue()
+    except (urllib.error.URLError, OSError) as exc:
+        sys.exit(f"ERROR: cannot read the eQTL Catalogue path tables ({exc}).")
     extra = []
     if EXTRA_EQTL_DATASETS.is_file():
         extra = [x.split("#", 1)[0].strip() for x in EXTRA_EQTL_DATASETS.read_text(encoding="utf-8").splitlines()
                  if x.split("#", 1)[0].strip()]
-    if not by_dataset:
-        if extra:
-            notes.append("eqtl_catalogue: datasets are listed but the metadata tables are not downloaded yet; "
-                         "re-run this planner after this download to plan them")
-        return []
+        unknown_ids = [d for d in extra if d not in by_dataset]
+        if unknown_ids:
+            notes.append(f"eqtl_catalogue: {len(unknown_ids)} listed dataset ids are not in the catalogue tables "
+                         f"(e.g. {', '.join(unknown_ids[:3])})")
 
     items = []
     base = ROOT / EQTL_ROOT
@@ -494,6 +548,174 @@ def opentargets_items() -> list[dict]:
     return items
 
 
+# -----------------------------------------------------------------------------
+# eQTL Catalogue dense summary statistics for colocalisation
+#   Layout read by Step11 / Setup_11B:
+#     resources/coloc/eqtl_catalogue/dense/<dataset_id>/<file>.tsv.gz (+ .tbi)
+#     resources/coloc/eqtl_catalogue/susie_provider/<dataset_id>/<lbf|cs file>
+# -----------------------------------------------------------------------------
+
+def quant_method_to_qtl_type(value: str) -> str | None:
+    """Same mapping as Step11."""
+    q = re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+    if q in {"ge", "gene expression", "gene", "microarray"}:
+        return "eQTL"
+    if "leafcutter" in q or "majiq" in q or q in {"sqtl", "splicing"}:
+        return "sQTL"
+    if q in {"tx", "transcript", "transcript usage", "txrev", "txrevise"}:
+        return "isoQTL"
+    if q in {"exon", "exon expression"}:
+        return "exonQTL"
+    if "protein" in q or "aptamer" in q or q in {"prot", "pqtl"}:
+        return "pQTL"
+    if "apa" in q or "polyadenyl" in q:
+        return "apaQTL"
+    return None
+
+
+def catalogue_rows() -> list[dict]:
+    """Both eQTL Catalogue path tables (local copy if present, else fetched); later table wins."""
+    rows: dict = {}
+    for name in ("tabix_ftp_paths.tsv", "tabix_ftp_paths_imported.tsv"):
+        for raw in csv.DictReader(io.StringIO(catalogue_table(name)), delimiter="\t"):
+            r = {k: (v or "").strip() for k, v in raw.items() if k}
+            row = {
+                "dataset_id": r.get("dataset_id", ""),
+                "study_label": r.get("study_label") or r.get("study", ""),
+                "quant_method": r.get("quant_method") or r.get("quantification_method", ""),
+                "ftp_path": r.get("ftp_path") or r.get("sumstats_path", ""),
+                "ftp_lbf_path": r.get("ftp_lbf_path", ""),
+                "ftp_cs_path": r.get("ftp_cs_path", ""),
+            }
+            row["qtl_type"] = quant_method_to_qtl_type(row["quant_method"])
+            if row["ftp_path"] and row["qtl_type"]:
+                rows[(row["dataset_id"], row["ftp_path"])] = row
+    return list(rows.values())
+
+
+def dense_items(row: dict, group: str) -> list[dict]:
+    name = basename(row["ftp_path"])
+    directory = EQTL_ROOT / "dense" / row["dataset_id"] if row["dataset_id"] else EQTL_ROOT / "dense"
+    url = https_url(row["ftp_path"])
+    return [item("EQTL_CATALOGUE_DENSE", group, url, directory / name, check="gzip"),
+            item("EQTL_CATALOGUE_DENSE", group, url + ".tbi", directory / f"{name}.tbi")]
+
+
+def provider_items(row: dict, group: str) -> list[dict]:
+    out = []
+    for column in ("ftp_lbf_path", "ftp_cs_path"):
+        url = row.get(column, "")
+        if row["dataset_id"] and usable_url(url):
+            out.append(item("EQTL_CATALOGUE_SUSIE_PROVIDER", group, https_url(url),
+                            EQTL_ROOT / "susie_provider" / row["dataset_id"] / basename(url), check="gzip"))
+    return out
+
+
+def summarise(label: str, rows: list[dict]) -> None:
+    counts: dict = {}
+    for r in rows:
+        counts[(r["study_label"], r["qtl_type"])] = counts.get((r["study_label"], r["qtl_type"]), 0) + 1
+    print(f"  {label}: {len(rows)} datasets")
+    for (study, qtl), n in sorted(counts.items()):
+        print(f"      {study:<24}{qtl:<10}{n:>4}")
+
+
+def catalogue_qtl_items() -> list[dict]:
+    wanted = {"qtl_catalogue", "qtl_catalogue_susie", "qtl_celltype"} & set(SELECTED_GROUPS)
+    if not wanted:
+        return []
+    try:
+        rows = catalogue_rows()
+    except (urllib.error.URLError, OSError) as exc:
+        sys.exit(f"ERROR: cannot read the eQTL Catalogue path tables ({exc}).")
+    items: list[dict] = []
+
+    if {"qtl_catalogue", "qtl_catalogue_susie"} & wanted:
+        types = {t.strip().lower() for t in args.catalogue_qtl_types.split(",") if t.strip()}
+        selected = [r for r in rows if r["qtl_type"].lower() in types]
+        if args.catalogue_study_regex:
+            pattern = re.compile(args.catalogue_study_regex, flags=re.I)
+            selected = [r for r in selected if pattern.search(r["study_label"])]
+        elif not args.catalogue_all_studies:      # Step11 default contexts
+            selected = [r for r in selected
+                        if "gtex" in r["study_label"].lower() or r["study_label"].lower() == "sun_2018"]
+        summarise("eQTL Catalogue (Step11 contexts)", selected)
+        for r in selected:
+            if "qtl_catalogue" in wanted:
+                items += dense_items(r, "qtl_catalogue")
+            if "qtl_catalogue_susie" in wanted:
+                items += provider_items(r, "qtl_catalogue_susie")
+
+    if "qtl_celltype" in wanted:
+        pattern = re.compile(args.celltype_study_regex, flags=re.I)
+        types = {t.strip().lower() for t in args.celltype_qtl_types.split(",") if t.strip()}
+        selected = [r for r in rows if pattern.search(r["study_label"]) and r["qtl_type"].lower() in types]
+        summarise("eQTL Catalogue (cell-type, Setup_11B contexts)", selected)
+        for r in selected:
+            items += dense_items(r, "qtl_celltype") + provider_items(r, "qtl_celltype")
+    return items
+
+
+# -----------------------------------------------------------------------------
+# Other molecular QTL (pQTL / sQTL / haQTL / meQTL / caQTL) and annotation resources
+#   Archives are MD5-verified, extracted, then deleted ("tar-rm") to save space.
+# -----------------------------------------------------------------------------
+
+def molecular_qtl_items() -> list[dict]:
+    items = []
+    for qtl, group, (manifest_id, manifest_md5), (archive_id, archive_md5) in ADSP_ARCHIVES:
+        if group not in SELECTED_GROUPS:
+            continue
+        directory = Path("resources/molecular_qtl") / qtl.lower() / "adsp_fungen_brain"
+        stem = f"ADSP_FunGen_xQTL.v1.{qtl}.all"
+        items.append(item(f"ADSP_{qtl.upper()}_MANIFEST", group, f"{NIAGADS}/{manifest_id}",
+                          directory / f"{stem}.manifest.txt", check=f"md5:{manifest_md5}"))
+        items.append(item(f"ADSP_{qtl.upper()}", group, f"{NIAGADS}/{archive_id}", directory / f"{stem}.tar",
+                          check=f"md5:{archive_md5}", post="tar-rm", post_dir=directory / "all",
+                          post_marker=".complete"))
+    if "molecular_qtl" in SELECTED_GROUPS:
+        directory = Path("resources/molecular_qtl/caqtl/kumasaka_grch38")
+        items += [
+            item("KUMASAKA_CAQTL", "molecular_qtl", f"{KUMASAKA}/QTD100018.all.tsv.gz?download=1",
+                 directory / "QTD100018.all.tsv.gz", check="md5:5f92d59ebcff47d151b10550cbfc67bd"),
+            item("KUMASAKA_CAQTL_PEAKS", "molecular_qtl", f"{KUMASAKA}/QTD100018_peak_metadata.tsv.gz?download=1",
+                 directory / "QTD100018_peak_metadata.tsv.gz", check="md5:4a77a273b0728a7b3ca35f0d914955b7"),
+        ]
+    return items
+
+
+def annotation_items() -> list[dict]:
+    items = []
+    base = Path("resources/annotation")
+    if "annotation" in SELECTED_GROUPS:
+        items += [
+            item("ALPHAMISSENSE", "annotation", f"{ALPHAMISSENSE}/AlphaMissense_hg38.tsv.gz",
+                 base / "alphamissense/AlphaMissense_hg38.tsv.gz", check="gzip"),
+            item("ALPHAMISSENSE_GENE", "annotation", f"{ALPHAMISSENSE}/AlphaMissense_gene_hg38.tsv.gz",
+                 base / "alphamissense/AlphaMissense_gene_hg38.tsv.gz", check="gzip"),
+            item("CLINVAR", "annotation", f"{CLINVAR}/clinvar.vcf.gz", base / "clinvar/clinvar.vcf.gz",
+                 check="gzip", mutable=True),
+            item("CLINVAR", "annotation", f"{CLINVAR}/clinvar.vcf.gz.tbi", base / "clinvar/clinvar.vcf.gz.tbi",
+                 mutable=True),
+            item("ENCODE_SCREEN_CCRES_V4", "annotation", SCREEN_CCRES, base / "encode_screen/GRCh38-cCREs.V4.bed"),
+            item("GNOMAD_V4_1_CONSTRAINT", "annotation", GNOMAD_CONSTRAINT,
+                 base / "gnomad/gnomad.v4.1.constraint_metrics.tsv"),
+            item("LIFTOVER_HG19_TO_HG38", "annotation", f"{UCSC}/hg19/liftOver/hg19ToHg38.over.chain.gz",
+                 base / "liftover/hg19ToHg38.over.chain.gz", check="gzip"),
+            item("LIFTOVER_HG38_TO_HG19", "annotation", f"{UCSC}/hg38/liftOver/hg38ToHg19.over.chain.gz",
+                 base / "liftover/hg38ToHg19.over.chain.gz", check="gzip"),
+            item("PHYLOP_100WAY", "annotation", f"{UCSC}/hg38/phyloP100way/hg38.phyloP100way.bw",
+                 base / "conservation/hg38.phyloP100way.bw"),
+        ]
+    if "cadd" in SELECTED_GROUPS:
+        for name in ("whole_genome_SNVs.tsv.gz", "gnomad.genomes.r4.0.indel.tsv.gz"):
+            items += [
+                item("CADD_V1_7", "cadd", f"{CADD}/{name}", base / "cadd/v1.7" / name, check="gzip"),
+                item("CADD_V1_7", "cadd", f"{CADD}/{name}.tbi", base / "cadd/v1.7" / f"{name}.tbi"),
+            ]
+    return items
+
+
 # =============================================================================
 # STATUS
 # =============================================================================
@@ -502,12 +724,7 @@ def post_done(entry: dict) -> bool:
     if entry["post"] == "fasta":
         fasta = ROOT / entry["dest"][: -len(".gz")]
         return local_file_valid(fasta) and local_file_valid(Path(str(fasta) + ".fai"))
-    if entry["post"] == "tar":
-        validators = getattr(gr, "VALIDATORS", {}) if gr is not None else {}
-        if entry["resource"] in validators:
-            return validators[entry["resource"]](ROOT)["status"] == gr.AVAILABLE
-        if entry["resource"] == "VEP_CACHE" and gr is not None:
-            return gr.check_resource(ROOT, gr.RESOURCE_BY_ID["VEP_CACHE"])["status"] == gr.AVAILABLE
+    if entry["post"] in ("tar", "tar-rm"):   # marker written after a successful extraction
         return (ROOT / entry["post_dir"] / entry["post_marker"]).is_file()
     return True
 
@@ -546,14 +763,13 @@ def probe(entry: dict) -> tuple[dict, str | None]:
 
 
 # =============================================================================
-# SLURM SETTINGS: CLI > config/slurm.yaml (setup_download) > HPC_CPU.sh > built-in
+# SLURM SETTINGS: CLI > HPC_CPU.sh > built-in
 # =============================================================================
 
 BUILTIN = {"cpus-per-task": "2", "mem": "16G", "time": "24:00:00", "nodes": "1", "ntasks": "1"}
 
-# HPC_CPU.sh is a compute template (8 CPUs / 64G). A download needs the
-# setup_download stage's CPUs/memory, not that: only its scheduling keys are used.
-TEMPLATE_SKIP = {"cpus-per-task", "mem", "job-name", "output", "error", "array"}
+# Set per generated job; everything else in the template applies to all jobs.
+PER_JOB_KEYS = {"job-name", "output", "error", "array"}
 
 
 def read_template(path: Path) -> tuple[str, dict]:
@@ -573,45 +789,24 @@ def read_template(path: Path) -> tuple[str, dict]:
 
 def slurm_settings() -> dict:
     shebang, template = read_template(ROOT / args.template)
+    if not template:
+        print(f"[WARN] No #SBATCH settings found in {args.template}; using built-in defaults.")
     values, source = dict(BUILTIN), {k: "built-in" for k in BUILTIN}
-    for key, value in template.items():
-        if key not in TEMPLATE_SKIP:
-            values[key], source[key] = value, args.template
 
-    extra, array_limit, max_parallel, config_name = [], 1000, 0, None
-    if gc is not None:
-        try:
-            config = gc.load_slurm_config(ROOT, args.slurm_config)
-            if config.get("_source", "").startswith("built-in"):
-                raise FileNotFoundError
-            r = gc.get_stage_resources("setup_download", config)
-            config_name = Path(config["_path"]).name
-            for key, value in (("cpus-per-task", r["cpus"]), ("mem", r["memory"]), ("time", r["time"]),
-                               ("nodes", r["nodes"]), ("ntasks", r["ntasks"]), ("partition", r["partition"]),
-                               ("account", r["account"]), ("qos", r["qos"]),
-                               ("reservation", r["reservation"]), ("constraint", r["constraint"])):
-                if value not in (None, ""):
-                    values[key], source[key] = str(value), f"{config_name} (setup_download)"
-            extra = list(r.get("extra_sbatch_directives") or [])
-            array_limit, max_parallel = int(r["array_limit"]), int(r["max_parallel"] or 0)
-        except FileNotFoundError:
-            pass
-        except gc.SlurmConfigError as exc:
-            sys.exit(f"SLURM CONFIGURATION : INVALID\n{exc}")
-    elif args.slurm_config:
-        sys.exit("ERROR: --slurm-config needs gwas2m_config.py next to this script.")
+    # HPC_CPU.sh is the project's SLURM configuration.
+    for key, value in template.items():
+        if key not in PER_JOB_KEYS:
+            values[key], source[key] = value, args.template
 
     for key, value in (("cpus-per-task", args.cpus), ("mem", args.mem), ("time", args.time),
                        ("partition", args.partition), ("qos", args.qos), ("account", args.account)):
         if value not in (None, ""):
             values[key], source[key] = str(value), "command line"
 
-    max_jobs = args.max_jobs or array_limit
-    if max_jobs < 2:
+    if args.max_jobs < 2:
         sys.exit("ERROR: --max-jobs must be at least 2 (one download task + one controller job)")
-    parallel = args.parallel if args.parallel is not None else max_parallel
-    return dict(shebang=shebang, values=values, source=source, extra=extra, config=config_name,
-                chunk=min(max_jobs - 1, array_limit), max_jobs=max_jobs, parallel=parallel)
+    return dict(shebang=shebang, values=values, source=source,
+                chunk=args.max_jobs - 1, max_jobs=args.max_jobs, parallel=args.parallel)
 
 
 # =============================================================================
@@ -641,7 +836,7 @@ set -uo pipefail
 ROOT="@@ROOT@@"
 SCRIPT="$ROOT/@@SCRIPT_NAME@@"
 PLANNER="@@PLANNER@@"
-MANIFEST="$ROOT/setup_manifests/download_resources.tsv"
+MANIFEST="@@MANIFEST@@"
 LOGS="@@LOGS@@"
 TOTAL=@@TOTAL@@
 CHUNK=@@CHUNK@@
@@ -680,9 +875,13 @@ valid() {
 post_done() {
     case "$POST" in
         fasta) [[ -s "${OUT%.gz}" && -s "${OUT%.gz}.fai" ]] ;;
-        tar)   [[ -e "$ROOT/$PDIR/$PMARKER" ]] ;;
+        tar|tar-rm) [[ -e "$ROOT/$PDIR/$PMARKER" ]] ;;
         *)     return 0 ;;
     esac
+}
+
+md5_of() {
+    if command -v md5sum >/dev/null 2>&1; then md5sum "$1" | cut -d' ' -f1; else md5 -q "$1"; fi
 }
 
 # -----------------------------------------------------------------------------
@@ -733,6 +932,7 @@ integrity() {
         gzip)    if [[ -n "$PIGZ" ]]; then "$PIGZ" -t "$OUT"; else gzip -t "$OUT"; fi ;;
         tar)     tar -tf "$OUT" >/dev/null ;;
         parquet) [[ "$(tail -c 4 "$OUT")" == "PAR1" ]] ;;
+        md5:*)   log "computing MD5 ..."; [[ "$(md5_of "$OUT")" == "${CHECK#md5:}" ]] ;;
         *)       return 0 ;;
     esac
 }
@@ -750,12 +950,15 @@ post_process() {
             [[ -n "$SAMTOOLS" ]] || { log "ERROR: samtools not found (run Step00_Installation.py first)"; return 1; }
             [[ -s "$fasta.fai" ]] || "$SAMTOOLS" faidx "$fasta" || return 1
             log "indexed: ${fasta#$ROOT/}.fai" ;;
-        tar)
+        tar|tar-rm)
             mkdir -p "$ROOT/$PDIR"
             log "extracting -> $PDIR"
             if [[ "$OUT" == *.gz ]]; then tar -xzf "$OUT" -C "$ROOT/$PDIR"; else tar -xf "$OUT" -C "$ROOT/$PDIR"; fi || return 1
             touch "$ROOT/$PDIR/$PMARKER"
-            log "extracted: $PDIR/$PMARKER" ;;
+            log "extracted: $PDIR/$PMARKER"
+            if [[ "$POST" == "tar-rm" ]]; then
+                rm -f "$OUT"; log "removed the verified archive to save space: ${OUT#$ROOT/}"
+            fi ;;
     esac
 }
 
@@ -763,6 +966,15 @@ post_process() {
 # one task = one manifest row
 # -----------------------------------------------------------------------------
 run_task() {
+    # Always release the per-file lock, whether the task succeeded or failed.
+    OUT=""
+    _run_task "$@"
+    local rc=$?
+    [[ -n "$OUT" ]] && rm -f "$OUT.lock"
+    return $rc
+}
+
+_run_task() {
     local idx="$1" line I RESOURCE GROUP URL DEST SIZE CHECK POST PDIR PMARKER
     line="$(awk -F'\t' -v i="$idx" 'NR > 1 && $1 == i { print; exit }' "$MANIFEST")"
     [[ -n "$line" ]] || { log "ERROR: no manifest row $idx"; return 2; }
@@ -814,7 +1026,7 @@ submit_followup() {
     mkdir "$LOGS/.chain_${SLURM_ARRAY_JOB_ID}" 2>/dev/null || return 0   # once per array
     if (( next < TOTAL )); then mode=next; name=Step00_Download_next; else mode=finalize; name=Step00_Download_finalize; fi
     sbatch --parsable ${SBATCH_COMMON[@]+"${SBATCH_COMMON[@]}"} --dependency="afterany:${SLURM_ARRAY_JOB_ID}" \
-        --job-name="$name" --nodes=1 --ntasks=1 --cpus-per-task=1 --mem=4G --time=02:00:00 \
+        --job-name="$name" \
         --output="$LOGS/${name}_%j.log" --error="$LOGS/${name}_%j.err" \
         --export=ALL,G2M_MODE="$mode",G2M_OFFSET="$next" --wrap="bash '$SCRIPT'" \
         && log "queued $mode job (runs after array ${SLURM_ARRAY_JOB_ID})"
@@ -857,17 +1069,18 @@ def render_script(total: int, settings: dict) -> str:
     values = settings["values"]
     chunk = min(total, settings["chunk"])
     throttle = f"%{settings['parallel']}" if settings["parallel"] and settings["parallel"] > 0 else ""
-    directives = {**values, "job-name": "Step00_Download_Resources", "array": f"1-{chunk}{throttle}",
+    directives = {**values, "job-name": Path(args.output).stem, "array": f"1-{chunk}{throttle}",
                   "output": f"{LOGS}/Step00_Download_%A_%a.log", "error": f"{LOGS}/Step00_Download_%A_%a.err"}
     order = ["job-name", "account", "partition", "qos", "reservation", "constraint", "nodes", "ntasks",
              "cpus-per-task", "mem", "time", "array", "output", "error"]
     lines = [f"#SBATCH --{k}={directives[k]}" for k in order if directives.get(k)]
     lines += [f"#SBATCH --{k}={v}" for k, v in directives.items() if k not in order and v]
-    lines += [f"#SBATCH {x.strip() if x.strip().startswith('-') else '--' + x.strip()}" for x in settings["extra"]]
-    common = [f"--{k}={values[k]}" for k in ("account", "partition", "qos", "reservation", "constraint")
-              if values.get(k)]
+    # The controller / final-check jobs get exactly the same settings as the download tasks.
+    common = [f"--{k}={v}" for k, v in directives.items() if k not in PER_JOB_KEYS and v]
 
     planner_args = []
+    if args.output != DEFAULT_OUTPUT:
+        planner_args.append(f"--output {args.output}")
     if args.opentargets_release != OPEN_TARGETS_RELEASE:
         planner_args.append(f"--opentargets-release {args.opentargets_release}")
 
@@ -887,6 +1100,7 @@ def render_script(total: int, settings: dict) -> str:
         "@@SCRIPT_NAME@@": args.output,
         "@@PLANNER@@": str(Path(__file__).resolve()),
         "@@PLANNER_ARGS@@": " ".join(planner_args),
+        "@@MANIFEST@@": str(MANIFEST),
     }
     text = SCRIPT_TEMPLATE
     for key, value in replacements.items():
@@ -923,7 +1137,7 @@ def read_manifest() -> list[dict]:
 
 
 def finalize_opentargets() -> list[str]:
-    """gwas2m_setup_downloads.finalize_opentargets(): .complete only when every expected file has its size."""
+    """Write <dataset>/.complete only when every expected Open Targets file has its exact size."""
     if not OT_EXPECTED.is_file():
         return []
     expected: dict[str, list[tuple[str, int]]] = {}
@@ -971,11 +1185,6 @@ def finalize() -> int:
 
     print(f"\nFiles verified : {len(entries) - len(missing)} / {len(entries)}")
     print(f"Report         : {REPORT}")
-    if gr is not None:
-        print("\nShared resources (gwas2m_resources validators):")
-        for resource in gr.RESOURCES:
-            result = gr.check_resource(ROOT, resource)
-            print(f"  {resource['id']:<32}{result['status']:<18}{(result.get('detail') or '')[:70]}")
     if missing:
         print(f"\n{len(missing)} file(s) missing or failed:")
         for entry in missing[:50]:
@@ -984,8 +1193,7 @@ def finalize() -> int:
         print(f"  python {Path(__file__).name} && sbatch {args.output}")
         return 1
     print("\nAll planned files downloaded and verified.")
-    print("Next (derived resources: 1000G PGEN panels, sample lists, Pangolin DB):")
-    print("  python Step00_Check_Resources.py --resources-only")
+    print("Next: python Step01_Download_Resources_Checkheaders.py   (readability + headers)")
     return 0
 
 
@@ -999,13 +1207,16 @@ def main() -> int:
 
     banner("GWAS2m STEP 00 - PLAN SHARED RESOURCE DOWNLOADS")
     print(f"Project root : {ROOT}")
-    print(f"Registry     : {'gwas2m_resources.py' if gr is not None else 'built-in copy (gwas2m_resources.py not found)'}")
     print(f"Groups       : {', '.join(SELECTED_GROUPS) or '(none)'}")
     settings = slurm_settings()
 
     print("\nCollecting file list ...")
     notes: list[str] = []
-    entries = static_items(notes) + eqtl_catalogue_items(notes) + opentargets_items()
+    entries = (static_items(notes) + eqtl_catalogue_items(notes) + opentargets_items()
+               + catalogue_qtl_items() + molecular_qtl_items() + annotation_items())
+    # One task per FILE: the same file can be wanted by two groups (e.g. a dense file
+    # that the repair group and qtl_catalogue both list) - keep the first.
+    entries = list({e["dest"]: e for e in reversed(entries)}.values())[::-1]
 
     if not args.no_url_check and entries:
         print(f"\nChecking {len(entries)} URLs and sizes ...")
@@ -1032,12 +1243,19 @@ def main() -> int:
     for note in notes:
         print(f"NOTE: {note}")
 
+    group_of = lambda e: e["group"].split("/", 1)[0]  # noqa: E731  (opentargets/x -> opentargets)
+    print(f"\n{'GROUP':<22}{'FILES':>7}{'TO DOWNLOAD':>13}{'SIZE':>12}")
+    for group in dict.fromkeys(group_of(e) for e in entries):
+        todo = [e for e in pending if group_of(e) == group]
+        print(f"{group:<22}{sum(group_of(e) == group for e in entries):>7}{len(todo):>13}"
+              f"{human(sum(e['size'] or 0 for e in todo)):>12}")
+
     MANIFESTS.mkdir(parents=True, exist_ok=True)
     LOGS.mkdir(parents=True, exist_ok=True)
 
-    write_tsv(PLAN, ["RESOURCE", "GROUP", "STATUS", "SIZE_BYTES", "SOURCE", "DEST"],
+    write_tsv(PLAN, ["RESOURCE", "GROUP", "STATUS", "SIZE_BYTES", "SOURCE", "DEST", "POST_DIR", "POST_MARKER"],
               [[e["resource"], e["group"], "PLANNED" if e in pending else "VALID", e["size"] or "",
-                e["url"], e["dest"]] for e in entries])
+                e["url"], e["dest"], e["post_dir"], e["post_marker"]] for e in entries])
 
     ot = [e for e in entries if e["group"].startswith("opentargets/")]
     if ot and all(e["size"] for e in ot):
@@ -1053,7 +1271,7 @@ def main() -> int:
             MANIFEST.unlink()
         banner("NOTHING TO DOWNLOAD")
         print("Every planned file is already valid.")
-        print("Next: python Step00_Check_Resources.py --resources-only   (derived resources)")
+        print("Next: python Step01_Download_Resources_Checkheaders.py   (readability + headers)")
         return 0
 
     write_tsv(MANIFEST, MANIFEST_COLUMNS, [
@@ -1063,8 +1281,22 @@ def main() -> int:
     ])
 
     total_bytes = sum(e["size"] or 0 for e in pending)
-    extract_bytes = sum(e["size"] or 0 for e in pending if e["post"] != "-")
+    # tar-rm archives are deleted after extraction, so they need no extra space at the end.
+    extract_bytes = sum(e["size"] or 0 for e in pending if e["post"] in ("tar", "fasta"))
     free = shutil.disk_usage(ROOT).free
+
+    # A single file this big may not finish within one walltime; re-running resumes it.
+    huge = [e for e in pending if (e["size"] or 0) > 300e9]
+    walltime = str(settings["values"].get("time", ""))
+    long_walltime = "-" in walltime and walltime.split("-", 1)[0].isdigit() and int(walltime.split("-", 1)[0]) >= 2
+    if huge and not long_walltime:
+        print(f"\n[NOTE] {len(huge)} file(s) larger than 300 GB (largest {human(max(e['size'] for e in huge))}).")
+        print(f"       Each needs download + MD5 + extraction in one task; with --time "
+              f"{settings['values'].get('time')} it may time out.")
+        print("       A timed-out download resumes when you re-run this planner, or give it longer, e.g.:")
+        print("         python Step00_Download_Resources.py --skip-groups meqtl          # everything else")
+        print("         python Step00_Download_Resources.py --groups meqtl --time 7-00:00:00 "
+              "--output Step00_Download_meQTL.sh")
 
     script = ROOT / args.output
     with open(script, "w", newline="\n", encoding="utf-8") as handle:
