@@ -27,7 +27,7 @@ Step03_QC_One_GWAS.py, logic unchanged) plus status / statistics:
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --status
 
     # Publication table per study (authors, journal, PMID, trait/EFO, binary or
-    # quantitative, N, cases, controls, effective N, population, countries,
+    # continuous, N, cases, controls, N_eff, population, countries,
     # cohorts, platform, imputed, variants raw/QC, columns, genome-wide hits,
     # minimum P, lambda GC, available fields) -> GWAS_publication_stats.tsv
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --stats
@@ -46,14 +46,26 @@ Outputs (read by Step04 / Step05):
 
     01_gwas_catalog/<phenotype>/<ancestry>/
         candidate_studies.tsv, study_selection.tsv, discovery_summary.json
-        GWAS_download_manifest.tsv   (+ TRAIT_TYPE, N_CASES, N_CONTROLS, CASE_FRACTION, N_TOTAL)
+        GWAS_download_manifest.tsv   (+ PHENOTYPE_TYPE, N_CASES, N_CONTROLS, CASE_FRACTION, N_TOTAL, N_EFF)
+        GWAS_study_metadata.tsv      GCST_ID PHENOTYPE_TYPE N_CASES N_CONTROLS N_TOTAL N_EFF
+                                     ANCESTRY GENOME_BUILD EFFECT_TYPE (+ provenance, LD_REFERENCE)
         GWAS_QC_manifest.tsv, GWAS_QC_summary.tsv, GWAS_QC_missing_downloads.tsv
         GWAS_publication_stats.tsv   (--stats)
     02_summary_stats/<phenotype>/<ancestry>/
         raw/<GCST>/<harmonised file>
-        qc/<GCST>/<GCST>_GRCh38_QC.tsv.gz, <GCST>_GRCh38_significant.tsv.gz,
-                  <GCST>_QC_summary.tsv/.json (QC_STATUS, CLUMPING_READY,
-                  SUSIE_READY, TRAIT_TYPE, N_CASES, N_CONTROLS, CASE_FRACTION)
+        qc/<GCST>/<GCST>_GRCh38_QC.tsv.gz      ALL variants; first columns
+                      CHR POS SNP EA NEA BETA SE P EAF MAF N INFO Z
+                      (BETA = log OR for binary traits; Z = BETA/SE, else signed from P;
+                       MAF = min(EAF, 1-EAF); missing N = study N_TOTAL, never N_EFF)
+                  <GCST>_GRCh38_significant.tsv.gz
+                  <GCST>_study_metadata.tsv/.json
+                  <GCST>_QC_summary.tsv/.json (QC_STATUS, CLUMPING_READY, SUSIE_READY,
+                      PHENOTYPE_TYPE, N_CASES, N_CONTROLS, N_EFF, EFFECT_TYPE, derivation counts)
+
+Binary vs Continuous is decided per STUDY (the same disease can be a diagnosis
+or a score), from the GWAS-SSF metadata and GWAS Catalog API; --phenotype-type
+binary|continuous overrides it. N_TOTAL and N_EFF are both kept: each
+fine-mapping method chooses its own N.
 ===============================================================================
 """
 
@@ -82,15 +94,77 @@ from urllib3.util.retry import Retry
 
 PROJECT_ROOT = Path.cwd().resolve()
 
-# Phenotype type per study (download manifest -> QC manifest -> QC summary).
+# Phenotype type per study (download manifest -> QC manifest -> QC summary
+# -> study metadata). PHENOTYPE_TYPE is Binary, Continuous or Unknown.
 TRAIT_FIELDS = [
-    "TRAIT_TYPE",
+    "PHENOTYPE_TYPE",
     "N_CASES",
     "N_CONTROLS",
     "CASE_FRACTION",
     "N_TOTAL",
-    "TRAIT_TYPE_SOURCE",
+    "N_EFF",
+    "PHENOTYPE_TYPE_SOURCE",
 ]
+
+# Standardised fine-mapping columns (SuSiE-RSS / FINEMAP), first and in this order
+# in every <GCST>_GRCh38_QC.tsv.gz. All variants are kept.
+FINEMAP_COLUMNS = ["CHR", "POS", "SNP", "EA", "NEA", "BETA", "SE", "P", "EAF", "MAF", "N", "INFO", "Z"]
+
+# GWASLab range-checks these columns in basic_check and REMOVES a variant when
+# the value is missing. EAF, INFO and the OR / HR confidence limits are left out
+# (default list minus those): a variant without them still has a valid Z, so it
+# is kept, and out-of-range EAF / INFO are set to missing instead.
+GWASLAB_RANGE_CHECK = [
+    "P", "MLOG10P", "Z", "BETA", "SE", "CHISQ", "F", "N", "N_CASE", "N_CONTROL",
+    "OR", "HR", "STATUS",
+]
+
+# Per-study metadata for fine-mapping (<GCST>_study_metadata.tsv, GWAS_study_metadata.tsv).
+STUDY_METADATA_COLUMNS = [
+    "GCST_ID", "PHENOTYPE_TYPE", "N_CASES", "N_CONTROLS", "N_TOTAL", "N_EFF",
+    "ANCESTRY", "GENOME_BUILD", "EFFECT_TYPE",
+]
+
+
+def effective_n(cases, controls):
+    """N_eff = 4 * cases * controls / (cases + controls) (binary GWAS only)."""
+
+    cases, controls = parse_number(cases), parse_number(controls)
+
+    return round(4 * cases * controls / (cases + controls)) if cases and controls else ""
+
+
+def normalise_trait(trait):
+    """Binary / Continuous / Unknown (older manifests used binary / quantitative),
+    --phenotype-type override, N_EFF for binary studies and EFFECT_TYPE."""
+
+    trait = dict(trait)
+    value = str(trait.get("PHENOTYPE_TYPE", "") or "").strip().lower()
+    value = {"binary": "Binary", "case-control": "Binary", "quantitative": "Continuous",
+             "continuous": "Continuous"}.get(value, "Unknown")
+
+    forced = getattr(ARGS, "phenotype_type", "auto") if ARGS is not None else "auto"
+    if forced in ("binary", "continuous") and value != forced.capitalize():
+        value = forced.capitalize()
+        source = str(trait.get("PHENOTYPE_TYPE_SOURCE", "") or "")
+        trait["PHENOTYPE_TYPE_SOURCE"] = "+".join(x for x in (source, "--phenotype-type") if x)
+
+    trait["PHENOTYPE_TYPE"] = value
+
+    if value == "Binary":
+        cases, controls = parse_number(trait.get("N_CASES")), parse_number(trait.get("N_CONTROLS"))
+        trait["N_EFF"] = effective_n(cases, controls)
+        trait["CASE_FRACTION"] = round(cases / (cases + controls), 6) if cases and controls else ""
+    else:
+        trait.update({"N_CASES": "", "N_CONTROLS": "", "CASE_FRACTION": "", "N_EFF": ""})
+
+    return trait
+
+
+def effect_type(phenotype_type):
+    """Effect scale of BETA in the standardised output."""
+
+    return {"Binary": "log(OR)", "Continuous": "BETA"}.get(phenotype_type, "BETA (scale unknown)")
 
 GWAS_API_V2 = "https://www.ebi.ac.uk/gwas/rest/api/v2/studies"
 
@@ -1307,22 +1381,35 @@ def study_trait_information(
     if not n_total:
         n_total = cases + controls if cases and controls else estimate_sample_size(text)
 
+    # Decided per STUDY from its own sample description, never from the disease
+    # name: diagnosed depression (cases/controls) is Binary, a depression
+    # symptom score is Continuous.
     if case_control is True or (cases and controls):
-        trait_type = "binary"
+        phenotype_type = "Binary"
     elif case_control is False:
-        trait_type = "quantitative"
+        phenotype_type = "Continuous"
     elif str(text).strip() and not re.search(r"\bcases?\b|\bcontrols?\b", str(text), flags=re.I):
-        trait_type = "quantitative"
+        phenotype_type = "Continuous"
     else:
-        trait_type = "unknown"
+        phenotype_type = "Unknown"
 
+    forced = getattr(ARGS, "phenotype_type", "auto") if ARGS is not None else "auto"
+    if forced in ("binary", "continuous"):
+        phenotype_type = forced.capitalize()
+        sources.append("--phenotype-type")
+
+    binary = phenotype_type == "Binary"
+
+    # Counts are kept as reported (a later --phenotype-type binary can use them);
+    # normalise_trait() blanks them for continuous studies.
     return {
-        "TRAIT_TYPE": trait_type,
+        "PHENOTYPE_TYPE": phenotype_type,
         "N_CASES": cases or "",
         "N_CONTROLS": controls or "",
-        "CASE_FRACTION": round(cases / (cases + controls), 6) if cases and controls else "",
+        "CASE_FRACTION": round(cases / (cases + controls), 6) if binary and cases and controls else "",
         "N_TOTAL": n_total or "",
-        "TRAIT_TYPE_SOURCE": "+".join(sources),
+        "N_EFF": effective_n(cases, controls) if binary else "",
+        "PHENOTYPE_TYPE_SOURCE": "+".join(sources),
     }
 
 
@@ -1959,11 +2046,12 @@ def _plan(args, state):
         )
 
         print(
-            f"    trait: {trait['TRAIT_TYPE']}"
+            f"    trait: {trait['PHENOTYPE_TYPE']}"
             f" | cases {trait['N_CASES'] or '-'}"
             f" | controls {trait['N_CONTROLS'] or '-'}"
             f" | N {trait['N_TOTAL'] or '-'}"
-            f" [{trait['TRAIT_TYPE_SOURCE']}]"
+            f" | N_eff {trait['N_EFF'] or '-'}"
+            f" [{trait['PHENOTYPE_TYPE_SOURCE']}]"
         )
 
         eligible.append(
@@ -2094,7 +2182,7 @@ def _plan(args, state):
                         ""
                     ),
 
-                # Binary vs quantitative phenotype (fine-mapping / coloc need it).
+                # Binary vs continuous phenotype (fine-mapping / coloc need it).
                 **item[
                     "TRAIT"
                 ],
@@ -2204,7 +2292,7 @@ def _plan(args, state):
             "ARRAY_ID",
             "STUDY_ACCESSION",
             "RANKING_N",
-            "TRAIT_TYPE",
+            "PHENOTYPE_TYPE",
             "N_CASES",
             "N_CONTROLS",
             "FILE_NAME",
@@ -2383,7 +2471,7 @@ def build_qc_row(
         "INPUT_SIZE_BYTES":
             input_file.stat().st_size,
 
-        # Binary vs quantitative phenotype from the download manifest.
+        # Binary vs continuous phenotype from the download manifest.
         **(extra or {}),
     }
 
@@ -2418,6 +2506,150 @@ def find_column(
             ]
 
     return None
+
+
+# =============================================================================
+# STANDARDISED FINE-MAPPING COLUMNS
+#
+# CHR POS SNP EA NEA BETA SE P EAF MAF N INFO Z first, in that order, then the
+# remaining GWASLab columns. No variant is removed here: SuSiE-RSS / FINEMAP
+# need every variant in a locus, not only the significant ones.
+# =============================================================================
+
+def standardize_finemap_columns(
+    data,
+    trait,
+):
+
+    from scipy.stats import norm
+
+    info = {}
+
+    def numeric(names):
+
+        column = find_column(data, names)
+
+        if column is None:
+            return pd.Series(np.nan, index=data.index, dtype="float64"), None
+
+        return pd.to_numeric(data[column], errors="coerce").astype("float64"), column
+
+    out = pd.DataFrame(index=data.index)
+
+    out["CHR"] = data[find_column(data, ["CHR"])]
+    out["POS"] = data[find_column(data, ["POS"])]
+
+    ea_col = find_column(data, ["EA"])
+    nea_col = find_column(data, ["NEA"])
+    ea = data[ea_col].astype("string") if ea_col else pd.Series(pd.NA, index=data.index, dtype="string")
+    nea = data[nea_col].astype("string") if nea_col else pd.Series(pd.NA, index=data.index, dtype="string")
+
+    # SNP: rsID when valid, otherwise CHR:POS:NEA:EA (CHR:POS without alleles).
+    rsid_col = find_column(data, ["rsID", "RSID"])
+    rsid = (
+        data[rsid_col].astype("string").str.strip()
+        if rsid_col else pd.Series(pd.NA, index=data.index, dtype="string")
+    )
+    valid_rsid = rsid.str.match(r"^rs\d+$", na=False)
+
+    position_id = out["CHR"].astype("string") + ":" + out["POS"].astype("string")
+    allele_id = position_id + ":" + nea + ":" + ea
+    out["SNP"] = rsid.where(valid_rsid, allele_id.fillna(position_id))
+    info["N_SNP_FROM_RSID"] = int(valid_rsid.sum())
+    info["N_SNP_FROM_POSITION"] = int((~valid_rsid).sum())
+
+    out["EA"] = ea
+    out["NEA"] = nea
+
+    # BETA (log OR for binary traits) and SE.
+    beta, beta_col = numeric(["BETA"])
+    se, _ = numeric(["SE"])
+    odds, _ = numeric(["OR"])
+    or_low, _ = numeric(["OR_95L"])
+    or_high, _ = numeric(["OR_95U"])
+    p, _ = numeric(["P"])
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+
+        beta_from_or = beta.isna() & (odds > 0)
+        beta = beta.where(~beta_from_or, np.log(odds))
+
+        se_from_ci = se.isna() & (or_low > 0) & (or_high > or_low)
+        se = se.where(~se_from_ci, (np.log(or_high) - np.log(or_low)) / (2 * norm.isf(0.025)))
+
+        z_p = pd.Series(norm.isf(p.clip(lower=1e-300, upper=1) / 2), index=data.index)
+
+        se_from_p = se.isna() & beta.notna() & (beta != 0) & (p > 0) & (p < 1)
+        se = se.where(~se_from_p, beta.abs() / z_p)
+
+    info["N_BETA_FROM_OR"] = int(beta_from_or.sum())
+    info["N_SE_FROM_OR_CI"] = int(se_from_ci.sum())
+    info["N_SE_FROM_BETA_P"] = int(se_from_p.sum())
+
+    out["BETA"] = beta
+    out["SE"] = se
+    out["P"] = p
+
+    eaf, _ = numeric(["EAF"])
+    bad_eaf = (eaf < 0) | (eaf > 1)
+    eaf = eaf.mask(bad_eaf)
+    info["N_EAF_OUT_OF_RANGE_SET_MISSING"] = int(bad_eaf.sum())
+    out["EAF"] = eaf
+    out["MAF"] = np.minimum(eaf, 1 - eaf)
+
+    # N: per-variant N when the GWAS has it, otherwise the study N_TOTAL.
+    # N_EFF (binary) is kept in the study metadata, never substituted here.
+    n, n_col = numeric(["N"])
+    study_n = parse_number(trait.get("N_TOTAL"))
+    n_from_study = n.isna() & bool(study_n)
+
+    if study_n:
+        n = n.fillna(float(study_n))
+
+    out["N"] = n
+    info["N_SOURCE"] = (
+        ("variant" if n_col else "")
+        + ("+" if n_col and n_from_study.any() else "")
+        + ("study N_TOTAL" if n_from_study.any() else "")
+    ) or "missing"
+    info["N_FILLED_FROM_STUDY_TOTAL"] = int(n_from_study.sum())
+
+    info_score, _ = numeric(["INFO"])
+    bad_info = (info_score < 0) | (info_score > 2)
+    info["N_INFO_OUT_OF_RANGE_SET_MISSING"] = int(bad_info.sum())
+    out["INFO"] = info_score.mask(bad_info)
+
+    # Z: BETA / SE, otherwise signed from P and the effect direction.
+    z, _ = numeric(["Z"])
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+
+        z_from_beta_se = z.isna() & beta.notna() & (se > 0)
+        z = z.where(~z_from_beta_se, beta / se)
+
+        z_from_p = z.isna() & beta.notna() & p.notna()
+        z = z.where(~z_from_p, np.sign(beta) * z_p)
+
+    out["Z"] = z.replace([np.inf, -np.inf], np.nan)
+    info["N_Z_FROM_BETA_SE"] = int(z_from_beta_se.sum())
+    info["N_Z_FROM_P"] = int(z_from_p.sum())
+
+    for column in ("BETA", "SE", "P", "EAF", "MAF", "N", "INFO", "Z"):
+        info[f"N_MISSING_{column}"] = int(out[column].isna().sum())
+
+    # Effect scale of BETA: log(OR) for binary studies or when derived from OR.
+    phenotype_type = trait.get("PHENOTYPE_TYPE", "Unknown")
+    info["EFFECT_TYPE"] = (
+        "log(OR)" if phenotype_type == "Binary" or (beta_col is None and beta_from_or.any())
+        else effect_type(phenotype_type)
+    )
+
+    extra = [
+        column for column in data.columns
+        if str(column).upper() not in FINEMAP_COLUMNS
+    ]
+
+    return pd.concat([out, data[extra]], axis=1), info
 
 
 # =============================================================================
@@ -3134,11 +3366,11 @@ def planner_mode(args):
                 phenotype=phenotype,
                 ancestry_code=ancestry_code,
                 ancestry_label=ancestry_label,
-                extra={
+                extra=normalise_trait({
                     field: row.get(field, "")
                     for field in TRAIT_FIELDS
                     if field in row
-                },
+                }),
             )
         )
 
@@ -3776,6 +4008,25 @@ def worker_mode():
             ss.data
         )
 
+        # Missing per-variant N -> study N_TOTAL BEFORE basic_check, which
+        # would otherwise drop those variants (fine-mapping needs them all).
+        trait = normalise_trait({
+            field: row.get(field, "")
+            for field in TRAIT_FIELDS
+            if field in row
+        })
+
+        n_prefilled = 0
+        raw_n_col = find_column(ss.data, ["N"])
+        study_n = parse_number(trait.get("N_TOTAL"))
+
+        if raw_n_col is not None and study_n:
+            values = pd.to_numeric(ss.data[raw_n_col], errors="coerce")
+            n_prefilled = int(values.isna().sum())
+            if n_prefilled:
+                ss.data[raw_n_col] = values.fillna(study_n)
+                print(f"N missing for {n_prefilled:,} variants: set to the study N_TOTAL ({study_n:,})")
+
         print()
 
         print(
@@ -3796,6 +4047,9 @@ def worker_mode():
             remove_dup=True,
             normalize=True,
             threads=threads,
+            sanity_check_stats_kwargs={
+                "coltocheck": GWASLAB_RANGE_CHECK,
+            },
             verbose=True,
         )
 
@@ -3978,6 +4232,37 @@ def worker_mode():
         data = data[
             valid_p
         ].copy()
+
+        # =====================================================================
+        # STANDARDISED FINE-MAPPING COLUMNS
+        # CHR POS SNP EA NEA BETA SE P EAF MAF N INFO Z (all variants kept)
+        # =====================================================================
+
+        banner(
+            "FINE-MAPPING COLUMNS"
+        )
+
+        data, finemap_info = standardize_finemap_columns(
+            data,
+            trait,
+        )
+
+        if n_prefilled:
+            finemap_info["N_FILLED_FROM_STUDY_TOTAL"] += n_prefilled
+            finemap_info["N_SOURCE"] = "variant+study N_TOTAL"
+
+        for key, value in finemap_info.items():
+            print(f"{key:<24}: {value}")
+
+        # The detected columns are now the standardised ones.
+        chr_col, pos_col, p_col = "CHR", "POS", "P"
+        ea_col = "EA" if data["EA"].notna().any() else None
+        nea_col = "NEA" if data["NEA"].notna().any() else None
+        beta_col = "BETA" if data["BETA"].notna().any() else None
+        se_col = "SE" if data["SE"].notna().any() else None
+        z_col = "Z" if data["Z"].notna().any() else None
+        eaf_col = "EAF" if data["EAF"].notna().any() else None
+        n_col = "N" if data["N"].notna().any() else None
 
         # =====================================================================
         # ADD PIPELINE METADATA
@@ -4216,12 +4501,11 @@ def worker_mode():
             "ANCESTRY_LABEL":
                 ancestry_label,
 
-            # Binary vs quantitative phenotype (read by fine-mapping / coloc).
-            **{
-                field: row.get(field, "")
-                for field in TRAIT_FIELDS
-                if field in row
-            },
+            # Binary vs continuous phenotype (read by fine-mapping / coloc).
+            **trait,
+
+            # Derivations behind the standardised fine-mapping columns.
+            **finemap_info,
 
             "BUILD":
                 "GRCh38",
@@ -4349,6 +4633,38 @@ def worker_mode():
                 indent=2,
                 default=str,
             )
+
+        # =====================================================================
+        # SAVE STUDY METADATA (fine-mapping)
+        # =====================================================================
+
+        metadata = study_metadata_row(
+            trait,
+            accession,
+            ancestry_code,
+            ancestry_label,
+            effect=finemap_info["EFFECT_TYPE"],
+            extra={
+                "N_SOURCE": finemap_info["N_SOURCE"],
+                "N_VARIANTS": n_after,
+                "QC_STATUS": qc_status,
+                "QC_FILE": str(full_output),
+            },
+        )
+
+        pd.DataFrame([metadata]).to_csv(
+            output_directory / f"{accession}_study_metadata.tsv",
+            sep="\t",
+            index=False,
+        )
+
+        with open(
+            output_directory / f"{accession}_study_metadata.json",
+            "w",
+            encoding="utf-8",
+        ) as handle:
+
+            json.dump(metadata, handle, indent=2, default=str)
 
         # =====================================================================
         # Remove stale failure file
@@ -4679,6 +4995,85 @@ def read_download_manifest(P):
     return pd.read_csv(P["download_manifest"], sep="\t", dtype=str, low_memory=False).fillna("")
 
 
+# =============================================================================
+# STUDY METADATA (fine-mapping): GWAS_study_metadata.tsv
+# =============================================================================
+
+def study_metadata_row(trait, accession, ancestry_code, ancestry_label, effect=None, extra=None):
+    """GCST_ID PHENOTYPE_TYPE N_CASES N_CONTROLS N_TOTAL N_EFF ANCESTRY GENOME_BUILD
+    EFFECT_TYPE, then provenance. Both N_TOTAL and N_EFF are kept; each
+    fine-mapping method chooses which one it uses."""
+
+    trait = normalise_trait(trait)
+
+    row = {
+        "GCST_ID": accession,
+        "PHENOTYPE_TYPE": trait["PHENOTYPE_TYPE"],
+        "N_CASES": trait.get("N_CASES", ""),
+        "N_CONTROLS": trait.get("N_CONTROLS", ""),
+        "N_TOTAL": trait.get("N_TOTAL", ""),
+        "N_EFF": trait["N_EFF"],
+        "ANCESTRY": ancestry_code,
+        "GENOME_BUILD": "GRCh38",
+        "EFFECT_TYPE": effect or effect_type(trait["PHENOTYPE_TYPE"]),
+        "ANCESTRY_LABEL": ancestry_label,
+        "CASE_FRACTION": trait.get("CASE_FRACTION", ""),
+        "PHENOTYPE_TYPE_SOURCE": trait.get("PHENOTYPE_TYPE_SOURCE", ""),
+        "LD_REFERENCE": f"04_ld_reference/1000G_{ancestry_code}_GRCh38",
+    }
+
+    row.update(extra or {})
+
+    return row
+
+
+def write_study_metadata_table(analysis_dir, qc_root, manifest, ancestry_code, ancestry_label):
+    """One row per study: the per-study QC metadata when QC has run, otherwise
+    the download manifest (EFFECT_TYPE then follows from PHENOTYPE_TYPE)."""
+
+    rows = []
+
+    for _, item in manifest.iterrows():
+
+        accession = str(item["STUDY_ACCESSION"]).strip()
+        per_study = Path(qc_root) / accession / f"{accession}_study_metadata.tsv"
+
+        if per_study.is_file() and per_study.stat().st_size > 0:
+            rows.append(pd.read_csv(per_study, sep="\t", dtype=str).fillna("").iloc[0].to_dict())
+            continue
+
+        rows.append(study_metadata_row(
+            {field: item.get(field, "") for field in TRAIT_FIELDS},
+            accession, ancestry_code, ancestry_label,
+            extra={"QC_STATUS": "PENDING"},
+        ))
+
+    table = pd.DataFrame(rows)
+
+    if table.empty:
+        table = pd.DataFrame(columns=STUDY_METADATA_COLUMNS)
+
+    order = STUDY_METADATA_COLUMNS + [c for c in table.columns if c not in STUDY_METADATA_COLUMNS]
+    output = Path(analysis_dir) / "GWAS_study_metadata.tsv"
+    table[order].to_csv(output, sep="\t", index=False)
+
+    return output
+
+
+def refresh_study_metadata(args):
+    """GWAS_study_metadata.tsv from the download manifest + finished QC."""
+
+    P = project_paths(args)
+
+    if not P["download_manifest"].is_file():
+        return
+
+    output = write_study_metadata_table(
+        P["analysis"], P["qc"], read_download_manifest(P), P["code"], P["label"]
+    )
+    print(f"Study metadata (fine-mapping): {output}")
+
+
 def status_mode(args):
 
     P = project_paths(args)
@@ -4695,7 +5090,8 @@ def status_mode(args):
         downloads[s["download"]] = downloads.get(s["download"], 0) + 1
         key = s["qc"].split(" ")[0]
         qcs[key] = qcs.get(key, 0) + 1
-        print(f"{row.get('ARRAY_ID', ''):>3}  {row['STUDY_ACCESSION']:<14}{row.get('TRAIT_TYPE', '') or '-':<14}"
+        phenotype_type = normalise_trait({field: row.get(field, "") for field in TRAIT_FIELDS})["PHENOTYPE_TYPE"]
+        print(f"{row.get('ARRAY_ID', ''):>3}  {row['STUDY_ACCESSION']:<14}{phenotype_type:<14}"
               f"{s['download']:<12}{human_bytes(s['size']) if s['size'] else '-':>10}  {s['qc']:<15}{s['detail']}")
 
     collect_existing_qc_summaries(P["qc"], P["analysis"] / "GWAS_QC_summary.tsv")
@@ -4852,11 +5248,9 @@ def stats_mode(args):
             "N_REPLICATION": sum(parse_number(x) for x in replication.get("NUMBER OF INDIVIDUALS", [])) or "",
         })
 
-        # Binary / quantitative from the planner (API + sumstats metadata).
-        for field in TRAIT_FIELDS:
-            r[field] = m.get(field, "")
-        cases, controls = parse_number(r["N_CASES"]), parse_number(r["N_CONTROLS"])
-        r["EFFECTIVE_N"] = int(round(4 / (1 / cases + 1 / controls))) if cases and controls else ""
+        # Binary / continuous from the planner (API + sumstats metadata).
+        r.update(normalise_trait({field: m.get(field, "") for field in TRAIT_FIELDS}))
+        r["EFFECT_TYPE"] = effect_type(r["PHENOTYPE_TYPE"])
 
         s = study_state(P, m)
         r.update({"DOWNLOAD_STATUS": s["download"], "QC_STATE": s["qc"], "FILE_NAME": m.get("FILE_NAME", ""),
@@ -4876,6 +5270,9 @@ def stats_mode(args):
                 "N_GENOME_WIDE_SIGNIFICANT": summary.get("N_GENOME_WIDE_SIGNIFICANT", ""),
                 "MIN_P": summary.get("MIN_P", ""),
                 "QC_STATUS": summary.get("QC_STATUS", ""),
+                "EFFECT_TYPE": summary.get("EFFECT_TYPE", r["EFFECT_TYPE"]),
+                "N_SOURCE": summary.get("N_SOURCE", ""),
+                "N_MISSING_Z": summary.get("N_MISSING_Z", ""),
                 "AVAILABLE_FIELDS": ", ".join(k[4:] for k, v in summary.items()
                                               if k.startswith("HAS_") and str(v) == "True"),
             })
@@ -4896,11 +5293,11 @@ def stats_mode(args):
     table.to_csv(P["stats_table"], sep="\t", index=False)
 
     banner("SUMMARY TABLE")
-    show = [c for c in ("STUDY_ACCESSION", "FIRST_AUTHOR", "PUBLICATION_DATE", "TRAIT_TYPE", "N_TOTAL", "N_CASES",
-                        "N_CONTROLS", "N_VARIANTS_QC", "N_GENOME_WIDE_SIGNIFICANT", "LAMBDA_GC", "QC_STATUS")
+    show = [c for c in ("STUDY_ACCESSION", "FIRST_AUTHOR", "PUBLICATION_DATE", "PHENOTYPE_TYPE", "N_TOTAL", "N_CASES",
+                        "N_CONTROLS", "N_EFF", "N_VARIANTS_QC", "N_GENOME_WIDE_SIGNIFICANT", "LAMBDA_GC", "QC_STATUS")
             if c in table.columns]
     display = table[show].copy()
-    for column in ("N_TOTAL", "N_CASES", "N_CONTROLS", "N_VARIANTS_QC", "N_GENOME_WIDE_SIGNIFICANT"):
+    for column in ("N_TOTAL", "N_CASES", "N_CONTROLS", "N_EFF", "N_VARIANTS_QC", "N_GENOME_WIDE_SIGNIFICANT"):
         if column in display.columns:
             display[column] = pd.to_numeric(display[column], errors="coerce").round().astype("Int64")
     print(display.astype(object).where(display.notna(), "").to_string(index=False))
@@ -4922,11 +5319,11 @@ def print_study(r):
           f"{r.get('JOURNAL', '')}  PMID {r.get('PUBMEDID', '')}")
     print(f"   Title        : {str(r.get('TITLE', ''))[:110]}")
     print(f"   Trait        : {r.get('DISEASE_TRAIT', '')}  [{r.get('EFO_TERMS', '') or r.get('MAPPED_TRAIT', '')}]")
-    print(f"   Phenotype    : {(r.get('TRAIT_TYPE') or 'unknown').upper()}"
-          f"  (source: {r.get('TRAIT_TYPE_SOURCE', '') or '-'})")
+    print(f"   Phenotype    : {r.get('PHENOTYPE_TYPE') or 'Unknown'} | effect {r.get('EFFECT_TYPE') or '-'}"
+          f"  (source: {r.get('PHENOTYPE_TYPE_SOURCE', '') or '-'})")
     print(f"   Samples      : N {fmt(r.get('N_TOTAL'))} | cases {fmt(r.get('N_CASES'))} | "
           f"controls {fmt(r.get('N_CONTROLS'))} | case fraction {r.get('CASE_FRACTION') or '-'} | "
-          f"effective N {fmt(r.get('EFFECTIVE_N'))} | replication N {fmt(r.get('N_REPLICATION'))}")
+          f"N_eff {fmt(r.get('N_EFF'))} | replication N {fmt(r.get('N_REPLICATION'))}")
     print(f"   Population   : {r.get('POPULATION', '') or '-'}; recruited in: {r.get('COUNTRY_OF_RECRUITMENT', '') or '-'}")
     if r.get("COHORTS"):
         print(f"   Cohorts      : {str(r['COHORTS'])[:110]}")
@@ -4942,6 +5339,7 @@ def print_study(r):
     if r.get("LAMBDA_GC") not in (None, ""):
         print(f"   QC           : {r.get('QC_STATUS', '')} | lambda GC {r.get('LAMBDA_GC')} | "
               f"chromosomes {fmt(r.get('N_CHROMOSOMES'))} | fields: {r.get('AVAILABLE_FIELDS', '')}")
+        print(f"   Fine-mapping : N from {r.get('N_SOURCE') or '-'} | variants without Z {fmt(r.get('N_MISSING_Z'))}")
     else:
         print(f"   QC           : {r.get('QC_STATE', '')}")
 
@@ -4966,6 +5364,9 @@ def arguments(argv=None):
                         help="Maximum eligible GWAS in the download manifest (0 = all).")
     parser.add_argument("--refresh", action="store_true",
                         help="Re-download the GWAS Catalog metadata.")
+    parser.add_argument("--phenotype-type", choices=["auto", "binary", "continuous"], default="auto",
+                        help="Binary (cases/controls) or Continuous. auto = decide per study from the "
+                             "GWAS Catalog API / sumstats metadata (default).")
 
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--qc", action="store_true",
@@ -5017,6 +5418,8 @@ def main():
         planner_mode(args)
     else:
         plan(args)
+
+    refresh_study_metadata(args)
 
 
 if __name__ == "__main__":

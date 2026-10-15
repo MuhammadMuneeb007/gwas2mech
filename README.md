@@ -199,10 +199,13 @@ envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py --full     # 
 `Step02_Plan_QC_GWAS.py` works for any phenotype. It searches the GWAS Catalog for the phenotype
 as given (plus any `--alias`), keeps studies with full summary statistics, a strict ancestry
 match and a harmonised file, and ranks them by sample size. For every study it also records
-whether the phenotype is **binary (cases/controls) or quantitative**, with the number of cases
-and controls and the case fraction. These come from the summary-statistics metadata
-(`-meta.yaml`, `case_control_study`) and the GWAS Catalog REST API, because fine-mapping and
-colocalisation differ (SuSiE-RSS / coloc `type="cc"` with case fraction `s`, versus `type="quant"`).
+whether the phenotype is **Binary (cases/controls) or Continuous**, with the number of cases
+and controls, the case fraction and the effective sample size. These come from the
+summary-statistics metadata (`-meta.yaml`, `case_control_study`) and the GWAS Catalog REST API,
+because fine-mapping and colocalisation differ (SuSiE-RSS / coloc `type="cc"` with case fraction
+`s`, versus `type="quant"`). The type is decided **per study**, not per disease: a depression
+diagnosis GWAS is Binary, a depression symptom score GWAS is Continuous. `--phenotype-type
+binary|continuous` overrides the automatic decision.
 
 ```bash
 # 1. discover + download (one light array task per GWAS)
@@ -216,8 +219,8 @@ sbatch Step02_QC_migraine_european.sh
 # downloaded / partial / pending and QC done / failed / pending, per study (read-only)
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --status
 
-# publication table: authors, journal, year, PMID, trait / EFO, binary or quantitative,
-# N, cases, controls, case fraction, effective N, population, countries, cohorts, platform,
+# publication table: authors, journal, year, PMID, trait / EFO, Binary or Continuous,
+# N, cases, controls, case fraction, N_eff, population, countries, cohorts, platform,
 # imputed, variants raw / after QC, file columns, genome-wide hits, minimum P, lambda GC
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --stats
 
@@ -227,10 +230,50 @@ envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry 
 
 Options: `--alias "migraine disorder"` (extra search term, repeatable), `--max-studies 5`,
 `--refresh` (re-download GWAS Catalog metadata), and `--partition --qos --account --cpus --mem
---time --max-parallel` to override `HPC_CPU.sh`. `TRAIT_TYPE`, `N_CASES`, `N_CONTROLS`,
-`CASE_FRACTION` and `N_TOTAL` are written to `GWAS_download_manifest.tsv`, `GWAS_QC_manifest.tsv`
-and every `<GCST>_QC_summary.tsv`. Outputs go to `01_gwas_catalog/<phenotype>/<ancestry>/` and
-`02_summary_stats/<phenotype>/<ancestry>/{raw,qc}/`.
+--time --max-parallel` to override `HPC_CPU.sh`, `--phenotype-type binary|continuous`. Outputs go
+to `01_gwas_catalog/<phenotype>/<ancestry>/` and `02_summary_stats/<phenotype>/<ancestry>/{raw,qc}/`.
+
+### Fine-mapping inputs (SuSiE-RSS / FINEMAP)
+
+`qc/<GCST>/<GCST>_GRCh38_QC.tsv.gz` keeps **every variant** (fine-mapping needs all variants in a
+locus, not only the significant ones) and starts with these columns, followed by the other
+GWASLab columns (`SNPID`, `rsID`, `OR`, `STATUS`, ...):
+
+| Column | Meaning |
+|---|---|
+| `CHR` `POS` | GRCh38 position |
+| `SNP` | rsID, otherwise `CHR:POS:NEA:EA` |
+| `EA` `NEA` | effect / non-effect allele (Z and BETA are for `EA`) |
+| `BETA` | effect size; **log(OR) for binary traits** (from `OR` when the file has no beta) |
+| `SE` | standard error (from the OR 95% CI, or from BETA and P, when missing) |
+| `P` | P-value |
+| `EAF` `MAF` | effect allele frequency; MAF = min(EAF, 1 − EAF) |
+| `N` | per-variant N; when missing, the study `N_TOTAL` (never N_eff) |
+| `INFO` | imputation quality (blank when not reported) |
+| `Z` | BETA / SE, otherwise signed from P and the effect direction |
+
+How many values were derived (`N_BETA_FROM_OR`, `N_SE_FROM_OR_CI`, `N_Z_FROM_P`, `N_SOURCE`,
+`N_MISSING_Z`, ...) is recorded in `<GCST>_QC_summary.tsv`.
+
+The study metadata is in `qc/<GCST>/<GCST>_study_metadata.tsv` (and `.json`), and for all studies in
+`01_gwas_catalog/<phenotype>/<ancestry>/GWAS_study_metadata.tsv` (updated by every Step02 run):
+
+| Column | Meaning |
+|---|---|
+| `GCST_ID` | GWAS Catalog accession |
+| `PHENOTYPE_TYPE` | `Binary` or `Continuous` (`Unknown` when the catalogue does not say) |
+| `N_CASES` `N_CONTROLS` | binary studies only |
+| `N_TOTAL` | total sample size |
+| `N_EFF` | binary only: 4·N_cases·N_controls / (N_cases + N_controls) |
+| `ANCESTRY` | ancestry code (EUR, EAS, ...) |
+| `GENOME_BUILD` | `GRCh38` (harmonised files) |
+| `EFFECT_TYPE` | `log(OR)` for binary, `BETA` for continuous |
+
+Provenance columns follow (`CASE_FRACTION`, `PHENOTYPE_TYPE_SOURCE`, `N_SOURCE`, `QC_STATUS`,
+`LD_REFERENCE`). Both `N_TOTAL` and `N_EFF` are kept; each fine-mapping method chooses which one
+it uses. The LD matrix must come from the ancestry-matched panel in `LD_REFERENCE`
+(`04_ld_reference/1000G_<ANCESTRY>_GRCh38`, Step04), with the same variants, order and allele
+orientation as the GWAS.
 
 ## Resource groups
 
