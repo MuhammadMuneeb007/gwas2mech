@@ -22,9 +22,10 @@ Step03_QC_One_GWAS.py, logic unchanged) plus status / statistics:
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR
     sbatch Step02_Download_GWAS_parkinson_s_disease_european.sh
 
-    # 2. QC planner: every GWAS that is downloaded NOW (re-run as more finish)
+    # 2. QC is automatic: each array task downloads ONE GWAS and then runs the
+    #    GWASLab QC on it. --qc is only needed to re-run QC as its own array
+    #    (e.g. after a QC failure):
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --qc
-    sbatch Step02_QC_parkinson_s_disease_european.sh
 
     # Progress: downloaded / partial / pending, QC done / failed / pending
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --status
@@ -89,6 +90,7 @@ import html
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1127,6 +1129,8 @@ export PATH="$ROOT/envs/pipeline/bin:$PATH"
 
 MANIFEST="{manifest}"
 OUTDIR="{output_dir}"
+PYTHON="$ROOT/envs/pipeline/bin/python"
+[[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
 
 ROW=$(awk -F '\\t' -v id="$SLURM_ARRAY_TASK_ID" '
     NR > 1 && $1 == id {{print; exit}}
@@ -1139,58 +1143,24 @@ fi
 
 IFS=$'\\t' read -r ARRAY_ID ACCESSION DOWNLOAD_URL FILE_NAME REST <<< "$ROW"
 
-DEST="$OUTDIR/$ACCESSION"
-
-mkdir -p "$DEST"
-
-TARGET="$DEST/$FILE_NAME"
-TEMP="$TARGET.part"
-
 echo "============================================================"
-echo "GWAS download"
+echo "GWAS download + QC"
 echo "============================================================"
 echo "Array task : $ARRAY_ID"
 echo "Accession  : $ACCESSION"
 echo "URL        : $DOWNLOAD_URL"
-echo "Output     : $TARGET"
+echo "Output     : $OUTDIR/$ACCESSION/$FILE_NAME"
 echo
 
-if [[ -s "$TARGET" ]]; then
-    echo "File already exists. Skipping."
-    exit 0
-fi
-
-if command -v wget >/dev/null 2>&1; then
-
-    wget \\
-        --continue \\
-        --tries=10 \\
-        --timeout=60 \\
-        -O "$TEMP" \\
-        "$DOWNLOAD_URL"
-
-elif command -v curl >/dev/null 2>&1; then
-
-    curl \\
-        --location \\
-        --fail \\
-        --retry 10 \\
-        --retry-delay 5 \\
-        --continue-at - \\
-        --output "$TEMP" \\
-        "$DOWNLOAD_URL"
-
-else
-
-    echo "ERROR: neither wget nor curl is available."
-    exit 1
-fi
-
-mv "$TEMP" "$TARGET"
+# One job per GWAS: download (resumes a .part file; skipped when complete),
+# then GWASLab QC (skipped when already complete) - no separate QC submission.
+"$PYTHON" {shlex.quote(str(Path(__file__).resolve()))} \\
+    --phenotype {shlex.quote(ARGS.phenotype.strip())} \\
+    --ancestry {shlex.quote(ARGS.ancestry.strip())} \\
+    --index "$ARRAY_ID"
 
 echo
-echo "DOWNLOAD COMPLETE"
-echo "$TARGET"
+echo "DOWNLOAD + QC COMPLETE: $ACCESSION"
 """
 
     script_path.write_text(
@@ -2668,19 +2638,22 @@ def _plan(args, state):
     print()
 
     print(
-        "THEN (when downloads finish; QC runs on whatever is downloaded):"
+        "Each array task downloads one GWAS and then QCs it (no separate QC step)."
     )
 
     print()
 
     print(
-        f"  envs/pipeline/bin/python {Path(__file__).name} "
-        f"--phenotype \"{phenotype}\" --ancestry {ancestry_code_value} --qc"
+        "THEN:"
     )
 
     print(
         f"  envs/pipeline/bin/python {Path(__file__).name} "
         f"--phenotype \"{phenotype}\" --ancestry {ancestry_code_value} --status"
+    )
+
+    print(
+        "  (--qc only re-runs QC as its own array, e.g. after a QC failure)"
     )
 
     print()
@@ -5376,6 +5349,16 @@ def load_reviews(analysis_dir):
     return {str(r["STUDY_ACCESSION"]).strip(): r.to_dict() for _, r in table.iterrows()}
 
 
+def atomic_tsv(table, path):
+    """Write via a unique temporary file + rename: parallel array tasks that
+    refresh the same table never leave a half-written file."""
+
+    path = Path(path)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    table.to_csv(temporary, sep="\t", index=False)
+    os.replace(temporary, path)
+
+
 def write_review_file(analysis_dir, manifest):
     """Studies whose phenotype type needs manual verification. Verdicts already
     filled in are kept; studies verified by hand stay listed."""
@@ -5406,7 +5389,7 @@ def write_review_file(analysis_dir, manifest):
             path.unlink()
         return []
 
-    pd.DataFrame(rows, columns=REVIEW_COLUMNS).to_csv(path, sep="\t", index=False)
+    atomic_tsv(pd.DataFrame(rows, columns=REVIEW_COLUMNS), path)
 
     return [r for r in rows if phenotype_type_value(r["VERIFIED_PHENOTYPE_TYPE"]) == "Unknown"]
 
@@ -5448,7 +5431,7 @@ def write_study_metadata_table(analysis_dir, qc_root, manifest, ancestry_code, a
 
     order = STUDY_METADATA_COLUMNS + [c for c in table.columns if c not in STUDY_METADATA_COLUMNS]
     output = Path(analysis_dir) / "GWAS_study_metadata.tsv"
-    table[order].to_csv(output, sep="\t", index=False)
+    atomic_tsv(table[order], output)
 
     return output
 

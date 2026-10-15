@@ -274,7 +274,7 @@ Strong evidence, or two agreeing weak ones, decides. **Conflicting or insufficie
 `Unknown` with `NEEDS_REVIEW=True`; it is never guessed.** Flagged studies are listed in
 `01_gwas_catalog/<phenotype>/<ancestry>/phenotype_type_review.tsv` with the trait, sample
 description, PMID, DOI and evidence. Fill `VERIFIED_PHENOTYPE_TYPE` (`Binary` / `Continuous`;
-optionally `VERIFIED_N_CASES`, `VERIFIED_N_CONTROLS`) after reading the paper and re-run with `--qc`;
+optionally `VERIFIED_N_CASES`, `VERIFIED_N_CONTROLS`) after reading the paper, run Step02 `--status` (refreshes `GWAS_study_metadata.tsv`) and re-run Step06;
 your verdicts are kept on every re-run. `--phenotype-type binary|continuous` forces one type for
 all studies.
 
@@ -288,13 +288,12 @@ Missing Python packages (pandas, numpy, requests, PyYAML; scipy and gwaslab 4.2.
 installed automatically into the Python that runs the script, i.e. `envs/pipeline`.
 
 ```bash
-# 1. discover + download (one light array task per GWAS)
+# discover, then ONE array task per GWAS: download it and QC it (GWASLab) in the same job
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR
 sbatch Step02_Download_GWAS_parkinson_s_disease_european.sh
 
-# 2. GWASLab QC of every GWAS downloaded so far (re-run as more downloads finish)
+# only to re-run QC as its own array (e.g. after a QC failure); not needed normally
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --qc
-sbatch Step02_QC_parkinson_s_disease_european.sh
 
 # downloaded / partial / pending and QC done / failed / pending, per study (read-only)
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --status
