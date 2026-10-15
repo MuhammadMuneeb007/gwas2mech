@@ -568,9 +568,17 @@ def child_env() -> dict:
             env[name] = str(TMP)
 
     env["CONDA_CHANNEL_PRIORITY"] = "strict"
+    # Answer "yes" without -y: older conda rejects "-y" on "conda env create/update".
+    env["CONDA_ALWAYS_YES"] = "true"
     if CONDA_SUBDIR:
         env["CONDA_SUBDIR"] = CONDA_SUBDIR
     return env
+
+
+# Explicit channels for "create" commands: never mix in Anaconda "defaults" from
+# the user's .condarc (gffutils / pyfastx / ldsc only exist on bioconda).
+CONDA_FORGE = ["--override-channels", "-c", "conda-forge"]
+FORGE_BIOCONDA = ["--override-channels", "-c", "conda-forge", "-c", "bioconda"]
 
 
 def _stream(command: list[str], cwd: Path, label: str) -> int:
@@ -817,20 +825,26 @@ def install_pipeline(pms: list[str]) -> None:
     if not args.dry_run:
         ENVIRONMENT_YML.write_text(ENVIRONMENT_YML_TEXT, encoding="utf-8")
 
+    update_error: Exception | None = None
     if env_exists(CORE_ENV):
         log("[CACHE] Environment exists; updating / repairing it.")
 
         def command(pm):
             if is_micromamba(pm):
                 return [pm, "install", "-y", "-p", CORE_ENV, "-f", ENVIRONMENT_YML]
-            return [pm, "env", "update", "-y", "-p", CORE_ENV, "-f", ENVIRONMENT_YML, "--prune"]
+            return [pm, "env", "update", "-p", CORE_ENV, "-f", ENVIRONMENT_YML, "--prune"]
 
-        with_fallback(pms, command, "Update envs/pipeline")
+        try:
+            with_fallback(pms, command, "Update envs/pipeline")
+        except subprocess.CalledProcessError as exc:
+            # The environment still exists: carry on with the steps below, report at the end.
+            update_error = exc
+            log("[WARN] update failed; continuing with pip / hyprcoloc / VEP on the existing environment")
     else:
         def command(pm):
             if is_micromamba(pm):
                 return [pm, "create", "-y", "-p", CORE_ENV, "-f", ENVIRONMENT_YML]
-            return [pm, "env", "create", "-y", "-p", CORE_ENV, "-f", ENVIRONMENT_YML]
+            return [pm, "env", "create", "-p", CORE_ENV, "-f", ENVIRONMENT_YML]
 
         with_fallback(pms, command, "Create envs/pipeline")
 
@@ -838,7 +852,58 @@ def install_pipeline(pms: list[str]) -> None:
     run([env_bin(CORE_ENV, "python"), "-m", "pip", "install", "--upgrade",
          GWASLAB_SPEC, POLARS_SPEC], label="pip: gwaslab + polars")
 
+    pin_vep_perl()
     install_hyprcoloc()
+
+    if update_error is not None:
+        raise update_error
+
+
+VEP_SCRIPTS = ("vep", "filter_vep", "variant_recoder", "haplo", "vep_install", "vep_convert_cache")
+LAUNCHER_TAG = "# GWAS2m launcher"
+
+
+def pin_vep_perl() -> None:
+    """Make VEP use envs/pipeline's Perl even when the environment is not activated.
+
+    VEP's scripts start with '#!/usr/bin/env perl', so running envs/pipeline/bin/vep
+    directly (as Step07 does) picks up the first perl on PATH - often the system perl,
+    which lacks DBI ("Can't locate DBI.pm"). Each bin/ link is replaced by a tiny
+    launcher that runs the real script with this environment's perl.
+    """
+    section("Ensembl VEP: always use this environment's Perl")
+    perl = env_bin(CORE_ENV, "perl")
+    if args.dry_run:
+        log(f"Would point {', '.join(VEP_SCRIPTS)} at {perl}")
+        return
+    if not perl.exists():
+        raise RuntimeError(f"{perl} missing; the ensembl-vep package did not install correctly")
+
+    for name in VEP_SCRIPTS:
+        entry = env_bin(CORE_ENV, name)
+        if entry.is_symlink():
+            real = entry.resolve()
+        else:
+            hits = sorted((CORE_ENV / "share").glob(f"ensembl-vep*/{name}"))
+            real = hits[-1] if hits else None
+        if real is None or not real.is_file():
+            continue
+        with open(real, "rb") as handle:
+            if b"perl" not in handle.readline():
+                continue
+        if entry.is_file() and not entry.is_symlink() and LAUNCHER_TAG not in entry.read_text(errors="replace"):
+            continue  # a real script living in bin/ (not the bioconda layout): leave it alone
+        if entry.is_symlink() or entry.exists():
+            entry.unlink()
+        entry.write_text(
+            "#!/bin/sh\n"
+            f"{LAUNCHER_TAG}: run Ensembl VEP with envs/pipeline's perl, whatever is on PATH\n"
+            "unset PERL5LIB PERL_LOCAL_LIB_ROOT\n"
+            f'exec "{perl}" "{real}" "$@"\n',
+            encoding="utf-8",
+        )
+        entry.chmod(0o755)
+        log(f"[OK] {name} -> {perl} {real.relative_to(CORE_ENV)}")
 
 
 def install_hyprcoloc() -> None:
@@ -847,6 +912,7 @@ def install_hyprcoloc() -> None:
     code = f"""
 options(repos = c(CRAN = "https://cloud.r-project.org"))
 lib  <- file.path(R.home(), "library")
+if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes", lib = lib)
 want <- "{HYPRCOLOC_COMMIT}"
 desc <- suppressWarnings(utils::packageDescription("hyprcoloc", lib.loc = lib))
 have <- if (is.list(desc) && !is.null(desc$RemoteSha)) desc$RemoteSha else ""
@@ -874,7 +940,7 @@ def install_spliceai(pms: list[str]) -> None:
     else:
         with_fallback(
             pms,
-            lambda pm: [pm, "create", "-y", "-p", SPLICEAI_ENV, "-c", "conda-forge", *SPLICEAI_CONDA],
+            lambda pm: [pm, "create", "-y", "-p", SPLICEAI_ENV, *CONDA_FORGE, *SPLICEAI_CONDA],
             "Create envs/spliceai",
         )
 
@@ -945,7 +1011,7 @@ def install_pangolin(pms: list[str]) -> None:
     else:
         with_fallback(
             pms,
-            lambda pm: [pm, "create", "-y", "-p", PANGOLIN_ENV, "-c", "conda-forge", *PANGOLIN_CONDA],
+            lambda pm: [pm, "create", "-y", "-p", PANGOLIN_ENV, *FORGE_BIOCONDA, *PANGOLIN_CONDA],
             "Create envs/pangolin",
         )
 
@@ -965,7 +1031,7 @@ def install_ldsc(pms: list[str]) -> None:
         return
     with_fallback(
         pms,
-        lambda pm: [pm, "create", "-y", "-p", LDSC_ENV, "-c", "conda-forge", "-c", "bioconda", *LDSC_CONDA],
+        lambda pm: [pm, "create", "-y", "-p", LDSC_ENV, *FORGE_BIOCONDA, *LDSC_CONDA],
         "Create envs/ldsc",
     )
 
@@ -1002,7 +1068,7 @@ def install_pops(pms: list[str]) -> None:
     else:
         with_fallback(
             pms,
-            lambda pm: [pm, "create", "-y", "-p", POPS_ENV, "-c", "conda-forge", *POPS_CONDA],
+            lambda pm: [pm, "create", "-y", "-p", POPS_ENV, *CONDA_FORGE, *POPS_CONDA],
             "Create envs/pops",
         )
 
@@ -1144,8 +1210,12 @@ def verify_tools(env_ids: list[str]) -> list[dict]:
             if version_args:
                 rc, out = capture([path, *version_args], timeout=120)
                 version = _first_line(name, out)
-                if rc != 0 and not version:
-                    status = "BROKEN"
+                # A load error is not a version line (e.g. VEP: "Can't locate DBI.pm").
+                error = next((line.strip() for line in out.splitlines() if any(
+                    marker in line for marker in ("Can't locate", "error while loading shared libraries",
+                                                  "command not found", "Traceback", "bad interpreter"))), "")
+                if error or (rc != 0 and not version):
+                    status, version = "BROKEN", (error or out.strip()[-80:])[:80]
         rows.append(dict(env=env, type="tool", name=name, status=status, version=version,
                          required=required, step=step, used_by=purpose, spec=spec))
 
