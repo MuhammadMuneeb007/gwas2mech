@@ -1,0 +1,6 @@
+# Scripts run on Linux / HPC: always store and check out with LF line endings.
+* text=auto eol=lf
+*.pdf binary
+*.png binary
+*.zip binary
+*.gz binary
