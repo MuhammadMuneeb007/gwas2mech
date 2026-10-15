@@ -7,17 +7,17 @@ GWAS2Mech STEP 06 - Regional extraction + ancestry-matched LD + SuSiE-RSS
 ===============================================================================
 
     # plan + SLURM array (one task per study; >1000 studies share tasks)
-    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR
-    sbatch Step06_FineMap_GWAS_migraine_european.sh
+    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR
+    sbatch Step06_FineMap_GWAS_parkinson_s_disease_european.sh
 
     # progress (read-only), per-study statistics, plots
-    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --status
-    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --stats
-    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --plots
+    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --status
+    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --plots
 
-    # study 1 (the number the Step02 planner prints) on this machine; only its
+    # study 2 (the number the Step02 planner prints) on this machine; only its
     # Step05 clumping has to be done
-    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --index 1
+    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
 
 Inputs
     Step02  02_summary_stats/<p>/<a>/qc/<GCST>/<GCST>_GRCh38_QC.tsv.gz

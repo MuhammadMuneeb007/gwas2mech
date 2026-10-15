@@ -19,25 +19,25 @@ Step03_QC_One_GWAS.py, logic unchanged) plus status / statistics:
     #    coloc type "cc" with case fraction s, versus type "quant"). Ambiguous
     #    studies are Unknown + NEEDS_REVIEW (phenotype_type_review.tsv).
     #    PMID and DOI per study (Europe PMC / NCBI).
-    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR
-    sbatch Step02_Download_GWAS_migraine_european.sh
+    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR
+    sbatch Step02_Download_GWAS_parkinson_s_disease_european.sh
 
     # 2. QC planner: every GWAS that is downloaded NOW (re-run as more finish)
-    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --qc
-    sbatch Step02_QC_migraine_european.sh
+    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --qc
+    sbatch Step02_QC_parkinson_s_disease_european.sh
 
     # Progress: downloaded / partial / pending, QC done / failed / pending
-    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --status
+    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --status
 
     # Publication table per study (authors, journal, PMID, trait/EFO, binary or
     # continuous, N, cases, controls, N_eff, population, countries,
     # cohorts, platform, imputed, variants raw/QC, columns, genome-wide hits,
     # minimum P, lambda GC, available fields) -> GWAS_publication_stats.tsv
-    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --stats
+    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 
-    # Study 1 of the download manifest end to end on this machine: download it
+    # Study 2 of the download manifest end to end on this machine: download it
     # (if needed) and QC it - only the planner above has to have run
-    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --index 1
+    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
 
     # PubMed ID -> DOI
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --pmid-to-doi 34737426 33987465
@@ -3097,7 +3097,7 @@ def determine_project(
     # Expected structure:
     #
     # 01_gwas_catalog/
-    #     migraine/
+    #     parkinson_s_disease/
     #         european/
     #             GWAS_download_manifest.tsv
     # -------------------------------------------------------------------------
@@ -5778,7 +5778,7 @@ def arguments(argv=None):
     parser.add_argument("--ancestry", default=None,
                         help="EUR, AFR, EAS, SAS, AMR, MID or European, East Asian, ...")
     parser.add_argument("--alias", action="append", default=[],
-                        help="Extra search term (repeatable), e.g. --alias \"migraine disorder\".")
+                        help="Extra search term (repeatable), e.g. --alias \"Parkinson disease\".")
     parser.add_argument("--max-studies", type=int, default=0,
                         help="Maximum eligible GWAS in the download manifest (0 = all).")
     parser.add_argument("--refresh", action="store_true",

@@ -7,17 +7,17 @@ GWAS2Mech STEP 05 - Ancestry-matched LD clumping / independent lead variants
 ===============================================================================
 
     # plan + SLURM array (one task per QC'd GWAS; >1000 studies share tasks)
-    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR
-    sbatch Step05_Clump_GWAS_migraine_european.sh
+    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR
+    sbatch Step05_Clump_GWAS_parkinson_s_disease_european.sh
 
     # progress (read-only), per-study statistics, plots
-    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --status
-    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --stats
-    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --plots
+    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --status
+    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --plots
 
-    # study 1 (the number the Step02 planner prints) on this machine; only its
+    # study 2 (the number the Step02 planner prints) on this machine; only its
     # Step02 QC has to be done
-    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --index 1
+    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
 
 Inputs
     Step02 QC files   02_summary_stats/<phenotype>/<ancestry>/qc/<GCST>/<GCST>_GRCh38_QC.tsv.gz

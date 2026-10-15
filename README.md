@@ -282,30 +282,30 @@ installed automatically into the Python that runs the script, i.e. `envs/pipelin
 
 ```bash
 # 1. discover + download (one light array task per GWAS)
-envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR
-sbatch Step02_Download_GWAS_migraine_european.sh
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR
+sbatch Step02_Download_GWAS_parkinson_s_disease_european.sh
 
 # 2. GWASLab QC of every GWAS downloaded so far (re-run as more downloads finish)
-envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --qc
-sbatch Step02_QC_migraine_european.sh
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --qc
+sbatch Step02_QC_parkinson_s_disease_european.sh
 
 # downloaded / partial / pending and QC done / failed / pending, per study (read-only)
-envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --status
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --status
 
 # publication table: authors, journal, year, PMID, trait / EFO, Binary or Continuous,
 # N, cases, controls, case fraction, N_eff, population, countries, cohorts, platform,
 # imputed, variants raw / after QC, file columns, genome-wide hits, minimum P, lambda GC
-envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --stats
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 
 # PubMed ID -> DOI only
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --pmid-to-doi 34737426 33987465
 
 # study N of the download manifest end to end on this machine: download (if needed) + QC
 # (only the planner has to have run; on a login node wrap it in srun)
-envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --index 1
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
 ```
 
-Options: `--alias "migraine disorder"` (extra search term, repeatable), `--max-studies 5`,
+Options: `--alias "Parkinson disease"` (extra search term, repeatable), `--max-studies 5`,
 `--refresh` (re-download GWAS Catalog metadata), and `--partition --qos --account --cpus --mem
 --time --max-parallel` to override `HPC_CPU.sh`, `--phenotype-type binary|continuous`. Outputs go
 to `01_gwas_catalog/<phenotype>/<ancestry>/` and `02_summary_stats/<phenotype>/<ancestry>/{raw,qc}/`.
@@ -375,11 +375,11 @@ on the ancestry-matched panel. GWAS variants are matched to the panel by chromos
 position **and both alleles**; a different variant at the same position is never used.
 
 ```bash
-envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR
-sbatch Step05_Clump_GWAS_migraine_european.sh
-envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --status
-envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --stats   # leads, loci, mapping, lost GWS variants
-envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype migraine --ancestry EUR --plots   # Manhattan, QQ, chromosome locus map
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR
+sbatch Step05_Clump_GWAS_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --stats   # leads, loci, mapping, lost GWS variants
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --plots   # Manhattan, QQ, chromosome locus map
 ```
 
 ## 7. Fine-mapping (Step06, SuSiE-RSS)
@@ -392,11 +392,11 @@ N comes from Step02 (`GWAS_study_metadata.tsv`): **Binary → N_EFF** (`--susie-
 **Continuous → N_TOTAL**; the N used and why is recorded per study.
 
 ```bash
-envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR
-sbatch Step06_FineMap_GWAS_migraine_european.sh
-envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --status
-envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --stats   # loci, credible sets, PIPs, locus QC
-envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype migraine --ancestry EUR --plots   # regional + PIP + genes, LD heatmap, genome PIP
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR
+sbatch Step06_FineMap_GWAS_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --stats   # loci, credible sets, PIPs, locus QC
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --plots   # regional + PIP + genes, LD heatmap, genome PIP
 ```
 
 Every locus is checked and gets `LOCUS_QC = PASS / WARN` with the reasons (`LOCUS_QC_NOTES`):
@@ -423,10 +423,10 @@ Reads Step02/05/06 outputs (nothing is recomputed) and draws every figure in R; 
 layers are rasterised, text and gene models stay vector.
 
 ```bash
-envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR                    # pdf + png
-envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR --formats pdf,svg,png
-envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR --status
-envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR --slurm            # then sbatch the .sh
+envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR                    # pdf + png
+envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --formats pdf,svg,png
+envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --slurm            # then sbatch the .sh
 ```
 
 | Figure (`07_plots/<phenotype>/<ancestry>/`) | Content | Package |

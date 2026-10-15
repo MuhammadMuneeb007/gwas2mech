@@ -6,13 +6,13 @@
 GWAS2Mech STEP 07 - Publication figures for GWAS loci and fine-mapping
 ===============================================================================
 
-    envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR
-    envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR --formats pdf,svg,png
-    envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR --status
+    envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR
+    envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --formats pdf,svg,png
+    envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --status
 
     # as a SLURM job (settings from HPC_CPU.sh)
-    envs/pipeline/bin/python Step07_Plots.py --phenotype migraine --ancestry EUR --slurm
-    sbatch Step07_Plots_migraine_european.sh
+    envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --slurm
+    sbatch Step07_Plots_parkinson_s_disease_european.sh
 
 Inputs (nothing is recomputed):
     Step02  02_summary_stats/<p>/<a>/qc/<GCST>/<GCST>_GRCh38_QC.tsv.gz, GWAS_study_metadata.tsv
