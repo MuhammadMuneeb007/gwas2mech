@@ -22,8 +22,8 @@ This script only PLANS; it never downloads data itself. It:
   4. writes setup_manifests/download_resources.tsv (one row = one file) and
      Step00_Download_Resources.sh.
 
-SLURM settings: EVERY generated job (download tasks, the controller that
-submits the next array, the final check) uses the #SBATCH header of
+SLURM settings: EVERY generated job (download tasks and the final check) uses
+the #SBATCH header of
 HPC_CPU.sh - account, partition, qos, nodes, ntasks, cpus-per-task, mem, time.
 Only --job-name / --output / --error / --array are set per job. Highest
 priority first:
@@ -31,11 +31,13 @@ priority first:
   >  the #SBATCH header of HPC_CPU.sh (or --template FILE)
   >  built-in defaults (2 CPUs, 16G, 24:00:00)
 
-In the generated script ONE ARRAY TASK DOWNLOADS EXACTLY ONE FILE. No more
-than --max-jobs (default 1000) jobs are ever queued: larger
-plans are split into chained arrays of (max-jobs - 1) tasks; a 1-task
-controller job submits the next array only after the previous one finished,
-and a last job verifies everything (python ... --finalize).
+Jobs: never more than --max-jobs (default 1000) - ONE array of at most
+(max-jobs - 1) tasks plus one final check (python ... --finalize). Up to 999
+files: one task per file. More files: each task downloads several files one
+after another (task k gets rows k, k+999, k+1998, ... so large files are spread
+over different tasks).
+
+Progress at any time (read-only): python ... --status
 
 Per task: resumable download (aria2c, else curl/wget into <file>.part) ->
 exact-size check -> integrity check (gzip -t / tar -t / parquet footer / MD5)
@@ -109,6 +111,7 @@ import csv
 import io
 import re
 import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -206,7 +209,8 @@ parser.add_argument("--output", default=DEFAULT_OUTPUT,
                     help=f"Generated SLURM script (default: {DEFAULT_OUTPUT}). A different name gets its own "
                          "task manifest, so e.g. a long meqtl-only plan can run next to the main one.")
 parser.add_argument("--max-jobs", type=int, default=1000,
-                    help="Most jobs ever queued at once incl. 1 controller (default 1000).")
+                    help="Most jobs queued at once: array tasks + 1 final check (default 1000). "
+                         "With more files than tasks, each task downloads several files.")
 parser.add_argument("--parallel", type=int, default=0,
                     help="Cap on simultaneously RUNNING tasks, array %%N (default 0 = no cap).")
 parser.add_argument("--cpus", type=int, default=None, help="CPUs per download task.")
@@ -223,6 +227,8 @@ parser.add_argument("--force", action="store_true",
                     help="Re-plan every file, even valid ones.")
 parser.add_argument("--finalize", action="store_true",
                     help="Verify the planned files, write the report and Open Targets markers; plan nothing.")
+parser.add_argument("--status", action="store_true",
+                    help="READ-ONLY: how many planned files are downloaded / partial / missing, per group.")
 # eQTL Catalogue selections (same defaults as Step11 / Setup_11B)
 parser.add_argument("--catalogue-study-regex", default="",
                     help="qtl_catalogue: study_label regex (default: Step11's GTEx-labelled + Sun_2018).")
@@ -804,7 +810,7 @@ def slurm_settings() -> dict:
             values[key], source[key] = str(value), "command line"
 
     if args.max_jobs < 2:
-        sys.exit("ERROR: --max-jobs must be at least 2 (one download task + one controller job)")
+        sys.exit("ERROR: --max-jobs must be at least 2 (one download task + the final check)")
     return dict(shebang=shebang, values=values, source=source,
                 chunk=args.max_jobs - 1, max_jobs=args.max_jobs, parallel=args.parallel)
 
@@ -822,13 +828,17 @@ SCRIPT_TEMPLATE = r'''@@SHEBANG@@
 #
 # ONE ARRAY TASK = ONE FILE (row of setup_manifests/download_resources.tsv)
 # Files to download : @@TOTAL@@
-# Tasks per array   : @@CHUNK@@  (never more than @@QUEUED@@ jobs queued; limit @@MAX_JOBS@@)
-# Arrays            : @@N_ARRAYS@@ (each next array is submitted after the previous one ends)
+# Array tasks       : @@NTASKS@@ (+ 1 final check = @@QUEUED@@ jobs; limit @@MAX_JOBS@@)
+# Files per task    : up to @@PER_TASK@@ (task k downloads rows k, k+@@NTASKS@@, k+2x@@NTASKS@@, ...)
 #
 #   sbatch @@SCRIPT_NAME@@             # SLURM cluster
 #   bash   @@SCRIPT_NAME@@ local 4     # no SLURM: 4 files at a time
 #   bash   @@SCRIPT_NAME@@ task 12     # just row 12 (debugging)
 #   bash   @@SCRIPT_NAME@@ finalize    # verify everything + report
+#
+# Check progress / readability (project interpreter):
+#   envs/pipeline/bin/python Step00_Download_Resources.py --finalize@@OUTPUT_ARG@@
+#   envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py
 # =============================================================================
 
 set -uo pipefail
@@ -839,7 +849,7 @@ PLANNER="@@PLANNER@@"
 MANIFEST="@@MANIFEST@@"
 LOGS="@@LOGS@@"
 TOTAL=@@TOTAL@@
-CHUNK=@@CHUNK@@
+NTASKS=@@NTASKS@@
 THROTTLE="@@THROTTLE@@"
 SBATCH_COMMON=(@@SBATCH_COMMON@@)
 
@@ -858,7 +868,12 @@ CURL="$(tool curl)"
 WGET="$(tool wget)"
 PIGZ="$(tool pigz)"
 SAMTOOLS="$(tool samtools)"
-PYTHON="$(tool python)"; [[ -n "$PYTHON" ]] || PYTHON="$(command -v python3 || command -v python || true)"
+# The final check runs with the project's interpreter, envs/pipeline/bin/python.
+PYTHON="$ROOT/envs/pipeline/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+    PYTHON="$(command -v python3 || command -v python || true)"
+    echo "WARNING: $ROOT/envs/pipeline/bin/python not found (run: python Step00_Installation.py); using ${PYTHON:-none}" >&2
+fi
 
 log() { echo "[$(date '+%F %T')] $*"; }
 file_size() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0; }
@@ -1011,25 +1026,17 @@ _run_task() {
 }
 
 # -----------------------------------------------------------------------------
-# chaining: never more than CHUNK + 1 jobs queued
+# final check: task 1 queues ONE job that runs after the whole array has ended
+# (NTASKS array tasks + 1 final job = never more than the job limit)
 # -----------------------------------------------------------------------------
-submit_array() {
-    local offset="$1" n=$(( TOTAL - $1 ))
-    (( n > CHUNK )) && n=$CHUNK
-    sbatch --parsable --array="1-${n}${THROTTLE}" --export=ALL,G2M_MODE=download,G2M_OFFSET="$offset" "$SCRIPT"
-}
-
-submit_followup() {
-    # Task 1 of every array queues ONE small job that starts after the whole
-    # array has ended: the next array's controller, or the final check.
-    local next=$(( $1 + CHUNK )) mode name
-    mkdir "$LOGS/.chain_${SLURM_ARRAY_JOB_ID}" 2>/dev/null || return 0   # once per array
-    if (( next < TOTAL )); then mode=next; name=Step00_Download_next; else mode=finalize; name=Step00_Download_finalize; fi
+submit_finalize() {
+    local name=Step00_Download_finalize
+    mkdir "$LOGS/.final_${SLURM_ARRAY_JOB_ID}" 2>/dev/null || return 0   # once per array
     sbatch --parsable ${SBATCH_COMMON[@]+"${SBATCH_COMMON[@]}"} --dependency="afterany:${SLURM_ARRAY_JOB_ID}" \
         --job-name="$name" \
         --output="$LOGS/${name}_%j.log" --error="$LOGS/${name}_%j.err" \
-        --export=ALL,G2M_MODE="$mode",G2M_OFFSET="$next" --wrap="bash '$SCRIPT'" \
-        && log "queued $mode job (runs after array ${SLURM_ARRAY_JOB_ID})"
+        --export=ALL,G2M_MODE=finalize --wrap="bash '$SCRIPT'" \
+        && log "queued the final check (runs after array ${SLURM_ARRAY_JOB_ID})"
 }
 
 finalize() {
@@ -1049,33 +1056,39 @@ case "${1:-}" in
         finalize; exit $? ;;
 esac
 
-case "${G2M_MODE:-download}" in
-    next)     log "submitting the next array (rows $(( G2M_OFFSET + 1 ))..)"; submit_array "$G2M_OFFSET"; exit $? ;;
-    finalize) finalize; exit $? ;;
-esac
+if [[ "${G2M_MODE:-}" == "finalize" ]]; then finalize; exit $?; fi
 
 if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     echo "Submit with:  sbatch @@SCRIPT_NAME@@      (or without SLURM: bash @@SCRIPT_NAME@@ local 4)"
     exit 2
 fi
 
-OFFSET="${G2M_OFFSET:-0}"
-[[ "$SLURM_ARRAY_TASK_ID" == "1" ]] && submit_followup "$OFFSET"
-run_task $(( OFFSET + SLURM_ARRAY_TASK_ID ))
+[[ "$SLURM_ARRAY_TASK_ID" == "1" ]] && submit_finalize
+
+# Task k downloads rows k, k+NTASKS, k+2*NTASKS, ... (one row when TOTAL <= NTASKS).
+# Interleaving spreads the large files over different tasks.
+failed=0
+for (( row = SLURM_ARRAY_TASK_ID; row <= TOTAL; row += NTASKS )); do
+    run_task "$row" || failed=$(( failed + 1 ))
+done
+if (( failed > 0 )); then
+    log "$failed file(s) of this task failed (re-plan and resubmit to retry them)"
+    exit 1
+fi
 '''
 
 
 def render_script(total: int, settings: dict) -> str:
     values = settings["values"]
-    chunk = min(total, settings["chunk"])
+    ntasks = min(total, settings["chunk"])        # at most max_jobs - 1 tasks (+ 1 final check)
     throttle = f"%{settings['parallel']}" if settings["parallel"] and settings["parallel"] > 0 else ""
-    directives = {**values, "job-name": Path(args.output).stem, "array": f"1-{chunk}{throttle}",
+    directives = {**values, "job-name": Path(args.output).stem, "array": f"1-{ntasks}{throttle}",
                   "output": f"{LOGS}/Step00_Download_%A_%a.log", "error": f"{LOGS}/Step00_Download_%A_%a.err"}
     order = ["job-name", "account", "partition", "qos", "reservation", "constraint", "nodes", "ntasks",
              "cpus-per-task", "mem", "time", "array", "output", "error"]
     lines = [f"#SBATCH --{k}={directives[k]}" for k in order if directives.get(k)]
     lines += [f"#SBATCH --{k}={v}" for k, v in directives.items() if k not in order and v]
-    # The controller / final-check jobs get exactly the same settings as the download tasks.
+    # The final-check job gets exactly the same settings as the download tasks.
     common = [f"--{k}={v}" for k, v in directives.items() if k not in PER_JOB_KEYS and v]
 
     planner_args = []
@@ -1089,10 +1102,10 @@ def render_script(total: int, settings: dict) -> str:
         "@@DIRECTIVES@@": "\n".join(lines),
         "@@DATE@@": time.strftime("%Y-%m-%d %H:%M"),
         "@@TOTAL@@": str(total),
-        "@@CHUNK@@": str(chunk),
-        "@@QUEUED@@": str(chunk + 1),
+        "@@NTASKS@@": str(ntasks),
+        "@@QUEUED@@": str(ntasks + 1),
         "@@MAX_JOBS@@": str(settings["max_jobs"]),
-        "@@N_ARRAYS@@": str(-(-total // chunk)),
+        "@@PER_TASK@@": str(-(-total // ntasks)),
         "@@THROTTLE@@": throttle,
         "@@SBATCH_COMMON@@": " ".join(f'"{c}"' for c in common),
         "@@ROOT@@": str(ROOT),
@@ -1101,6 +1114,7 @@ def render_script(total: int, settings: dict) -> str:
         "@@PLANNER@@": str(Path(__file__).resolve()),
         "@@PLANNER_ARGS@@": " ".join(planner_args),
         "@@MANIFEST@@": str(MANIFEST),
+        "@@OUTPUT_ARG@@": "" if args.output == DEFAULT_OUTPUT else f" --output {args.output}",
     }
     text = SCRIPT_TEMPLATE
     for key, value in replacements.items():
@@ -1198,10 +1212,103 @@ def finalize() -> int:
 
 
 # =============================================================================
+# STATUS (read-only, offline: from the saved plans + the files on disk)
+# =============================================================================
+
+def file_state(row: dict) -> tuple[str, int]:
+    """(DONE | PARTIAL | MISSING, bytes on disk) for one planned file."""
+    dest = ROOT / row["DEST"]
+    post_dir, marker = row.get("POST_DIR") or "-", row.get("POST_MARKER") or "-"
+    expected = int(row["SIZE_BYTES"]) if str(row.get("SIZE_BYTES", "")).isdigit() else None
+    if post_dir != "-" and (ROOT / post_dir / marker).is_file():
+        return "DONE", expected or (dest.stat().st_size if dest.is_file() else 0)
+    if local_file_valid(dest, expected):
+        return "DONE", dest.stat().st_size
+    partial = [p for p in (dest, Path(str(dest) + ".part")) if p.is_file() and p.stat().st_size > 0]
+    if partial or Path(str(dest) + ".aria2").exists():
+        return "PARTIAL", max((p.stat().st_size for p in partial), default=0)
+    return "MISSING", 0
+
+
+def slurm_jobs() -> str:
+    if not shutil.which("squeue"):
+        return ""
+    try:
+        out = subprocess.run(["squeue", "--me", "-h", "-o", "%j|%T"], capture_output=True, text=True,
+                             timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    counts: dict = {}
+    for line in out.splitlines():
+        name, _, state = line.partition("|")
+        if name.startswith("Step00_Download"):
+            counts[state] = counts.get(state, 0) + 1
+    return ", ".join(f"{state.lower()} {n}" for state, n in sorted(counts.items())) or "none in the queue"
+
+
+def status() -> int:
+    plans = sorted(MANIFESTS.glob("download_resources*_plan.tsv"))
+    if not plans:
+        print("No plan yet. Run: envs/pipeline/bin/python Step00_Download_Resources.py")
+        return 1
+    rows: dict = {}
+    for plan in plans:
+        with open(plan, encoding="utf-8") as handle:
+            for row in csv.DictReader(handle, delimiter="\t"):
+                rows[row["DEST"]] = row
+
+    banner("GWAS2m STEP 00 - DOWNLOAD STATUS (read-only)")
+    print(f"Plans          : {', '.join(p.name for p in plans)}")
+    jobs = slurm_jobs()
+    if jobs:
+        print(f"SLURM jobs     : {jobs}")
+
+    groups: dict = {}
+    pending = []
+    for row in rows.values():
+        state, size = file_state(row)
+        group = row["GROUP"].split("/", 1)[0]
+        g = groups.setdefault(group, {"files": 0, "DONE": 0, "PARTIAL": 0, "MISSING": 0, "bytes": 0, "planned": 0})
+        g["files"] += 1
+        g[state] += 1
+        g["bytes"] += size
+        g["planned"] += int(row["SIZE_BYTES"]) if str(row.get("SIZE_BYTES", "")).isdigit() else 0
+        if state != "DONE":
+            pending.append((state, size, row))
+
+    print(f"\n{'GROUP':<22}{'FILES':>7}{'DONE':>7}{'PARTIAL':>9}{'MISSING':>9}{'DOWNLOADED':>14}{'PLANNED':>12}{'%':>7}")
+    total = {"files": 0, "DONE": 0, "PARTIAL": 0, "MISSING": 0, "bytes": 0, "planned": 0}
+    for group, g in groups.items():
+        for key in total:
+            total[key] += g[key]
+        share = f"{100 * g['DONE'] / g['files']:.0f}%" if g["files"] else "-"
+        print(f"{group:<22}{g['files']:>7}{g['DONE']:>7}{g['PARTIAL']:>9}{g['MISSING']:>9}"
+              f"{human(g['bytes']) if g['bytes'] else '0 B':>14}{human(g['planned']):>12}{share:>7}")
+    print("-" * 87)
+    print(f"{'TOTAL':<22}{total['files']:>7}{total['DONE']:>7}{total['PARTIAL']:>9}{total['MISSING']:>9}"
+          f"{human(total['bytes']) if total['bytes'] else '0 B':>14}{human(total['planned']):>12}"
+          f"{100 * total['DONE'] / max(total['files'], 1):>6.0f}%")
+
+    if pending:
+        print(f"\nNot finished ({len(pending)}; first 20):")
+        for state, size, row in sorted(pending, key=lambda x: (x[0] != "PARTIAL", x[2]["DEST"]))[:20]:
+            print(f"  {state:<8}{human(size) if size else '':>10}  {row['DEST']}")
+        print("\nPartial files resume automatically. To (re)download what is missing:")
+        print("  envs/pipeline/bin/python Step00_Download_Resources.py [same options as before]")
+        print("  sbatch Step00_Download_Resources.sh      (or the --output script you used)")
+    else:
+        print("\nEvery planned file is downloaded.")
+        print("Readability check: envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py")
+    return 0
+
+
+# =============================================================================
 # MAIN (plan)
 # =============================================================================
 
 def main() -> int:
+    if args.status:
+        return status()
     if args.finalize:
         return finalize()
 
@@ -1303,15 +1410,19 @@ def main() -> int:
         handle.write(render_script(len(pending), settings))
     script.chmod(0o755)
 
-    chunk = min(len(pending), settings["chunk"])
+    ntasks = min(len(pending), settings["chunk"])
+    per_task = -(-len(pending) // ntasks)
     banner("SLURM SCRIPT READY")
     print(f"Script         : {script}")
     print(f"Task manifest  : {MANIFEST}  ({len(pending)} files)")
     print(f"Download size  : {human(total_bytes)}  (+ ~{human(extract_bytes)} after extraction)")
     print(f"Free disk      : {human(free)}" + ("   [WARN] not enough for everything planned"
                                                 if total_bytes + extract_bytes > free else ""))
-    print(f"Arrays         : {-(-len(pending) // chunk)} x up to {chunk} tasks; never more than {chunk + 1} "
-          f"jobs queued (limit {settings['max_jobs']})")
+    print(f"Jobs           : 1 array of {ntasks} tasks + 1 final check = {ntasks + 1} jobs "
+          f"(limit {settings['max_jobs']})")
+    print(f"Files per task : " + ("1" if per_task == 1 else
+                                  f"up to {per_task} ({len(pending)} files > {ntasks} tasks, so each task "
+                                  f"downloads several files one after another)"))
     print("\nSBATCH per download task:")
     for key in ("partition", "qos", "account", "cpus-per-task", "mem", "time"):
         if settings["values"].get(key):

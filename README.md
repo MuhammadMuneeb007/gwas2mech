@@ -37,8 +37,14 @@ Every later command uses the project's own interpreter, **`envs/pipeline/bin/pyt
 ## 2. Download the shared resources
 
 `Step00_Download_Resources.py` plans the files that are still missing and writes a SLURM
-script in which **one array task downloads one file** (never more than 1,000 jobs queued).
-Every job uses the `#SBATCH` settings of `HPC_CPU.sh`.
+script as **one SLURM array of at most 999 tasks + 1 final check = never more than 1,000 jobs**.
+Up to 999 files, each task downloads one file; with more files, each task downloads several
+files one after another. Every job uses the `#SBATCH` settings of `HPC_CPU.sh`.
+
+```bash
+# how many files are downloaded / partial / missing, per group (read-only, any time)
+envs/pipeline/bin/python Step00_Download_Resources.py --status
+```
 
 ### Everything at once
 
@@ -163,7 +169,8 @@ envs/pipeline/bin/python Step00_Download_Resources.py --help
 #   --skip-groups G ...        everything except these groups
 #   --no-url-check             plan without checking URLs / sizes (faster)
 #   --time / --mem / --cpus    override HPC_CPU.sh for this plan
-#   --max-jobs N --parallel N  queue limit / concurrently running tasks
+#   --max-jobs N --parallel N  jobs limit (tasks + final check) / concurrently running tasks
+#   --status                   progress of every plan: done / partial / missing per group
 bash Step00_Download_Resources.sh local 4    # without SLURM: 4 files at a time
 ```
 
@@ -174,7 +181,10 @@ REVEL cannot be downloaded automatically (its servers block scripted downloads).
 ## 3. Check the downloads
 
 ```bash
-# per plan: how many files are downloaded + verified (also run automatically by the last job)
+# quick progress of all plans (read-only)
+envs/pipeline/bin/python Step00_Download_Resources.py --status
+
+# per plan: verify every file, write the report (also run automatically by the last job)
 envs/pipeline/bin/python Step00_Download_Resources.py --finalize
 envs/pipeline/bin/python Step00_Download_Resources.py --finalize --output Step00_Download_meQTL.sh
 
@@ -183,6 +193,35 @@ envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py
 envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py --group qtl_catalogue
 envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py --full     # read every file to the end (submit as a job)
 ```
+
+## 4. Find, download and QC the GWAS for a phenotype
+
+`Step02_Plan_QC_GWAS.py` searches the GWAS Catalog (full summary statistics, strict ancestry
+match, harmonised file, ranked by sample size) and writes one SLURM array in which **each task
+downloads one GWAS and runs GWASLab QC on it**.
+
+```bash
+# plan + submit
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR
+sbatch Step02_GWAS_migraine_european.sh
+
+# what is downloaded / pending, and QC done / failed / pending, per study
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --status
+
+# publication table: authors, journal, year, PMID, trait (EFO), population and countries,
+# total N, cases, controls, effective N, platform, variants raw / after QC, file columns,
+# genome-wide significant hits, minimum P, lambda GC, available fields
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --stats
+
+# run one task (download + QC) on this machine
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype migraine --ancestry EUR --index 1
+```
+
+Options: `--alias "migraine disorder"` (extra search term), `--max-studies 5`, `--refresh`
+(re-download GWAS Catalog metadata), and `--partition --qos --account --cpus --mem --time
+--parallel` to override `HPC_CPU.sh`. Outputs go to `01_gwas_catalog/<phenotype>/<ancestry>/`
+(manifests, `study_selection.tsv`, `GWAS_publication_stats.tsv`) and
+`02_summary_stats/<phenotype>/<ancestry>/{raw,qc}/`.
 
 ## Resource groups
 
