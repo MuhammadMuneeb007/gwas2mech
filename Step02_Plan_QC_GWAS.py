@@ -1415,6 +1415,18 @@ def pmid_to_doi(session, pmids):
     return {x: cache.get(x, "") for x in wanted}
 
 
+def read_catalog_studies(path):
+    """GWAS Catalog studies table. Newer releases name the PubMed column
+    "PUBMED ID" (older ones "PUBMEDID"); both are read as PUBMEDID."""
+
+    studies = pd.read_csv(path, sep="\t", dtype=str, low_memory=False)
+
+    if "PUBMEDID" not in studies.columns and "PUBMED ID" in studies.columns:
+        studies = studies.rename(columns={"PUBMED ID": "PUBMEDID"})
+
+    return studies
+
+
 def parse_cases_controls(text):
 
     text = str(text or "")
@@ -2058,11 +2070,8 @@ def _plan(args, state):
         args.refresh
     )
 
-    studies = pd.read_csv(
-        studies_file,
-        sep="\t",
-        dtype=str,
-        low_memory=False
+    studies = read_catalog_studies(
+        studies_file
     )
 
     ancestry = pd.read_csv(
@@ -5550,7 +5559,7 @@ def qc_file_stats(path, cache):
     key = str(path)
     signature = [path.stat().st_size, int(path.stat().st_mtime)]
 
-    if key in cache and cache[key].get("signature") == signature:
+    if key in cache and cache[key].get("signature") == signature and "chromosomes" in cache[key]:
         return cache[key]
 
     from scipy.stats import chi2
@@ -5564,6 +5573,7 @@ def qc_file_stats(path, cache):
         "signature": signature,
         "lambda_gc": round(float(np.median(chi2.isf(p, 1)) / chi2.ppf(0.5, 1)), 4) if len(p) else None,
         "n_chromosomes": int(data["CHR"].nunique()) if "CHR" in data else None,
+        "chromosomes": sorted(str(x) for x in data["CHR"].dropna().unique()) if "CHR" in data else [],
     }
 
     if "N" in data:
@@ -5588,7 +5598,7 @@ def stats_mode(args):
     cache_dir = PROJECT_ROOT / "reference_metadata" / "gwas_catalog"
     download_metadata(session, STUDIES_URL, cache_dir / "gwas_catalog_studies.tsv", args.refresh)
     download_metadata(session, ANCESTRY_URL, cache_dir / "gwas_catalog_ancestry.tsv", args.refresh)
-    studies = pd.read_csv(cache_dir / "gwas_catalog_studies.tsv", sep="\t", dtype=str, low_memory=False)
+    studies = read_catalog_studies(cache_dir / "gwas_catalog_studies.tsv")
     ancestry = pd.read_csv(cache_dir / "gwas_catalog_ancestry.tsv", sep="\t", dtype=str, low_memory=False)
 
     try:
@@ -5598,6 +5608,10 @@ def stats_mode(args):
 
     banner(f"STEP 02 PUBLICATION STATISTICS - {P['phenotype']} / {P['label']} ({P['code']})")
     print("Variant counts and lambda GC are computed once per file and cached.")
+
+    # PMID -> DOI for every study (manifests from older planner runs have none).
+    in_manifest = studies[studies["STUDY ACCESSION"].astype(str).isin(manifest["STUDY_ACCESSION"].str.strip())]
+    dois = pmid_to_doi(session, list(in_manifest.get("PUBMEDID", [])) + list(manifest.get("PUBMEDID", [])))
 
     rows = []
 
@@ -5641,7 +5655,8 @@ def stats_mode(args):
 
         # Binary / continuous from the planner (API + sumstats metadata).
         r.update(normalise_trait(manifest_trait(m), accession))
-        r["DOI"] = m.get("DOI", "")
+        r["PUBMEDID"] = clean_pmid(r.get("PUBMEDID") or m.get("PUBMEDID", ""))
+        r["DOI"] = m.get("DOI", "") or dois.get(r["PUBMEDID"], "")
 
         s = study_state(P, m)
         r.update({"DOWNLOAD_STATUS": s["download"], "QC_STATE": s["qc"], "FILE_NAME": m.get("FILE_NAME", ""),
@@ -5669,10 +5684,17 @@ def stats_mode(args):
             })
             q = qc_file_stats(out["full"], cache)
             r.update({"LAMBDA_GC": q.get("lambda_gc", ""), "N_CHROMOSOMES": q.get("n_chromosomes", ""),
+                      "CHROMOSOMES": ",".join(q.get("chromosomes") or []),
                       "N_MEDIAN_IN_FILE": q.get("n_median", ""),
                       "N_VARIANTS_MAF_BELOW_1PCT": q.get("n_maf_below_1pct", "")})
 
+        r["_HAS_SUMMARY"] = bool(summary)
+        r["_NEW_QC"] = "N_SOURCE" in summary
         rows.append(r)
+
+    add_study_checks(rows)
+
+    for r in rows:
         print_study(r)
 
     try:
@@ -5680,7 +5702,7 @@ def stats_mode(args):
     except OSError:
         pass
 
-    table = pd.DataFrame(rows)
+    table = pd.DataFrame(rows).drop(columns=["_HAS_SUMMARY", "_NEW_QC", "_CHECKS"], errors="ignore")
     table.to_csv(P["stats_table"], sep="\t", index=False)
 
     banner("SUMMARY TABLE")
@@ -5693,6 +5715,111 @@ def stats_mode(args):
             display[column] = pd.to_numeric(display[column], errors="coerce").round().astype("Int64")
     print(display.astype(object).where(display.notna(), "").to_string(index=False))
     print(f"\nFull table (all columns): {P['stats_table']}")
+
+    banner("CHECKS (what to look at before Step05 / Step06)")
+    flagged = [r for r in rows if r["_CHECKS"]]
+    for r in flagged:
+        print(f"{r['ID']:>3}. {r['STUDY_ACCESSION']:<14}{str(r.get('DISEASE_TRAIT', ''))[:60]}")
+        for code, message in r["_CHECKS"]:
+            print(f"       {code:<20}{message}")
+    if not flagged:
+        print("No study flagged.")
+    print()
+    print("Codes are in the FLAGS column of the full table.")
+    if any(code == "OLD_QC" for r in rows for code, _ in r["_CHECKS"]):
+        print(f"OLD_QC: delete {P['qc']}/<GCST>/ for those studies, then re-run the download + QC "
+              "(sbatch the Step02 download script, or --index N) - finished QC is otherwise skipped.")
+
+
+# Trait wording of PROXY phenotypes (family history, medication use, ...).
+PROXY_TRAIT_WORDS = re.compile(
+    r"illness(es)? of (mother|father|siblings?|parents?)|family history|\bproxy\b|by[- ]proxy|"
+    r"takes? medication|medication for|treatment for",
+    flags=re.I,
+)
+
+
+def add_study_checks(rows):
+    """Flags printed by --stats: r["_CHECKS"] = [(code, message)], r["FLAGS"] = codes."""
+
+    def number(value):
+        try:
+            value = float(value)
+            return None if np.isnan(value) else value
+        except (TypeError, ValueError):
+            return None
+
+    def fingerprint(r):
+        return tuple(str(r.get(k, "")) for k in ("N_VARIANTS_QC", "N_GENOME_WIDE_SIGNIFICANT", "MIN_P", "LAMBDA_GC"))
+
+    # Studies whose QC results are identical (probably the same file).
+    fingerprints = {}
+    for r in rows:
+        if r.get("N_VARIANTS_QC") not in (None, ""):
+            fingerprints.setdefault(fingerprint(r), []).append(r["STUDY_ACCESSION"])
+
+    for r in rows:
+
+        checks = []
+        accession = r["STUDY_ACCESSION"]
+        qc_state = str(r.get("QC_STATE", ""))
+        download = r.get("DOWNLOAD_STATUS", "")
+
+        if download in ("PARTIAL", "PENDING"):
+            checks.append(("DOWNLOAD_INCOMPLETE",
+                           f"download {download.lower()}"
+                           + (" - the QC results come from an EARLIER file" if r["_HAS_SUMMARY"] else "")))
+        if qc_state == "FAILED":
+            checks.append(("QC_FAILED", f"QC failed: qc/{accession}/{accession}_FAILED.txt"))
+        elif qc_state == "PENDING" and download == "DOWNLOADED":
+            checks.append(("QC_PENDING", "downloaded but not QC'd yet"))
+
+        if r["_HAS_SUMMARY"] and not r["_NEW_QC"]:
+            checks.append(("OLD_QC", "QC made by an older version (no N_SOURCE / Z): delete its QC folder and re-run"))
+        if r.get("QC_STATUS") == "WARNING":
+            checks.append(("NO_EFFECT_SIZE", "no BETA+SE and no Z: clumping only, cannot be fine-mapped"))
+
+        lam = number(r.get("LAMBDA_GC"))
+        if lam is not None and lam < 0.9:
+            checks.append(("LAMBDA_LOW", f"lambda GC {lam} < 0.9: deflated (rare variants, extreme case/control "
+                                         "imbalance, exome data or over-correction)"))
+        elif lam is not None and lam > 1.2:
+            checks.append(("LAMBDA_HIGH", f"lambda GC {lam} > 1.2: inflation or stratification (check the LDSC intercept)"))
+
+        chromosomes = [c for c in str(r.get("CHROMOSOMES", "")).split(",") if c]
+        autosomes = [c for c in chromosomes if c.isdigit() and 1 <= int(c) <= 22]
+        if chromosomes and not autosomes:
+            checks.append(("NO_AUTOSOMES", f"only chromosome(s) {','.join(chromosomes)} (23 = X): the Step04 LD "
+                                           "panels are chr1-22, so Step05/06 find nothing"))
+        elif chromosomes and len(autosomes) < 22:
+            checks.append(("FEW_CHROMOSOMES", f"only {len(autosomes)} of 22 autosomes in the QC file"))
+
+        if number(r.get("N_GENOME_WIDE_SIGNIFICANT")) == 0:
+            checks.append(("NO_SIGNIFICANT", "no variant with P < 5e-8: no loci for Step05 / Step06"))
+
+        n_eff = number(r.get("N_EFF"))
+        if r.get("PHENOTYPE_TYPE") == "Binary" and n_eff is not None and n_eff < 2000:
+            checks.append(("LOW_POWER", f"N_eff {int(n_eff):,} ({r.get('N_CASES')} cases): very low power"))
+
+        if PROXY_TRAIT_WORDS.search(str(r.get("DISEASE_TRAIT", ""))) or \
+                "PROXY" in str(r.get("CLASSIFICATION_EVIDENCE", "")):
+            checks.append(("PROXY_PHENOTYPE", "proxy phenotype (family history / medication / proxy cases), "
+                                              "not only diagnosed cases"))
+
+        if r.get("PHENOTYPE_TYPE") == "Unknown":
+            checks.append(("TYPE_UNKNOWN", "Binary/Continuous unknown: Step06 skips it until reviewed"))
+        elif str(r.get("NEEDS_REVIEW")).lower() == "true":
+            checks.append(("NEEDS_REVIEW", "phenotype type flagged for manual review (phenotype_type_review.tsv)"))
+
+        twins = [x for x in fingerprints.get(fingerprint(r), []) if x != accession]
+        if twins:
+            checks.append(("DUPLICATE_RESULTS", f"identical QC results to {', '.join(twins)} (same file?)"))
+
+        if not r.get("PUBMEDID"):
+            checks.append(("NO_PMID", "no PubMed ID in the GWAS Catalog"))
+
+        r["_CHECKS"] = checks
+        r["FLAGS"] = ",".join(code for code, _ in checks)
 
 
 def print_study(r):
@@ -5735,6 +5862,8 @@ def print_study(r):
         print(f"   Fine-mapping : N from {r.get('N_SOURCE') or '-'} | variants without Z {fmt(r.get('N_MISSING_Z'))}")
     else:
         print(f"   QC           : {r.get('QC_STATE', '')}")
+    for code, message in r.get("_CHECKS") or []:
+        print(f"   ! {code:<18}: {message}")
 
 
 # =============================================================================
