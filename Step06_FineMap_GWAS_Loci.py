@@ -19,13 +19,25 @@ GWAS2Mech STEP 06 - Regional extraction + ancestry-matched LD + SuSiE-RSS
     # Step05 clumping has to be done
     envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
 
+    # ---- 1000 Genomes 30x LD panel (Step04 + Step05 with --reference-panel 1000G30x) ----
+    # every command takes --reference-panel; results, script and logs are its own:
+    # 06_finemapping/<phenotype>/<ancestry>_1000G30x/
+    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+    sbatch Step06_FineMap_GWAS_parkinson_s_disease_european_1000G30x.sh
+    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --plots
+    envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+    # (a custom Step04 panel: --reference-panel <NAME>)
+
 Inputs
     Step02  02_summary_stats/<p>/<a>/qc/<GCST>/<GCST>_GRCh38_QC.tsv.gz
             (CHR POS SNP EA NEA BETA SE P EAF MAF N INFO Z)
             01_gwas_catalog/<p>/<a>/GWAS_study_metadata.tsv
             (PHENOTYPE_TYPE N_CASES N_CONTROLS N_TOTAL N_EFF NEEDS_REVIEW ...)
-    Step04  resources/1000G/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam
-    Step05  05_ld_clumping/<p>/<a>/<GCST>/lead_variants.tsv
+    Step04  resources/1000G/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam   (--reference-panel 1000G)
+            resources/LD_panels/<PANEL>/<ANC>/chr<N>_<ANC>_GRCh38.*      (any other panel)
+    Step05  05_ld_clumping/<p>/<a>/<GCST>/lead_variants.tsv   (other panels: <a>_<PANEL>/)
 
 Sample size (N) given to SuSiE-RSS - from Step02, never re-guessed here:
     Binary      N_EFF = 4*cases*controls/(cases+controls)   (default; --susie-n total = N_TOTAL)
@@ -48,7 +60,7 @@ Per study / locus
      with the reasons.
 
 Outputs
-    06_finemapping/<p>/<a>/
+    06_finemapping/<p>/<a>/      (1000G; other panels: <a>_<PANEL>/)
         finemapping_manifest.tsv, finemapping_excluded_studies.tsv, finemapping_stats.tsv
         plots/<GCST>/<L>_regional.png, <L>_ld.png, <GCST>_pip_genome.png   (--plots)
         <GCST>/loci_definition.tsv, regional_gwas/<L>.tsv.gz,
@@ -103,6 +115,7 @@ DEFAULT_LD_RIDGE = 1e-4
 DEFAULT_CHUNK_SIZE = 500_000
 DEFAULT_ESTIMATE_S_MAX = DEFAULT_MAX_LD_VARIANTS
 DEFAULT_MAX_ITER = 500
+DEFAULT_PANEL = "1000G"
 
 # Bumped whenever the R helper changes, so finished loci are re-run.
 R_HELPER_VERSION = "2"
@@ -353,6 +366,9 @@ def arguments(argv=None):
     modes.add_argument("--plots", action="store_true",
                        help="Regional association + PIP + genes, LD heatmaps, genome-wide PIP (plots/).")
 
+    parser.add_argument("--reference-panel", default=DEFAULT_PANEL,
+                        help="LD reference panel built by Step04 (and used by Step05): 1000G (default), 1000G30x "
+                             "or a custom name. Results of other panels go to 06_finemapping/<p>/<a>_<PANEL>/.")
     parser.add_argument("--susie-n", choices=["effective", "total"], default="effective",
                         help="N for BINARY studies: N_EFF (default) or N_TOTAL. Continuous studies use N_TOTAL.")
     parser.add_argument("--include-unreviewed", action="store_true",
@@ -407,6 +423,8 @@ def arguments(argv=None):
         parser.error("Invalid SuSiE L settings")
     if args.index is not None and args.index < 1:
         parser.error("--index must be >= 1")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.reference_panel):
+        parser.error(f"--reference-panel {args.reference_panel!r}: use letters, digits, '_', '-' or '.'")
     return args
 
 
@@ -467,28 +485,43 @@ def choose_sample_size(meta: dict | None, args) -> tuple[int | None, str, str]:
 # =============================================================================
 
 
-def reference_prefix(root: Path, ancestry_code: str, chromosome: int) -> Path:
-    return root / "resources" / "1000G" / ancestry_code / f"chr{chromosome}_{ancestry_code}_GRCh38"
+def panel_root(root: Path, panel: str = DEFAULT_PANEL) -> Path:
+    """Step04 panels: resources/1000G (default) or resources/LD_panels/<panel>."""
+    return root / "resources" / "1000G" if panel == DEFAULT_PANEL else root / "resources" / "LD_panels" / panel
 
 
-def verify_reference(root: Path, ancestry_code: str) -> None:
+def reference_prefix(root: Path, ancestry_code: str, chromosome: int, panel: str = DEFAULT_PANEL) -> Path:
+    return panel_root(root, panel) / ancestry_code / f"chr{chromosome}_{ancestry_code}_GRCh38"
+
+
+def results_slug(ancestry_slug: str, panel: str = DEFAULT_PANEL) -> str:
+    """Results folder per reference panel: <ancestry> (1000G) or <ancestry>_<panel>."""
+    return ancestry_slug if panel == DEFAULT_PANEL else f"{ancestry_slug}_{panel}"
+
+
+def panel_option(panel: str) -> str:
+    return "" if panel == DEFAULT_PANEL else f" --reference-panel {panel}"
+
+
+def verify_reference(root: Path, ancestry_code: str, panel: str = DEFAULT_PANEL) -> None:
     missing = []
     for chrom in range(1, 23):
-        prefix = reference_prefix(root, ancestry_code, chrom)
+        prefix = reference_prefix(root, ancestry_code, chrom, panel)
         for ext in (".pgen", ".pvar", ".psam"):
             path = Path(str(prefix) + ext)
             if not path.exists() or path.stat().st_size == 0:
                 missing.append(str(path))
     if missing:
         raise FileNotFoundError(
-            f"Ancestry reference {ancestry_code} is incomplete. Missing {len(missing)} files.\n"
+            f"{panel} {ancestry_code} reference is incomplete. Missing {len(missing)} files.\n"
             + "\n".join(missing[:20])
             + f"\n\nBuild it with:\n  envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry {ancestry_code}"
+            + panel_option(panel)
         )
 
 
-def count_reference_samples(root: Path, ancestry_code: str) -> int:
-    psam = Path(str(reference_prefix(root, ancestry_code, 1)) + ".psam")
+def count_reference_samples(root: Path, ancestry_code: str, panel: str = DEFAULT_PANEL) -> int:
+    psam = Path(str(reference_prefix(root, ancestry_code, 1, panel)) + ".psam")
     count = 0
     with psam.open("r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
@@ -585,6 +618,7 @@ def build_finemap_row(
             "GWAS_N": int(gwas_n),
             "GWAS_N_SOURCE": n_source,
             "REFERENCE_N": reference_n,
+            "REFERENCE_PANEL": args.reference_panel,
             "LOCUS_WINDOW_KB": args.locus_window_kb,
             "REFERENCE_MAF": args.reference_maf,
             "REFERENCE_GENO": args.reference_geno,
@@ -620,20 +654,21 @@ def planner_mode(args) -> None:
 
     pipeline_python, plink2, rscript = resolve_finemap_tools(root)
 
-    verify_reference(root, ancestry_code)
-    reference_n = count_reference_samples(root, ancestry_code)
+    verify_reference(root, ancestry_code, args.reference_panel)
+    reference_n = count_reference_samples(root, ancestry_code, args.reference_panel)
 
-    clump_root = root / "05_ld_clumping" / phenotype_slug / ancestry_slug
+    clump_root = root / "05_ld_clumping" / phenotype_slug / results_slug(ancestry_slug, args.reference_panel)
     clump_manifest_file = clump_root / "clumping_manifest.tsv"
     if not clump_manifest_file.exists():
         raise FileNotFoundError(
-            f"Step05 manifest not found:\n{clump_manifest_file}\nRun Step05 first."
+            f"Step05 manifest not found:\n{clump_manifest_file}\nRun Step05 first"
+            f"{' with' + panel_option(args.reference_panel) if args.reference_panel != DEFAULT_PANEL else ''}."
         )
     clump_manifest = pd.read_csv(clump_manifest_file, sep="\t", dtype=str)
     study_meta = read_study_metadata(study_metadata_file(root, phenotype_slug, ancestry_slug))
 
-    output_root = root / "06_finemapping" / phenotype_slug / ancestry_slug
-    log_root = root / "logs" / "step06_finemapping" / phenotype_slug / ancestry_slug
+    output_root = root / "06_finemapping" / phenotype_slug / results_slug(ancestry_slug, args.reference_panel)
+    log_root = root / "logs" / "step06_finemapping" / phenotype_slug / results_slug(ancestry_slug, args.reference_panel)
     output_root.mkdir(parents=True, exist_ok=True)
     log_root.mkdir(parents=True, exist_ok=True)
 
@@ -644,7 +679,7 @@ def planner_mode(args) -> None:
     banner("STEP 06 - FINEMAPPING PLANNER")
     print(f"Phenotype    : {phenotype}")
     print(f"Ancestry     : {ancestry_label} ({ancestry_code})")
-    print(f"Reference N  : {reference_n}  (1000G {ancestry_code} LD panel)")
+    print(f"Reference N  : {reference_n}  ({args.reference_panel} {ancestry_code} LD panel)")
     print(f"Binary N     : {'N_EFF' if args.susie_n == 'effective' else 'N_TOTAL'} (--susie-n {args.susie_n})")
     print(f"Step05 rows  : {len(clump_manifest)}")
     print()
@@ -706,7 +741,7 @@ def planner_mode(args) -> None:
     manifest_file = (output_root / "finemapping_manifest.tsv").resolve()
     manifest.to_csv(manifest_file, sep="\t", index=False)
 
-    bash_file = root / f"Step06_FineMap_GWAS_{phenotype_slug}_{ancestry_slug}.sh"
+    bash_file = root / f"Step06_FineMap_GWAS_{phenotype_slug}_{results_slug(ancestry_slug, args.reference_panel)}.sh"
     job_name = f"FM_{phenotype_slug}_{ancestry_code.lower()}"[:100]
     script_path = Path(__file__).resolve()
 
@@ -735,7 +770,8 @@ printf '%s\\n' "STEP 06 - SUSIE-RSS FINEMAPPING | job $SLURM_JOB_ID task $SLURM_
     bash_file.write_text(bash_text, encoding="utf-8", newline="\n")
     bash_file.chmod(0o755)
 
-    base = f"envs/pipeline/bin/python {script_path.name} --phenotype {shlex.quote(phenotype)} --ancestry {ancestry_code}"
+    base = (f"envs/pipeline/bin/python {script_path.name} --phenotype {shlex.quote(phenotype)} --ancestry {ancestry_code}"
+            f"{panel_option(args.reference_panel)}")
     banner("PLANNING COMPLETE")
     print(f"Studies ready       : {len(manifest)}")
     print(f"Studies excluded    : {len(excluded)}")
@@ -1012,6 +1048,7 @@ def create_regional_pvar(
     start: int,
     end: int,
     locus_dir: Path,
+    panel: str = DEFAULT_PANEL,
 ) -> Path:
     prefix = locus_dir / "reference_region"
     pvar = Path(str(prefix) + ".pvar")
@@ -1020,7 +1057,7 @@ def create_regional_pvar(
     run_command(
         [
             plink2,
-            "--pfile", reference_prefix(root, ancestry_code, chromosome),
+            "--pfile", reference_prefix(root, ancestry_code, chromosome, panel),
             "--chr", chromosome,
             "--from-bp", start,
             "--to-bp", end,
@@ -1238,6 +1275,7 @@ def calculate_ld(
     threads: int,
     max_variants: int,
     lead_positions: list[int] | None = None,
+    panel: str = DEFAULT_PANEL,
 ) -> tuple[Path, Path, int]:
     """Build a validated LD matrix with post-reference-QC size protection."""
     lead_positions = lead_positions or []
@@ -1257,7 +1295,7 @@ def calculate_ld(
     run_command(
         [
             plink2,
-            "--pfile", reference_prefix(root, ancestry_code, chromosome),
+            "--pfile", reference_prefix(root, ancestry_code, chromosome, panel),
             "--extract", all_ids_file,
             "--maf", maf,
             "--geno", geno,
@@ -1363,7 +1401,7 @@ def calculate_ld(
     run_command(
         [
             plink2,
-            "--pfile", reference_prefix(root, ancestry_code, chromosome),
+            "--pfile", reference_prefix(root, ancestry_code, chromosome, panel),
             "--extract", ids_file,
             "--maf", maf,
             "--geno", geno,
@@ -1796,6 +1834,9 @@ def finemap_one_study(row, task_id: int) -> None:
     phenotype_type = str(row.get("PHENOTYPE_TYPE", ""))
     plink2 = Path(row["PLINK2"]).resolve()
     rscript = Path(row["R_SCRIPT"]).resolve()
+    reference_panel = str(row.get("REFERENCE_PANEL") or DEFAULT_PANEL)
+    if reference_panel.lower() == "nan":
+        reference_panel = DEFAULT_PANEL
     threads = int(os.environ.get("SLURM_CPUS_PER_TASK", DEFAULT_CPUS))
     # Optional FORCE column: re-run even when outputs exist.
     force = str(row.get("FORCE", "False")).strip().lower() in {"true", "1", "yes", "y"}
@@ -1818,7 +1859,7 @@ def finemap_one_study(row, task_id: int) -> None:
     print(f"Ancestry       : {ancestry_label} ({ancestry_code})")
     print(f"Phenotype type : {phenotype_type}")
     print(f"GWAS N         : {gwas_n} [{gwas_n_source}]")
-    print(f"Reference N    : {reference_n}")
+    print(f"Reference N    : {reference_n}  ({reference_panel} LD panel)")
     print(f"QC GWAS        : {qc_file}")
     print(f"Lead variants  : {lead_file}")
     print(f"Output         : {output_dir}")
@@ -1855,6 +1896,7 @@ def finemap_one_study(row, task_id: int) -> None:
                 "GWAS_N": gwas_n,
                 "GWAS_N_SOURCE": gwas_n_source,
                 "REFERENCE_N": reference_n,
+                "REFERENCE_PANEL": reference_panel,
                 "STATUS": "NO_SIGNIFICANT_LOCI",
                 "N_LOCI": 0,
                 "N_LOCI_SUCCESS": 0,
@@ -1917,6 +1959,8 @@ def finemap_one_study(row, task_id: int) -> None:
             "MAX_ITER": max_iter,
             "REFINE": refine,
             "R_HELPER_VERSION": R_HELPER_VERSION,
+            # (absent for the default panel, so finished 1000G loci stay valid)
+            **({"REFERENCE_PANEL": reference_panel} if reference_panel != DEFAULT_PANEL else {}),
         }
         completed_loci = {}
         for _, locus in loci.iterrows():
@@ -1976,7 +2020,7 @@ def finemap_one_study(row, task_id: int) -> None:
                     raise RuntimeError(f"Only {len(regional)} regional GWAS variants; minimum is {min_variants}")
 
                 pvar = create_regional_pvar(
-                    plink2, root, ancestry_code, chromosome, start, end, locus_dir
+                    plink2, root, ancestry_code, chromosome, start, end, locus_dir, reference_panel
                 )
                 reference = read_pvar(pvar)
                 matched = match_gwas_to_reference(regional, reference)
@@ -2002,6 +2046,7 @@ def finemap_one_study(row, task_id: int) -> None:
                     threads=threads,
                     max_variants=max_ld_variants,
                     lead_positions=lead_positions,
+                    panel=reference_panel,
                 )
                 if p < min_variants:
                     raise RuntimeError(f"Only {p} variants remain in LD matrix; minimum is {min_variants}")
@@ -2102,6 +2147,7 @@ def finemap_one_study(row, task_id: int) -> None:
             "GWAS_N": gwas_n,
             "GWAS_N_SOURCE": gwas_n_source,
             "REFERENCE_N": reference_n,
+            "REFERENCE_PANEL": reference_panel,
             "N_LOCI": int(len(loci)),
             "N_LOCI_SUCCESS": int(len(summary_frames)),
             "N_LOCI_FAILED": int(len(failures)),
@@ -2179,18 +2225,18 @@ def direct_index_mode(args) -> None:
     accession = study_for_index(p_slug, a_slug, args.index)
     quoted = shlex.quote(phenotype)
 
-    clump_root = root / "05_ld_clumping" / p_slug / a_slug
+    clump_root = root / "05_ld_clumping" / p_slug / results_slug(a_slug, args.reference_panel)
     if not (clump_root / accession / "lead_variants.tsv").is_file():
         raise SystemExit(
             f"Step05 clumping of study {args.index} ({accession}) is not done yet. Run:\n"
             f"  envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype {quoted} "
-            f"--ancestry {ancestry_code} --index {args.index}")
+            f"--ancestry {ancestry_code} --index {args.index}{panel_option(args.reference_panel)}")
 
     pipeline_python, plink2, rscript = resolve_finemap_tools(root)
-    verify_reference(root, ancestry_code)
-    reference_n = count_reference_samples(root, ancestry_code)
+    verify_reference(root, ancestry_code, args.reference_panel)
+    reference_n = count_reference_samples(root, ancestry_code, args.reference_panel)
     meta = read_study_metadata(study_metadata_file(root, p_slug, a_slug)).get(accession)
-    output_root = root / "06_finemapping" / p_slug / a_slug
+    output_root = root / "06_finemapping" / p_slug / results_slug(a_slug, args.reference_panel)
     output_root.mkdir(parents=True, exist_ok=True)
     qc_file = root / "02_summary_stats" / p_slug / a_slug / "qc" / accession / f"{accession}_GRCh38_QC.tsv.gz"
 
@@ -2224,7 +2270,8 @@ def direct_index_mode(args) -> None:
                 os.environ[key] = value
         single.unlink(missing_ok=True)
 
-    base = f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {quoted} --ancestry {ancestry_code}"
+    base = (f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {quoted} --ancestry {ancestry_code}"
+            f"{panel_option(args.reference_panel)}")
     print(f"\nResults: {base} --stats\nFigures: envs/pipeline/bin/python Step07_Plots.py --phenotype {quoted} "
           f"--ancestry {ancestry_code} --index {args.index}")
 
@@ -2245,12 +2292,13 @@ GRCH38_LENGTHS = {
 def project_paths(args) -> dict:
     ancestry_code, ancestry_label = resolve_ancestry(args.ancestry)
     phenotype_slug = slugify(args.phenotype.strip())
-    ancestry_slug = slugify(ancestry_label)
+    ancestry_slug = results_slug(slugify(ancestry_label), args.reference_panel)
     output_root = PROJECT_ROOT / "06_finemapping" / phenotype_slug / ancestry_slug
     return {
         "phenotype": args.phenotype.strip(),
         "code": ancestry_code,
         "label": ancestry_label,
+        "panel": args.reference_panel,
         "p_slug": phenotype_slug,
         "a_slug": ancestry_slug,
         "output_root": output_root,
@@ -2259,7 +2307,7 @@ def project_paths(args) -> dict:
         "clump_manifest": PROJECT_ROOT / "05_ld_clumping" / phenotype_slug / ancestry_slug / "clumping_manifest.tsv",
         "plots": output_root / "plots",
         "base": f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(args.phenotype.strip())} "
-                f"--ancestry {ancestry_code}",
+                f"--ancestry {ancestry_code}{panel_option(args.reference_panel)}",
     }
 
 
@@ -2299,7 +2347,7 @@ def finemap_state(output_dir: Path, accession: str) -> tuple[str, dict]:
 
 def status_mode(args) -> None:
     P = project_paths(args)
-    banner(f"STEP 06 STATUS - {P['phenotype']} / {P['label']} ({P['code']})")
+    banner(f"STEP 06 STATUS - {P['phenotype']} / {P['label']} ({P['code']}) - LD panel {P['panel']}")
 
     planned = pd.read_csv(P["manifest"], sep="\t", dtype=str) if P["manifest"].is_file() else pd.DataFrame()
     excluded = pd.read_csv(P["excluded"], sep="\t", dtype=str) if P["excluded"].is_file() else pd.DataFrame()
@@ -2356,7 +2404,7 @@ def status_mode(args) -> None:
 
 def stats_mode(args) -> None:
     P = project_paths(args)
-    banner(f"STEP 06 STATISTICS - {P['phenotype']} / {P['label']} ({P['code']})")
+    banner(f"STEP 06 STATISTICS - {P['phenotype']} / {P['label']} ({P['code']}) - LD panel {P['panel']}")
     rows = []
     for accession, m in study_records(P).items():
         out = P["output_root"] / accession
@@ -2378,7 +2426,7 @@ def stats_mode(args) -> None:
             "N_CASES": m.get("N_CASES", ""), "N_CONTROLS": m.get("N_CONTROLS", ""),
             "N_TOTAL": m.get("N_TOTAL", ""), "N_EFF": m.get("N_EFF", ""),
             "GWAS_N_USED": m.get("GWAS_N", ""), "GWAS_N_SOURCE": m.get("GWAS_N_SOURCE", ""),
-            "LD_REFERENCE": f"1000G {P['code']} (n={m.get('REFERENCE_N', '')})",
+            "LD_REFERENCE": f"{P['panel']} {P['code']} (n={m.get('REFERENCE_N', '')})",
             "N_LOCI": info.get("N_LOCI", 0),
             "N_LOCI_SUCCESS": info.get("N_LOCI_SUCCESS", 0),
             "N_LOCI_FAILED": info.get("N_LOCI_FAILED", 0),
@@ -2589,7 +2637,7 @@ def plot_locus(plt, P, accession: str, locus: pd.Series, genes: pd.DataFrame, ou
             sub = np.asarray(matrix[np.ix_(index, index)], dtype=float)
             fig, ax = plt.subplots(figsize=(7, 6))
             image = ax.imshow(sub, cmap="RdBu_r", vmin=-1, vmax=1, interpolation="nearest")
-            fig.colorbar(image, ax=ax, label="signed r (REF alleles, 1000G)")
+            fig.colorbar(image, ax=ax, label=f"signed r (REF alleles, {P['panel']})")
             ax.set_title(f"{accession} {locus_id}: LD of {len(index)} variants (credible sets + top P)",
                          fontsize=9)
             ax.set_xticks([])
@@ -2643,7 +2691,7 @@ def plots_mode(args) -> None:
     import matplotlib.pyplot as plt
 
     P = project_paths(args)
-    banner(f"STEP 06 PLOTS - {P['phenotype']} / {P['label']} ({P['code']})")
+    banner(f"STEP 06 PLOTS - {P['phenotype']} / {P['label']} ({P['code']}) - LD panel {P['panel']}")
     genes = gene_table()
     if genes.empty:
         print("No GENCODE GTF under resources/gencode/ - regional plots have no gene track "

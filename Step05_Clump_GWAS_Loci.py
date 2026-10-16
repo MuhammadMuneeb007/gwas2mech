@@ -22,10 +22,22 @@ GWAS2Mech STEP 05 - Ancestry-matched LD clumping / independent lead variants
     # Step02 QC has to be done
     envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
 
+    # ---- 1000 Genomes 30x LD panel (Step04 --reference-panel 1000G30x) ----
+    # every command takes --reference-panel; results, script and logs are its own:
+    # 05_ld_clumping/<phenotype>/<ancestry>_1000G30x/
+    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+    sbatch Step05_Clump_GWAS_parkinson_s_disease_european_1000G30x.sh
+    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --plots
+    envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+    # (a custom Step04 panel: --reference-panel <NAME>)
+
 Inputs
     Step02 QC files   02_summary_stats/<phenotype>/<ancestry>/qc/<GCST>/<GCST>_GRCh38_QC.tsv.gz
                       (+ <GCST>_QC_summary.tsv: CLUMPING_READY)
-    Step04 panels     resources/1000G/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam
+    Step04 panels     resources/1000G/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam   (--reference-panel 1000G)
+                      resources/LD_panels/<PANEL>/<ANC>/chr<N>_<ANC>_GRCh38.*      (any other panel)
 
 For each GWAS the worker
   1. streams the QC file once and keeps variants with P <= p2,
@@ -36,7 +48,7 @@ For each GWAS the worker
   4. writes the independent lead variants used by Step06.
 
 Outputs
-    05_ld_clumping/<phenotype>/<ancestry>/
+    05_ld_clumping/<phenotype>/<ancestry>/            (1000G; other panels: <ancestry>_<PANEL>/)
         clumping_manifest.tsv, clumping_excluded_studies.tsv, clumping_stats.tsv
         plots/<GCST>_manhattan.png, <GCST>_qq.png, <GCST>_loci_map.png   (--plots)
         <GCST>/lead_variants.tsv, mapped_candidates.tsv.gz,
@@ -81,6 +93,7 @@ DEFAULT_P2 = 1e-2
 DEFAULT_R2 = 0.1
 DEFAULT_KB = 1000
 DEFAULT_CHUNK_SIZE = 500_000
+DEFAULT_PANEL = "1000G"
 
 ANCESTRY_ALIASES = {
     "eur": ("EUR", "European"),
@@ -262,6 +275,9 @@ def arguments(argv=None):
     parser.add_argument("--r2", type=float, default=DEFAULT_R2)
     parser.add_argument("--kb", type=int, default=DEFAULT_KB)
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
+    parser.add_argument("--reference-panel", default=DEFAULT_PANEL,
+                        help="LD reference panel built by Step04: 1000G (default), 1000G30x or a custom name. "
+                             "Results of other panels go to 05_ld_clumping/<phenotype>/<ancestry>_<PANEL>/.")
     parser.add_argument("--force", action="store_true",
                         help="Clump again even studies that are already done (e.g. for the full --stats audit).")
     parser.add_argument(
@@ -279,6 +295,8 @@ def arguments(argv=None):
 def validate_arguments(args) -> None:
     if not args.phenotype.strip():
         raise ValueError("--phenotype cannot be empty.")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.reference_panel):
+        raise ValueError(f"--reference-panel {args.reference_panel!r}: use letters, digits, '_', '-' or '.'")
 
     if args.cpus < 1:
         raise ValueError("--cpus must be >= 1")
@@ -306,20 +324,28 @@ def validate_arguments(args) -> None:
 # =============================================================================
 
 
-def reference_prefix(root: Path, ancestry_code: str, chrom: int) -> Path:
-    return (
-        root
-        / "resources"
-        / "1000G"
-        / ancestry_code
-        / f"chr{chrom}_{ancestry_code}_GRCh38"
-    )
+def panel_root(root: Path, panel: str = DEFAULT_PANEL) -> Path:
+    """Step04 panels: resources/1000G (default) or resources/LD_panels/<panel>."""
+    return root / "resources" / "1000G" if panel == DEFAULT_PANEL else root / "resources" / "LD_panels" / panel
 
 
-def validate_reference(root: Path, ancestry_code: str) -> None:
+def reference_prefix(root: Path, ancestry_code: str, chrom: int, panel: str = DEFAULT_PANEL) -> Path:
+    return panel_root(root, panel) / ancestry_code / f"chr{chrom}_{ancestry_code}_GRCh38"
+
+
+def results_slug(ancestry_slug: str, panel: str = DEFAULT_PANEL) -> str:
+    """Results folder per reference panel: <ancestry> (1000G) or <ancestry>_<panel>."""
+    return ancestry_slug if panel == DEFAULT_PANEL else f"{ancestry_slug}_{panel}"
+
+
+def panel_option(panel: str) -> str:
+    return "" if panel == DEFAULT_PANEL else f" --reference-panel {panel}"
+
+
+def validate_reference(root: Path, ancestry_code: str, panel: str = DEFAULT_PANEL) -> None:
     missing = []
     for chrom in range(1, 23):
-        prefix = reference_prefix(root, ancestry_code, chrom)
+        prefix = reference_prefix(root, ancestry_code, chrom, panel)
         for suffix in (".pgen", ".pvar", ".psam"):
             path = Path(str(prefix) + suffix)
             if not path.exists() or path.stat().st_size <= 0:
@@ -330,8 +356,9 @@ def validate_reference(root: Path, ancestry_code: str) -> None:
         if len(missing) > 20:
             preview += f"\n  ... and {len(missing) - 20} more"
         raise RuntimeError(
-            f"1000G {ancestry_code} reference is incomplete. Missing:\n{preview}\n\n"
+            f"{panel} {ancestry_code} reference is incomplete. Missing:\n{preview}\n\n"
             f"Build it with:\n  envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry {ancestry_code}"
+            f"{panel_option(panel)}"
         )
 
 
@@ -393,6 +420,7 @@ def build_clump_row(
         "R2": args.r2,
         "KB": args.kb,
         "CHUNK_SIZE": args.chunk_size,
+        "REFERENCE_PANEL": getattr(args, "reference_panel", DEFAULT_PANEL),
         "FORCE": bool(getattr(args, "force", False)),
     }, None
 
@@ -420,7 +448,7 @@ def planner_mode(args) -> None:
     if not plink2.exists():
         raise FileNotFoundError(f"PLINK2 not found: {plink2}")
 
-    validate_reference(root, ancestry_code)
+    validate_reference(root, ancestry_code, args.reference_panel)
 
     qc_root = (
         root
@@ -484,14 +512,14 @@ def planner_mode(args) -> None:
         root
         / "05_ld_clumping"
         / phenotype_slug
-        / ancestry_slug
+        / results_slug(ancestry_slug, args.reference_panel)
     )
     log_root = (
         root
         / "logs"
         / "step05_clumping"
         / phenotype_slug
-        / ancestry_slug
+        / results_slug(ancestry_slug, args.reference_panel)
     )
 
     output_root.mkdir(parents=True, exist_ok=True)
@@ -539,7 +567,7 @@ def planner_mode(args) -> None:
 
     bash_file = (
         root
-        / f"Step05_Clump_GWAS_{phenotype_slug}_{ancestry_slug}.sh"
+        / f"Step05_Clump_GWAS_{phenotype_slug}_{results_slug(ancestry_slug, args.reference_panel)}.sh"
     )
 
     job_name = f"CLUMP_{phenotype_slug}_{ancestry_code.lower()}"[:100]
@@ -592,7 +620,7 @@ printf '%s\n' "=============================================================="
     print(f"Clumping-ready     : {len(manifest)}")
     print(f"Excluded           : {len(exclusions)}")
     print(f"Missing QC outputs : {len(missing_qc_accessions)}")
-    print(f"Reference          : resources/1000G/{ancestry_code}/")
+    print(f"Reference panel    : {args.reference_panel}  ({panel_root(root, args.reference_panel)}/{ancestry_code}/)")
     print(f"Partition          : {args.partition or 'scheduler default'}")
     print(f"Walltime           : {args.time}")
     print(f"Memory/task        : {args.mem}")
@@ -614,7 +642,8 @@ printf '%s\n' "=============================================================="
     print(f"  sbatch {bash_file.name}")
     print()
     print("THEN:")
-    base = f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(phenotype)} --ancestry {ancestry_code}"
+    base = (f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(phenotype)} --ancestry {ancestry_code}"
+            f"{panel_option(args.reference_panel)}")
     print(f"  {base} --status")
     print(f"  {base} --stats")
     print(f"  {base} --plots")
@@ -1036,6 +1065,9 @@ def clump_one_study(row, task_id, root, plink2) -> None:
     threads = int(os.environ.get("SLURM_CPUS_PER_TASK", DEFAULT_CPUS))
     # Optional FORCE column: re-run even when outputs exist.
     force = str(row.get("FORCE", "False")).strip().lower() in {"true", "1", "yes", "y"}
+    panel = str(row.get("REFERENCE_PANEL") or DEFAULT_PANEL)
+    if panel.lower() == "nan":
+        panel = DEFAULT_PANEL
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1066,6 +1098,7 @@ def clump_one_study(row, task_id, root, plink2) -> None:
     print(f"Study         : {accession}")
     print(f"Phenotype     : {phenotype}")
     print(f"Ancestry      : {ancestry_label} ({ancestry_code})")
+    print(f"LD panel      : {panel}")
     print(f"QC file       : {qc_file}")
     print(f"Output        : {output_dir}")
     print(f"p1 / p2       : {p1} / {p2}")
@@ -1099,7 +1132,7 @@ def clump_one_study(row, task_id, root, plink2) -> None:
                 pd.DataFrame(columns=["CHR", "POS", "P", "EA", "NEA", "SOURCE_ID"]),
             )
 
-            prefix = reference_prefix(root, ancestry_code, chrom)
+            prefix = reference_prefix(root, ancestry_code, chrom, panel)
             pvar = Path(str(prefix) + ".pvar")
 
             mapped, map_stats, unmapped_sig = map_gwas_to_reference(gwas_chr, pvar, p1)
@@ -1258,7 +1291,8 @@ def clump_one_study(row, task_id, root, plink2) -> None:
             "BUILD": "GRCh38",
             "QC_FILE": str(qc_file),
             "OUTPUT_DIR": str(output_dir),
-            "REFERENCE_ROOT": str(root / "resources" / "1000G" / ancestry_code),
+            "REFERENCE_PANEL": panel,
+            "REFERENCE_ROOT": str(panel_root(root, panel) / ancestry_code),
             "P1": p1,
             "P2": p2,
             "R2": r2,
@@ -1410,9 +1444,9 @@ def direct_index_mode(args) -> None:
 
     if not (root / "envs" / "pipeline" / "bin" / "plink2").exists():
         raise SystemExit("plink2 missing in envs/pipeline. Run: python Step00_Installation.py")
-    validate_reference(root, ancestry_code)
+    validate_reference(root, ancestry_code, args.reference_panel)
 
-    output_root = root / "05_ld_clumping" / p_slug / a_slug
+    output_root = root / "05_ld_clumping" / p_slug / results_slug(a_slug, args.reference_panel)
     output_root.mkdir(parents=True, exist_ok=True)
     row, exclusion = build_clump_row(args, task_id=1, accession=accession, qc_file=qc_file,
                                      output_root=output_root, phenotype=phenotype,
@@ -1439,7 +1473,7 @@ def direct_index_mode(args) -> None:
         single.unlink(missing_ok=True)
 
     print(f"\nNext: envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype {quoted} "
-          f"--ancestry {ancestry_code} --index {args.index}")
+          f"--ancestry {ancestry_code} --index {args.index}{panel_option(args.reference_panel)}")
 
 
 # =============================================================================
@@ -1461,17 +1495,20 @@ def project_paths(args) -> dict:
     ancestry_code, ancestry_label = canonical_ancestry(args.ancestry)
     phenotype_slug = slugify(args.phenotype.strip())
     ancestry_slug = slugify(ancestry_label)
-    output_root = root / "05_ld_clumping" / phenotype_slug / ancestry_slug
+    panel = args.reference_panel
+    output_root = root / "05_ld_clumping" / phenotype_slug / results_slug(ancestry_slug, panel)
     return {
         "phenotype": args.phenotype.strip(),
         "code": ancestry_code,
         "label": ancestry_label,
+        "panel": panel,
+        "bash": f"Step05_Clump_GWAS_{phenotype_slug}_{results_slug(ancestry_slug, panel)}.sh",
         "qc_root": root / "02_summary_stats" / phenotype_slug / ancestry_slug / "qc",
         "output_root": output_root,
         "manifest": output_root / "clumping_manifest.tsv",
         "plots": output_root / "plots",
         "base": f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(args.phenotype.strip())} "
-                f"--ancestry {ancestry_code}",
+                f"--ancestry {ancestry_code}{panel_option(panel)}",
     }
 
 
@@ -1495,7 +1532,7 @@ def status_mode(args) -> None:
     if P["manifest"].is_file():
         planned = set(pd.read_csv(P["manifest"], sep="\t", dtype=str)["STUDY_ACCESSION"].astype(str))
 
-    banner(f"STEP 05 STATUS - {P['phenotype']} / {P['label']} ({P['code']})")
+    banner(f"STEP 05 STATUS - {P['phenotype']} / {P['label']} ({P['code']}) - LD panel {P['panel']}")
     studies = study_list(P)
     if not studies:
         print(f"No Step02 QC files under {P['qc_root']}")
@@ -1525,12 +1562,12 @@ def status_mode(args) -> None:
     if counts["NOT_PLANNED"] or counts["FAILED"] or counts["PENDING"]:
         print("Plan / re-run (finished studies are skipped):")
         print(f"  {P['base']}")
-        print(f"  sbatch Step05_Clump_GWAS_{slugify(P['phenotype'])}_{slugify(P['label'])}.sh")
+        print(f"  sbatch {P['bash']}")
     else:
         print("Every QC'd study is clumped. Next:")
         print(f"  {P['base']} --stats")
         print(f"  envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype {shlex.quote(P['phenotype'])} "
-              f"--ancestry {P['code']}")
+              f"--ancestry {P['code']}{panel_option(P['panel'])}")
 
 
 def count_loci(leads: pd.DataFrame, window_kb: int) -> int:
@@ -1592,9 +1629,9 @@ def audit_study(s: dict, gws_qc, n_leads: int, n_loci: int) -> tuple[str, list[s
 
 def stats_mode(args) -> None:
     P = project_paths(args)
-    banner(f"STEP 05 AUDIT + STATISTICS - {P['phenotype']} / {P['label']} ({P['code']})")
+    banner(f"STEP 05 AUDIT + STATISTICS - {P['phenotype']} / {P['label']} ({P['code']}) - LD panel {P['panel']}")
     print("Significant = P <= p1 (default 5e-8). Mapping = same chromosome, position and both alleles in the "
-          f"1000G {P['code']} panel.")
+          f"{P['panel']} {P['code']} panel.")
     rows = []
 
     def fmt(value):
@@ -1678,7 +1715,7 @@ def stats_mode(args) -> None:
         if unmapped_file.is_file():
             unmapped = pd.read_csv(unmapped_file, sep="\t", low_memory=False)
             n_lost = int(unmapped["SIGNAL_LOST"].astype(str).eq("True").sum()) if len(unmapped) else 0
-            print(f"   Missing match: {len(unmapped):,} significant variants have no 1000G match; {n_lost:,} of them "
+            print(f"   Missing match: {len(unmapped):,} significant variants have no {P['panel']} panel match; {n_lost:,} of them "
                   f"have no lead within {s.get('KB')} kb ({fmt(row['N_GWS_REGIONS_LOST'])} region(s) lost)")
             if len(unmapped):
                 show = unmapped.sort_values(["SIGNAL_LOST", "P"], ascending=[False, True]).head(5)
@@ -1855,7 +1892,7 @@ def plots_mode(args) -> None:
     import matplotlib.pyplot as plt
 
     P = project_paths(args)
-    banner(f"STEP 05 PLOTS - {P['phenotype']} / {P['label']} ({P['code']})")
+    banner(f"STEP 05 PLOTS - {P['phenotype']} / {P['label']} ({P['code']}) - LD panel {P['panel']}")
 
     made = 0
     for accession, qc_file in study_list(P):

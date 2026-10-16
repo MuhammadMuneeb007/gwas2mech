@@ -165,6 +165,15 @@ envs/pipeline/bin/python Step00_Download_Resources.py --groups 1000g --output St
 sbatch Step00_Download_1000G.sh
 ```
 
+**1000 Genomes 30x reference panel (NYGC, GRCh38)** — 28 GB, for `--reference-panel 1000G30x`
+(never part of the default plan; 22 filtered phased SNV/INDEL/SV VCFs + TBI and the 3202-sample
+population file, one array task per file)
+```bash
+envs/pipeline/bin/python Step00_Download_Resources.py --groups 1000g30x --output Step00_Download_1000G30x.sh
+sbatch Step00_Download_1000G30x.sh
+envs/pipeline/bin/python Step00_Download_Resources.py --status
+```
+
 **Ensembl VEP 116 cache** — 26 GB
 ```bash
 envs/pipeline/bin/python Step00_Download_Resources.py --groups vep --output Step00_Download_VEP.sh
@@ -438,9 +447,64 @@ for review: their effects are attenuated and N_EFF is only approximate.
 
 ## 5. LD reference panels (Step04)
 
-Ancestry-specific PLINK2 panels from the 1000 Genomes GRCh38 (2019) VCFs downloaded by
-`--groups 1000g`. They are shared by all phenotypes and built once per ancestry into
-`resources/1000G/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam`.
+Ancestry-specific PLINK2 panels, shared by all phenotypes and built once per panel and ancestry.
+Choose the panel with `--reference-panel`; Step05 and Step06 take the same option.
+
+| `--reference-panel` | Panel | Inputs (Step00) | Built into |
+|---|---|---|---|
+| `1000G` *(default)* | 1000 Genomes phase 3 on GRCh38, biallelic SNV/INDEL (2019), 2,504 unrelated | `--groups 1000g` (~13 GB) | `resources/1000G/<ANC>/` |
+| `1000G30x` | 1000 Genomes 30x on GRCh38 (NYGC; Byrska-Bishop et al. 2022, *Cell*), filtered phased SNV/INDEL/SV panel, the 2,504 unrelated of the 3,202 samples | `--groups 1000g30x` (~28 GB) | `resources/LD_panels/1000G30x/<ANC>/` |
+| any other name | your own panel: per-chromosome VCFs + a sample table, or ready-made PLINK2 files | – | `resources/LD_panels/<NAME>/<ANC>/` |
+
+Both 1000 Genomes panels give the same people per ancestry (EUR 503, AFR 661, EAS 504, SAS 489,
+AMR 347); related samples are left out because they distort LD. For 1000G30x the filtered phased
+panel is used, not the raw `recalibrated_variants` genotype calls (unphased, unfiltered and over
+140 GB for chr1 alone).
+
+**1000 Genomes 30x panel**
+```bash
+# inputs (once)
+envs/pipeline/bin/python Step00_Download_Resources.py --groups 1000g30x --output Step00_Download_1000G30x.sh
+sbatch Step00_Download_1000G30x.sh
+
+# build, progress, statistics, validation - every command with --reference-panel 1000G30x
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --reference-panel 1000G30x
+sbatch Step04_Prepare_1000G30x_EUR_GRCh38.sh
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --reference-panel 1000G30x --stats
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --reference-panel 1000G30x --verify
+```
+
+**Custom panel**
+```bash
+# custom panel: VCFs with {chr} = 1..22 (bgzipped + .tbi/.csi) and a sample table
+# (sample ID, then ancestry code EUR/AFR/EAS/SAS/AMR or a 1000G population; header optional)
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --reference-panel MyPanel \
+    --panel-vcf "/data/mypanel/chr{chr}.vcf.gz" --panel-samples /data/mypanel/samples.tsv
+sbatch Step04_Prepare_MyPanel_EUR_GRCh38.sh
+
+# every panel and what is built
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --list-panels
+```
+
+The custom inputs are saved in `resources/LD_panels/<NAME>/panel_config.json`, so later runs only
+need `--reference-panel <NAME>`. A ready-made custom panel only needs
+`resources/LD_panels/<NAME>/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam` for chromosomes 1–22.
+
+Then Step05 and Step06 with the same panel. Their results are kept apart, in
+`05_ld_clumping/<phenotype>/<ancestry>_<PANEL>/` and `06_finemapping/<phenotype>/<ancestry>_<PANEL>/`,
+with their own SLURM scripts (`Step05_Clump_GWAS_<phenotype>_<ancestry>_<PANEL>.sh`, ...) and logs;
+the default `1000G` keeps the plain `<ancestry>/` folders:
+
+```bash
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py "${PD[@]}" --reference-panel 1000G30x
+sbatch Step05_Clump_GWAS_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py "${PD[@]}" --reference-panel 1000G30x
+sbatch Step06_FineMap_GWAS_parkinson_s_disease_european_1000G30x.sh
+```
+(the full 1000G30x commands, with `--status` / `--stats`, are in the Step05 and Step06 sections)
+
+The default panel commands (no `--reference-panel`):
 
 ```bash
 envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR       # or: EUR EAS / all
@@ -452,9 +516,11 @@ envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --verify 
 
 Every panel is checked when it is built: the sample count must match the ancestry sample list
 (missing sample IDs are an error, not skipped), it must contain variants, and PLINK2 `--validate`
-must pass. Exact duplicate variants are removed; duplicates with different genotypes stop that
-chromosome with an error (listed in `.rmdup.mismatch`). `--force` rebuilds panels that already
-exist. Each plan writes its own time-stamped manifest, so re-planning never changes a queued job.
+must pass. Exact duplicate variants are removed. For `1000G`, duplicates with different genotypes
+stop that chromosome with an error; for `1000G30x` and custom panels (SNV/INDEL and SV calls can share
+an ID) the conflicting copies are dropped instead. Both are listed in `.rmdup.mismatch`. `--force`
+rebuilds panels that already exist. Each plan writes its own time-stamped manifest, so re-planning
+never changes a queued job.
 
 ## 6. LD clumping (Step05)
 
@@ -468,6 +534,16 @@ sbatch Step05_Clump_GWAS_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --stats   # audit (below)
 envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --plots   # Manhattan, QQ, chromosome locus map
+```
+
+**With the 1000 Genomes 30x panel** (`05_ld_clumping/<phenotype>/<ancestry>_1000G30x/`; build it with
+Step04 `--reference-panel 1000G30x` first):
+```bash
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+sbatch Step05_Clump_GWAS_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --plots
 ```
 
 **Audit (`--stats`), per study, before moving on to fine-mapping:**
@@ -502,6 +578,16 @@ sbatch Step06_FineMap_GWAS_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --stats   # loci, credible sets, PIPs, locus QC
 envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --plots   # regional + PIP + genes, LD heatmap, genome PIP
+```
+
+**With the 1000 Genomes 30x panel** (`06_finemapping/<phenotype>/<ancestry>_1000G30x/`; Step04 and
+Step05 must have used `--reference-panel 1000G30x` too):
+```bash
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+sbatch Step06_FineMap_GWAS_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --plots
 ```
 
 Every locus is checked and gets `LOCUS_QC = PASS / WARN` with the reasons (`LOCUS_QC_NOTES`):
@@ -637,6 +723,7 @@ tested trait: PP.H0–H4, signal pair, prior sensitivity, LD diagnostics), `<GCS
 | `cadd` | CADD v1.7 GRCh38 SNVs + gnomAD4 indels (+ `.tbi`) | 89 GB |
 | `qtl_catalogue_susie` *(only when named)* | eQTL Catalogue SuSiE lbf / cs for the Step09 contexts | 316 GB |
 | `adsp_eqtl` *(only when named)* | ADSP FunGen brain bulk + single-nucleus eQTL | 720 GB |
+| `1000g30x` *(only when named)* | 1000 Genomes 30x (NYGC) filtered phased SNV/INDEL/SV panel + TBI, 3202-sample population file (Step04 `--reference-panel 1000G30x`) | 28 GB |
 
 Files are stored under `resources/` (dense eQTL Catalogue files in
 `resources/coloc/eqtl_catalogue/dense/<dataset_id>/`, other molecular QTL in

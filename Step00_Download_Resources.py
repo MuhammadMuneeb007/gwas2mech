@@ -9,6 +9,17 @@ GWAS2m STEP 00 - DOWNLOAD SHARED RESOURCES (SLURM: ONE ARRAY TASK PER FILE)
     envs/pipeline/bin/python Step00_Download_Resources.py        # plan + write the SLURM script
     sbatch Step00_Download_Resources.sh        # download everything
 
+    # 1000 Genomes phase 3 LD panel inputs (Step04 --reference-panel 1000G, the default)
+    envs/pipeline/bin/python Step00_Download_Resources.py --groups 1000g --output Step00_Download_1000G.sh
+    sbatch Step00_Download_1000G.sh
+
+    # 1000 Genomes 30x LD panel inputs (Step04 --reference-panel 1000G30x; never part
+    # of the default plan): 22 phased VCFs + TBI and the 3202-sample population file,
+    # ~28 GB, one array task per file
+    envs/pipeline/bin/python Step00_Download_Resources.py --groups 1000g30x --output Step00_Download_1000G30x.sh
+    sbatch Step00_Download_1000G30x.sh
+    envs/pipeline/bin/python Step00_Download_Resources.py --status
+
 This script only PLANS; it never downloads data itself. It:
 
   1. lists every shared resource FILE the pipeline needs (paths and URLs
@@ -52,6 +63,7 @@ Resource groups (--groups / --skip-groups); sizes are approximate downloads:
   genome              GENCODE 50 GRCh38 FASTA (+ .fai) and GTF                ~0.9 GB
   1000g               1000 Genomes GRCh38 VCF + TBI + panel (skipped once the
                       population PGEN panels under resources/1000G/ exist)    ~13 GB
+                      (Step04 --reference-panel 1000G, the default)
   vep                 Ensembl VEP 116 GRCh38 indexed cache (extracted)        ~26 GB
   gtex                GTEx v11 eQTL / sQTL / apaQTL + SuSiE (extracted),
                       variant lookup, GENCODE 47                              ~7 GB
@@ -73,6 +85,12 @@ Resource groups (--groups / --skip-groups); sizes are approximate downloads:
   cadd                CADD v1.7 GRCh38 SNVs + gnomAD4 indels (+ .tbi)         ~89 GB
   Only when named in --groups:
   qtl_catalogue_susie eQTL Catalogue SuSiE lbf / cs for the Step09 contexts   ~316 GB
+  1000g30x            1000 Genomes 30x on GRCh38 (NYGC, 3202 samples): the
+                      filtered phased SNV/INDEL/SV panel per chromosome + TBI
+                      and the 3202-sample pedigree / population file, for
+                      Step04 --reference-panel 1000G30x (skipped once its
+                      population panels under resources/LD_panels/1000G30x/
+                      exist)                                                  ~28 GB
   adsp_eqtl           ADSP FunGen brain bulk eQTL + single-nucleus eQTL       ~720 GB
 
 Layouts match the pipeline: dense QTL files under
@@ -150,11 +168,17 @@ GTEX_RELEASE = "v11"
 OPEN_TARGETS_RELEASE = "26.09"
 LD_ANCESTRIES = ("EUR", "AFR", "EAS", "SAS", "AMR")
 # Groups planned as one set: if any file is missing, all of them get a task.
-COMPLETE_SET_GROUPS = {"1000g"}
+COMPLETE_SET_GROUPS = {"1000g", "1000g30x"}
 
 GENCODE_BASE = f"https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_{GENCODE_RELEASE}"
 ONE_K_BASE = ("https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/"
               "1000_genomes_project/release/20190312_biallelic_SNV_and_INDEL")
+# 1000 Genomes 30x (NYGC; Byrska-Bishop et al. 2022, Cell): filtered phased panel.
+ONE_K_30X_BASE = ("https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/"
+                  "1000G_2504_high_coverage")
+ONE_K_30X_PHASED = f"{ONE_K_30X_BASE}/working/20220422_3202_phased_SNV_INDEL_SV"
+PHASE3_PANEL_URL = ("https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/"
+                    "integrated_call_samples_v3.20130502.ALL.panel")
 GTEX_BASE = "https://storage.googleapis.com/adult-gtex"
 GWAS_CATALOG_BASE = "https://ftp.ebi.ac.uk/pub/databases/gwas/releases/latest"
 EQTL_RAW = "https://raw.githubusercontent.com/eQTL-Catalogue/eQTL-Catalogue-resources/master"
@@ -196,8 +220,8 @@ CADD = "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38"
 
 GROUPS = ["gwas_catalog", "genome", "1000g", "vep", "gtex", "eqtl_catalogue", "opentargets",
           "qtl_catalogue", "qtl_celltype", "molecular_qtl", "meqtl", "annotation", "cadd",
-          "qtl_catalogue_susie", "adsp_eqtl"]
-OPTIONAL_GROUPS = {"qtl_catalogue_susie", "adsp_eqtl"}   # only when named in --groups
+          "qtl_catalogue_susie", "adsp_eqtl", "1000g30x"]
+OPTIONAL_GROUPS = {"qtl_catalogue_susie", "adsp_eqtl", "1000g30x"}   # only when named in --groups
 
 
 # =============================================================================
@@ -209,7 +233,8 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("--groups", nargs="+", choices=GROUPS,
                     default=[g for g in GROUPS if g not in OPTIONAL_GROUPS],
-                    help="Resource groups to include (default: all except qtl_catalogue_susie, adsp_eqtl).")
+                    help="Resource groups to include (default: all except qtl_catalogue_susie, adsp_eqtl, "
+                         "1000g30x).")
 parser.add_argument("--skip-groups", nargs="+", choices=GROUPS, default=[],
                     help="Resource groups to leave out.")
 parser.add_argument("--template", default="HPC_CPU.sh",
@@ -327,9 +352,10 @@ def item(resource, group, url, dest, *, check="-", post="-", post_dir="-", post_
                 post_dir=str(post_dir), post_marker=post_marker, mutable=mutable, size=size)
 
 
-def plan_preparation() -> dict:
-    """Which 1000G inputs are still needed (raw files are only inputs to the PGEN panels)."""
-    g = ROOT / "resources" / "1000G"
+def plan_preparation(g: Path | None = None) -> dict:
+    """Which raw VCFs of a reference panel are still needed (raw files are only
+    inputs to the Step04 PGEN panels under g/<ANC>/)."""
+    g = g or ROOT / "resources" / "1000G"
 
     def panel_ok(prefix: Path) -> bool:
         return all(local_file_valid(Path(str(prefix) + ext)) for ext in (".pgen", ".pvar", ".psam"))
@@ -343,6 +369,46 @@ def plan_preparation() -> dict:
         "samples": True,
         "panels_missing": len(population_missing),
     }
+
+
+# =============================================================================
+# 1000 GENOMES 30x LD REFERENCE PANEL (group 1000g30x; Step04 --reference-panel 1000G30x)
+#
+# NYGC 30x on GRCh38 (Byrska-Bishop et al. 2022, Cell): the FILTERED PHASED
+# SNV/INDEL/SV panel per chromosome, not the raw "recalibrated_variants" genotype
+# calls (unphased, unfiltered, > 140 GB for chr1 alone). Step04 keeps the 2504
+# unrelated samples (those of the phase 3 sample panel), so related samples do
+# not distort LD.
+#   resources/LD_panels/1000G30x/raw/1kGP_high_coverage_Illumina.chr<N>.filtered.SNV_INDEL_SV_phased_panel.vcf.gz (+ .tbi)
+#   resources/LD_panels/1000G30x/metadata/20130606_g1k_3202_samples_ped_population.txt
+#   resources/1000G/metadata/integrated_call_samples_v3.20130502.ALL.panel (shared with 1000g)
+# =============================================================================
+
+def thousand_genomes_30x_items(notes: list[str]) -> list[dict]:
+    items: list[dict] = []
+    root = Path("resources/LD_panels/1000G30x")
+    prep = plan_preparation(ROOT / root)
+
+    for chrom in prep["all_chromosomes"]:
+        name = f"1kGP_high_coverage_Illumina.chr{chrom}.filtered.SNV_INDEL_SV_phased_panel.vcf.gz"
+        items.append(item("1000G30X_PHASED_VCF", "1000g30x", f"{ONE_K_30X_PHASED}/{name}", root / "raw" / name,
+                          check="gzip"))
+        items.append(item("1000G30X_PHASED_VCF", "1000g30x", f"{ONE_K_30X_PHASED}/{name}.tbi",
+                          root / "raw" / f"{name}.tbi"))
+
+    # Population of each of the 3202 samples.
+    items.append(item("1000G30X_METADATA", "1000g30x",
+                      f"{ONE_K_30X_BASE}/20130606_g1k_3202_samples_ped_population.txt",
+                      root / "metadata" / "20130606_g1k_3202_samples_ped_population.txt"))
+    # The 2504 unrelated samples (planned by the 1000g group when that is selected too).
+    if "1000g" not in SELECTED_GROUPS:
+        items.append(item("1000G30X_METADATA", "1000g30x", PHASE3_PANEL_URL,
+                          Path("resources/1000G/metadata/integrated_call_samples_v3.20130502.ALL.panel")))
+
+    if "1000g30x" in SELECTED_GROUPS and not prep["panels_missing"]:
+        notes.append("1000g30x: all population PGEN panels are built, raw 30x files are not needed")
+
+    return items
 
 
 def static_items(notes: list[str]) -> list[dict]:
@@ -375,15 +441,16 @@ def static_items(notes: list[str]) -> list[dict]:
         items.append(item("1000G_RAW_VCF", "1000g", f"{ONE_K_BASE}/{name}", raw / name, check="gzip"))
         items.append(item("1000G_RAW_VCF", "1000g", f"{ONE_K_BASE}/{name}.tbi", raw / f"{name}.tbi"))
     if prep["samples"]:
-        items.append(item("1000G_PANEL_METADATA", "1000g",
-                          "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/"
-                          "integrated_call_samples_v3.20130502.ALL.panel",
+        items.append(item("1000G_PANEL_METADATA", "1000g", PHASE3_PANEL_URL,
                           meta / "integrated_call_samples_v3.20130502.ALL.panel"))
     if prep["all_chromosomes"]:
         for name in ("20190312_biallelic_SNV_and_INDEL_README.txt", "20190312_biallelic_SNV_and_INDEL_MANIFEST.txt"):
             items.append(item("1000G_PANEL_METADATA", "1000g", f"{ONE_K_BASE}/{name}", meta / name))
     if "1000g" in SELECTED_GROUPS and not prep["panels_missing"]:
         notes.append("1000g: all population PGEN panels are built, raw 1000G files are not needed")
+
+    # --- 1000 Genomes 30x (Step04 --reference-panel 1000G30x) ---
+    items += thousand_genomes_30x_items(notes)
 
     # --- Ensembl VEP cache (extracted into resources/vep/cache) ---
     vep_url = (f"https://ftp.ensembl.org/pub/release-{VEP_RELEASE}/variation/indexed_vep_cache/"
