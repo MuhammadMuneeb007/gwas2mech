@@ -3,72 +3,72 @@
 
 """
 ===============================================================================
-GWAS2Mech STEP 09 - Formal molecular-QTL colocalisation (coloc.susie), per locus
+GWAS2Mech STEP 09 - Molecular-QTL colocalisation (provider SuSiE, coloc.bf_bf), per locus
 ===============================================================================
 
-    # plan: ONE SLURM ARRAY TASK PER FINE-MAPPED LOCUS (all studies; >1000 loci share tasks)
+    # what is needed and what is ready (tools, QTL resources, Step06 input); exit 1 if not ready
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+
+    # plan: ONE job script, one SLURM array task per fine-mapped locus (max 1000 tasks;
+    # more loci than that -> several loci per task), then submit it
     envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR
     sbatch Step09_Coloc_parkinson_s_disease_european.sh
 
-    # study 2 (the number the Step02 planner prints) on this machine, all its loci / one locus
+    # study 2 (the Step02 number) on this machine: all its loci / one locus
     envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
     envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --index 2 --locus L001
 
-    # resources, progress, results
-    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+    # progress and results
     envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --status
     envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 
+    # redo finished loci (e.g. after changing Step09_Config.py); plan again without --force afterwards
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --force
+
     # ---- 1000 Genomes 30x LD panel (Steps 04-06 with --reference-panel 1000G30x) ----
-    # reads 06_finemapping/<p>/<a>_1000G30x/ and the 1000G30x LD panel (resources/LD_panels/1000G30x/),
-    # writes 09_coloc/<p>/<a>_1000G30x/
+    # reads 06_finemapping/<p>/<a>_1000G30x/, writes 09_coloc/<p>/<a>_1000G30x/
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
     envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
     sbatch Step09_Coloc_parkinson_s_disease_european_1000G30x.sh
-    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
     envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2 --locus L001
     envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
     envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
 
-For every fine-mapped GWAS locus, test whether the GWAS signal and a molecular
-trait (eQTL, sQTL, pQTL, isoQTL, exonQTL, ... ) share a causal variant:
+Method (per locus, nothing is downloaded and no QTL LD / QTL SuSiE is computed):
+  1. GWAS side   the Step06 SuSiE-RSS fit of the locus (06_finemapping/<p>/<a>[_<PANEL>]/<GCST>/loci/<L>/);
+                 only its credible-set components are used. No credible set -> NO_GWAS_CREDIBLE_SET.
+  2. Discovery   dense QTL summary statistics in the locus window: every molecular trait with
+                 P <= CANDIDATE_P (top MAX_CANDIDATES_PER_CONTEXT_LOCUS per context).
+  3. CS filter   the provider (eQTL Catalogue) SuSiE credible sets of the trait; only components that
+                 overlap the GWAS locus are kept (else EXCLUDED_*).
+  4. QTL side    provider SuSiE log Bayes factors of those components, read for the locus window from
+                 the position-sorted, tabix-indexed LBF file (prepared once by Step00).
+  5. coloc::coloc.bf_bf(GWAS LBF, QTL LBF) for every signal pair; the best pair (max PP.H4) classifies
+     the trait: STRONG (PP.H4 >= STRONG_PP4), SUGGESTIVE (>= SUGGESTIVE_PP4); PRIOR_ROBUST_STRONG when
+     still strong at p12 = P12_LOW. Prior sensitivity at P12_LOW / P12 / P12_HIGH.
 
-  1. GWAS side   = the Step06 SuSiE-RSS fit of that locus (reused, not refitted)
-  2. QTL side    = dense regional summary statistics (eQTL Catalogue), every
-                   molecular trait with P <= --candidate-p in the locus window
-  3. LD          = signed r from the Step04 ancestry-matched LD panel (--reference-panel)
-                   (ref-based, same REF orientation as Step06 Z and the QTL beta)
-  4. coloc::runsusie (QTL) + coloc::coloc.susie (GWAS x QTL), PP.H4 per signal
-     pair, with prior sensitivity p12 = 1e-6 / 5e-6 / 1e-5
-  5. STRONG_SHARED_SIGNAL = PP.H4 >= 0.8 and H4 > H3; PRIOR_ROBUST_STRONG when
-     it also holds at the low p12
+Resources (Step00_Download_Resources.py; the LBF files are position-sorted + tabix-indexed there):
+    --groups eqtl_catalogue                  tabix_ftp_paths*.tsv (dataset list)
+    --groups qtl_catalogue                   dense/<dataset_id>/*.tsv.gz + .tbi
+    --groups qtl_catalogue_susie             susie_provider/<dataset_id>/*.credible_sets.tsv.gz,
+                                             *.lbf_variable.sorted.tsv.gz + .tbi
+    (default contexts GTEx eQTL / sQTL / isoQTL / exonQTL + Sun_2018 pQTL; other studies:
+     STUDY_REGEX in Step09_Config.py and the same regex for Step00 --catalogue-study-regex)
+  A context is used only when dense + .tbi, provider credible sets and the indexed LBF are complete;
+  others are reported as not ready - never as "no colocalisation".
 
-Inputs (nothing is downloaded here)
-    Step06   06_finemapping/<p>/<a>/<GCST>/loci/<L>/ (matched variants, SuSiE fit, LD ids)
-             <GCST>/finemapping_summary.json (PHENOTYPE_TYPE, N, N_EFF)
-    Step04   resources/1000G/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam   (--reference-panel 1000G)
-             resources/LD_panels/<PANEL>/<ANC>/chr<N>_<ANC>_GRCh38.*      (any other panel; Step06 and
-             Step09 results then in <a>_<PANEL>/)
-    Step00   Step00_Download_Resources.py --groups eqtl_catalogue qtl_catalogue
-             resources/coloc/eqtl_catalogue/tabix_ftp_paths*.tsv  (dataset list)
-             resources/coloc/eqtl_catalogue/dense/<dataset_id>/*.tsv.gz + .tbi
-             default contexts: GTEx v8 (eQTL, sQTL, isoQTL, exonQTL) + Sun_2018 pQTL;
-             --catalog-study-regex / --catalog-all-studies for others
-    optional resources/coloc/custom_qtl_registry.tsv (any other dense QTL file,
-             e.g. meQTL / caQTL / hQTL; LOCAL_PATH, column names, ENABLED=True)
+Parameters: Step09_Config.py (QTL types, studies, priors, thresholds, SLURM); --qtl-types / --study-regex /
+--candidate-p / --strong-pp4 / --suggestive-pp4 override it. SLURM: HPC_CPU.sh header, then SLURM in
+Step09_Config.py, then --partition --qos --account --cpus --mem --time --max-parallel.
 
-A molecular-QTL class with no local resource is reported as
-RESOURCE_NOT_CONFIGURED - never as a biological "no colocalisation".
-
-Outputs (09_coloc/<p>/<a>/)
-    coloc_manifest.tsv, coloc_excluded_studies.tsv, coloc_stats.tsv (--stats)
-    <GCST>/<GCST>_formal_coloc_summary.tsv   every tested molecular trait
-           <GCST>_locus_qtl_matrix.tsv       locus x QTL class evidence
-           <GCST>_locus_evidence_table.tsv   one row per locus
-           <GCST>_molecular_qtl_candidates.tsv, resource_status.tsv, coloc_summary.json
-           loci/<L>/candidates/<id>/          coloc summary / variant results / priors / LD diagnostics
-
-SLURM settings come from the #SBATCH header of HPC_CPU.sh; --partition --qos
---account --cpus --mem --time --max-parallel override them.
+Outputs (09_coloc/<phenotype>/<ancestry>[_<PANEL>]/)
+    <GCST>/loci/<L>/locus_coloc_results.tsv   every candidate trait: status, PP.H0-H4, class, best pair
+                    coloc_signal_pairs.tsv     every GWAS x QTL signal pair (all three p12 priors)
+                    coloc_variant_pp_h4.tsv.gz per-variant PP.H4 (traits with PP.H4 >= SAVE_VARIANT_PP_MIN_PP4)
+                    discovery_audit.tsv, coloc.log, provider_coloc_done.json
+    coloc_manifest.tsv, qtl_contexts_snapshot.tsv (contexts frozen when the job script was made)
+    --stats: coloc_stats.tsv, coloc_all_candidates.tsv, coloc_locus_qtl_summary.tsv,
+             <GCST>/<GCST>_coloc_results.tsv
 ===============================================================================
 """
 
@@ -76,141 +76,96 @@ from __future__ import annotations
 
 import argparse
 import gzip
-import io
-from collections import OrderedDict
-from contextlib import contextmanager
+import hashlib
 import json
 import os
 import re
+import runpy
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 import traceback
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-
 from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
 
 
-STEP09_VERSION = "5.0.0-per-locus"
+STEP = {
+    "NAME": "Step09",
+    "TITLE": "bulk-tissue molecular QTL (eQTL Catalogue: GTEx + Sun_2018 by default)",
+    "CONFIG": "Step09_Config.py",
+    "OUT_DIR": "09_coloc",
+    "LOG_DIR": "step09_coloc",
+    "SCRIPT_PREFIX": "Step09_Coloc",
+    "JOB": "COLOC",
+    "DEFAULT_QTL_TYPES": ["eQTL", "sQTL", "pQTL", "isoQTL", "exonQTL"],
+    "DEFAULT_STUDY_REGEX": r"(?i)gtex|^sun_2018$",
+    "STEP00_GROUP": "qtl_catalogue",
+}
+
+VERSION = "2.0.0-provider-susie-per-locus"
 PROJECT_ROOT = Path.cwd().resolve()
 MAX_ARRAY_TASKS = 1000
+DEFAULT_PANEL = "1000G"
+EQTL_ROOT = PROJECT_ROOT / "resources" / "coloc" / "eqtl_catalogue"
+CATALOGUE_TABLES = ("tabix_ftp_paths.tsv", "tabix_ftp_paths_imported.tsv")
+DONE_FILE = "provider_coloc_done.json"
+FAILED_FILE = "LOCUS_FAILED.txt"
+RESULTS_FILE = "locus_coloc_results.tsv"
 
-DEFAULT_CPUS = 4
-DEFAULT_REMOTE_DELAY = 0.0
-DEFAULT_LD_MAF = 0.01
-DEFAULT_LD_MISMATCH_S = 0.10
-
-DEFAULT_CANDIDATE_P = 1e-5
-DEFAULT_MIN_COMMON_SNPS = 100
-DEFAULT_MAX_COMMON_SNPS = 12000
-DEFAULT_STRONG_PP4 = 0.80
-DEFAULT_SUGGESTIVE_PP4 = 0.50
-DEFAULT_MAX_CANDIDATES_PER_CONTEXT_LOCUS = 100
-
-COLOC_PRIOR_P1 = 1e-4
-COLOC_PRIOR_P2 = 1e-4
-COLOC_PRIOR_P12 = 5e-6
-COLOC_PRIOR_P12_LOW = 1e-6
-COLOC_PRIOR_P12_HIGH = 1e-5
-
-SUPPORTED_QTL_TYPES = [
-    "eQTL",
-    "sQTL",
-    "pQTL",
-    "meQTL",
-    "caQTL",
-    "hQTL",
-    "isoQTL",
-    "exonQTL",
-    "apaQTL",
-    "metaboliteQTL",
-    "otherQTL",
-]
+# Parameters; the step's config file (STEP["CONFIG"]) overrides these, CLI flags override the config.
+DEFAULT_CONFIG: dict[str, Any] = {
+    "QTL_TYPES": STEP["DEFAULT_QTL_TYPES"],
+    "STUDY_REGEX": STEP["DEFAULT_STUDY_REGEX"],
+    "TISSUE_REGEX": "",
+    "DATASET_IDS": [],
+    "CANDIDATE_P": 1e-5,
+    "MAX_CANDIDATES_PER_CONTEXT_LOCUS": 100,
+    "P1": 1e-4,
+    "P2": 1e-4,
+    "P12": 5e-6,
+    "P12_LOW": 1e-6,
+    "P12_HIGH": 1e-5,
+    "STRONG_PP4": 0.80,
+    "SUGGESTIVE_PP4": 0.50,
+    "OVERLAP_MIN": 0.5,
+    "TRIM_BY_POSTERIOR": True,
+    "SAVE_VARIANT_PP_MIN_PP4": 0.50,
+    "SLURM": {},
+}
 
 ANCESTRY_ALIASES = {
-    "eur": ("EUR", "European"),
-    "european": ("EUR", "European"),
-    "afr": ("AFR", "African"),
-    "african": ("AFR", "African"),
-    "eas": ("EAS", "East Asian"),
-    "east asian": ("EAS", "East Asian"),
-    "sas": ("SAS", "South Asian"),
-    "south asian": ("SAS", "South Asian"),
-    "amr": ("AMR", "Hispanic or Latin American"),
-    "hispanic": ("AMR", "Hispanic or Latin American"),
+    "eur": ("EUR", "European"), "european": ("EUR", "European"),
+    "afr": ("AFR", "African"), "african": ("AFR", "African"),
+    "eas": ("EAS", "East Asian"), "east asian": ("EAS", "East Asian"),
+    "sas": ("SAS", "South Asian"), "south asian": ("SAS", "South Asian"),
+    "amr": ("AMR", "Hispanic or Latin American"), "hispanic": ("AMR", "Hispanic or Latin American"),
     "latino": ("AMR", "Hispanic or Latin American"),
     "hispanic or latin american": ("AMR", "Hispanic or Latin American"),
 }
 
-EQTL_CATALOG_PUBLIC = {
-    "TABIX_PATHS": {
-        "url": (
-            "https://raw.githubusercontent.com/eQTL-Catalogue/"
-            "eQTL-Catalogue-resources/master/tabix/tabix_ftp_paths.tsv"
-        ),
-        "path": "resources/coloc/eqtl_catalogue/tabix_ftp_paths.tsv",
-    },
-    "TABIX_IMPORTED": {
-        "url": (
-            "https://raw.githubusercontent.com/eQTL-Catalogue/"
-            "eQTL-Catalogue-resources/master/tabix/tabix_ftp_paths_imported.tsv"
-        ),
-        "path": "resources/coloc/eqtl_catalogue/tabix_ftp_paths_imported.tsv",
-    },
-    "DATASET_METADATA_R8": {
-        "url": (
-            "https://raw.githubusercontent.com/eQTL-Catalogue/"
-            "eQTL-Catalogue-resources/master/data_tables/dataset_metadata_r8_beta.tsv"
-        ),
-        "path": "resources/coloc/eqtl_catalogue/dataset_metadata_r8_beta.tsv",
-    },
-    "POPULATION_ASSIGNMENTS": {
-        "url": (
-            "https://raw.githubusercontent.com/eQTL-Catalogue/"
-            "eQTL-Catalogue-resources/master/data_tables/population_assignments.tsv"
-        ),
-        "path": "resources/coloc/eqtl_catalogue/population_assignments.tsv",
-    },
+NOT_TESTED_TERMINAL = {
+    "EXCLUDED_NO_PROVIDER_CS_FOR_TRAIT", "EXCLUDED_PROVIDER_CS_OUTSIDE_LOCUS",
+    "NOT_TESTED_NO_PROVIDER_LBF_ROWS", "NOT_TESTED_NO_PROVIDER_LBF_COLUMNS", "NOT_TESTED_NO_FINITE_LBF_SIGNAL",
+    "NOT_TESTED_NO_SHARED_VARIANTS", "NOT_TESTED_INSUFFICIENT_POSTERIOR_OVERLAP",
 }
 
-CUSTOM_REGISTRY_COLUMNS = [
-    "ENABLED",
-    "DATASET",
-    "QTL_TYPE",
-    "TISSUE",
-    "CONDITION",
-    "SOURCE_URL",
-    "LOCAL_PATH",
-    "ACCESS_MODE",
-    "SAMPLE_SIZE",
-    "TRAIT_COLUMN",
-    "GENE_COLUMN",
-    "VARIANT_COLUMN",
-    "CHR_COLUMN",
-    "POS_COLUMN",
-    "REF_COLUMN",
-    "ALT_COLUMN",
-    "BETA_COLUMN",
-    "SE_COLUMN",
-    "P_COLUMN",
-    "MAF_COLUMN",
-    "EFFECT_ALLELE_MODE",
-    "EFFECT_ALLELE_COLUMN",
-    "GENOME_BUILD",
-    "NOTES",
-]
 
+# =============================================================================
+# GENERAL HELPERS
+# =============================================================================
 
 def banner(text: str) -> None:
     print()
-    print("=" * 124)
+    print("=" * 112)
     print(text)
-    print("=" * 124)
+    print("=" * 112, flush=True)
 
 
 def utcnow() -> str:
@@ -230,61 +185,24 @@ def slugify(value: Any) -> str:
 def canonical_ancestry(value: str) -> tuple[str, str]:
     key = normalize_text(value)
     if key not in ANCESTRY_ALIASES:
-        raise ValueError(
-            f"Unsupported ancestry {value!r}; use EUR, AFR, EAS, SAS, AMR."
-        )
+        raise SystemExit(f"Unsupported ancestry {value!r}; use EUR, AFR, EAS, SAS or AMR.")
     return ANCESTRY_ALIASES[key]
 
 
-def clean_chr(value: Any) -> int | None:
-    if value is None:
-        return None
-    text = re.sub(r"^chr", "", str(value).strip(), flags=re.I)
+def sha1_short(text: str, n: int = 16) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:n]
+
+
+def nonempty(path: Path) -> bool:
     try:
-        chrom = int(float(text))
-    except Exception:
-        return None
-    return chrom if 1 <= chrom <= 22 else None
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
-def clean_allele(value: Any) -> str | None:
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-    text = str(value).strip().upper()
-    if text in {"", ".", "NA", "NAN", "NONE", "<NA>"}:
-        return None
-    return text
-
-
-def make_variant_key(chrom: Any, pos: Any, ref: Any, alt: Any) -> str:
-    chrom = clean_chr(chrom)
-    ref = clean_allele(ref)
-    alt = clean_allele(alt)
-    try:
-        pos = int(float(pos))
-    except Exception:
-        return ""
-    if chrom is None or pos <= 0 or ref is None or alt is None:
-        return ""
-    return f"{chrom}:{pos}:{ref}:{alt}"
-
-
-def parse_variant_id(value: Any) -> tuple[int | None, int | None, str | None, str | None]:
-    text = str(value).strip()
-    match = re.match(
-        r"^(?:chr)?(\d+)[:_](\d+)[:_]([^:_]+)[:_]([^:_]+)(?:[:_]b\d+)?$",
-        text,
-        flags=re.I,
-    )
-    if not match:
-        return None, None, None, None
-    chrom, pos, ref, alt = match.groups()
-    return clean_chr(chrom), int(pos), clean_allele(ref), clean_allele(alt)
+def complete_file(path: Path) -> bool:
+    """Non-empty and not still being downloaded (.aria2 / .part / .lock)."""
+    return nonempty(path) and not any(Path(str(path) + s).exists() for s in (".aria2", ".part", ".lock"))
 
 
 def safe_int(value: Any) -> int | None:
@@ -296,21 +214,8 @@ def safe_int(value: Any) -> int | None:
         return None
 
 
-def numeric(series: pd.Series) -> pd.Series:
+def numeric(series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
-
-
-def boolish(value: Any) -> bool:
-    if isinstance(value, (bool, np.bool_)):
-        return bool(value)
-    if value is None:
-        return False
-    try:
-        if pd.isna(value):
-            return False
-    except Exception:
-        pass
-    return str(value).strip().lower() in {"1", "true", "t", "yes", "y"}
 
 
 def first_existing(columns: Iterable[str], candidates: Iterable[str]) -> str | None:
@@ -321,8 +226,8 @@ def first_existing(columns: Iterable[str], candidates: Iterable[str]) -> str | N
     return None
 
 
-def safe_json(path: Path) -> dict:
-    if not path.exists() or path.stat().st_size == 0:
+def read_json(path: Path) -> dict:
+    if not nonempty(path):
         return {}
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -330,543 +235,268 @@ def safe_json(path: Path) -> dict:
         return {}
 
 
+def clean_json(value):
+    if isinstance(value, dict):
+        return {str(k): clean_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [clean_json(v) for v in value]
+    if isinstance(value, (np.floating, float)):
+        return float(value) if np.isfinite(float(value)) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    return value
+
+
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(clean_json(payload), indent=2, default=str, allow_nan=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 
-def read_table(path: Path, **kwargs) -> pd.DataFrame:
-    if not path.exists() or path.stat().st_size == 0:
-        return pd.DataFrame()
-    lower = path.name.lower()
-    if lower.endswith(".parquet") or lower.endswith(".pq"):
-        return pd.read_parquet(path, **kwargs)
-    if lower.endswith(".csv") or lower.endswith(".csv.gz"):
-        return pd.read_csv(path, low_memory=False, **kwargs)
-    return pd.read_csv(
-        path,
-        sep="\t",
-        compression="infer",
-        low_memory=False,
-        **kwargs,
-    )
-
-
-def validate_walltime(value: str) -> str:
-    text = str(value).strip()
-    if not re.fullmatch(r"(\d+-)?\d{1,3}(:\d{2}){0,2}", text):
-        raise argparse.ArgumentTypeError(f"walltime {value!r} must look like 12:00:00 or 2-00:00:00")
-    return text
-
-
-def run_command(
-    command: list[str | Path],
-    *,
-    log_file: Path | None = None,
-    capture: bool = False,
-    check: bool = True,
-) -> str:
-    command = [str(x) for x in command]
-    print("$ " + " ".join(shlex.quote(x) for x in command), flush=True)
-    proc = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    output = []
-    handle = None
-    if log_file:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        handle = log_file.open("w", encoding="utf-8")
-    assert proc.stdout is not None
-    try:
-        for line in proc.stdout:
-            output.append(line)
-            if not capture:
-                print(line, end="", flush=True)
-            if handle:
-                handle.write(line)
-                handle.flush()
-    finally:
-        if handle:
-            handle.close()
-    rc = proc.wait()
-    text = "".join(output)
-    if check and rc != 0:
-        raise RuntimeError(
-            f"Command failed with exit code {rc}:\n"
-            + " ".join(shlex.quote(x) for x in command)
-            + "\n"
-            + text[-8000:]
-        )
-    return text
-
-
-@contextmanager
-def exclusive_file_lock(path: Path):
-    """Cross-process advisory lock for shared downloads/aggregate writes on Linux HPC."""
-    import fcntl   # Linux / HPC only
-
-    lock_path = Path(str(path) + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-_REGION_CACHE: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
-_REGION_CACHE_LIMIT = 32
-_CUSTOM_FILE_CACHE: OrderedDict[str, pd.DataFrame] = OrderedDict()
-_CUSTOM_FILE_CACHE_LIMIT = 2
-_LBF_TABLE_CACHE: OrderedDict[str, pd.DataFrame] = OrderedDict()
-_LBF_TABLE_CACHE_LIMIT = 2
-
-
-def _cache_put(cache: OrderedDict, key, value, limit: int) -> None:
-    cache[key] = value
-    cache.move_to_end(key)
-    while len(cache) > limit:
-        cache.popitem(last=False)
-
-
-def cached_custom_file(path: Path) -> pd.DataFrame:
-    key = str(path.resolve())
-    if key in _CUSTOM_FILE_CACHE:
-        _CUSTOM_FILE_CACHE.move_to_end(key)
-        return _CUSTOM_FILE_CACHE[key]
-    x = read_table(path)
-    _cache_put(_CUSTOM_FILE_CACHE, key, x, _CUSTOM_FILE_CACHE_LIMIT)
-    return x
-
-
-def read_resource_env(root: Path) -> dict[str, str]:
-    path = root / "resource_paths.env"
-    result = {}
-    if not path.exists():
-        return result
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        result[key.replace("export ", "").strip()] = value.strip().strip('"').strip("'")
-    return result
-
-
-def find_executable(
-    root: Path,
-    explicit: str | None,
-    env_name: str,
-    command: str,
-) -> Path:
-    env = read_resource_env(root)
-    candidates = [
-        explicit,
-        os.environ.get(env_name),
-        env.get(env_name),
-        shutil.which(command),
-        root / "envs" / "pipeline" / "bin" / command,
-    ]
-    for item in candidates:
-        if not item:
-            continue
-        path = Path(item).expanduser()
-        if path.exists() and os.access(path, os.X_OK):
-            return path.resolve()
-    raise FileNotFoundError(
-        f"Could not locate executable {command!r}; provide it explicitly."
-    )
-
-
-def write_custom_registry_template(root: Path, overwrite: bool = False) -> Path:
-    path = root / "resources" / "coloc" / "custom_qtl_registry.tsv"
+def write_tsv(frame: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and not overwrite:
-        return path
-
-    base = {
-        "ENABLED": False,
-        "TISSUE": "",
-        "CONDITION": "",
-        "SOURCE_URL": "",
-        "LOCAL_PATH": "",
-        "ACCESS_MODE": "file",
-        "SAMPLE_SIZE": "",
-        "GENE_COLUMN": "",
-        "VARIANT_COLUMN": "variant",
-        "CHR_COLUMN": "",
-        "POS_COLUMN": "",
-        "REF_COLUMN": "",
-        "ALT_COLUMN": "",
-        "BETA_COLUMN": "beta",
-        "SE_COLUMN": "se",
-        "P_COLUMN": "pvalue",
-        "MAF_COLUMN": "maf",
-        "EFFECT_ALLELE_MODE": "ALT",
-        "EFFECT_ALLELE_COLUMN": "",
-        "GENOME_BUILD": "GRCh38",
-        "NOTES": "",
-    }
-
-    specs = [
-        ("YOUR_MEQTL_DATASET", "meQTL", "cpg_id", "DNA methylation QTL"),
-        ("YOUR_CAQTL_DATASET", "caQTL", "peak_id", "chromatin accessibility QTL"),
-        ("YOUR_HQTL_DATASET", "hQTL", "peak_id", "histone-mark QTL"),
-        ("YOUR_METABOLITE_QTL_DATASET", "metaboliteQTL", "metabolite_id", "metabolite QTL"),
-        ("YOUR_OTHER_QTL_DATASET", "otherQTL", "trait_id", "future/custom molecular QTL"),
-    ]
-
-    rows = []
-    for dataset, qtl_type, trait_col, note in specs:
-        row = dict(base)
-        row.update({
-            "DATASET": dataset,
-            "QTL_TYPE": qtl_type,
-            "TRAIT_COLUMN": trait_col,
-            "NOTES": (
-                f"Configure a licensed/public dense {note} summary-statistics source: "
-                "set LOCAL_PATH (bgzip + tabix), the column names and ENABLED=True. Nothing is downloaded."
-            ),
-        })
-        rows.append(row)
-
-    pd.DataFrame(rows, columns=CUSTOM_REGISTRY_COLUMNS).to_csv(
-        path, sep="\t", index=False
-    )
-    return path
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    frame.to_csv(tmp, sep="\t", index=False, compression="gzip" if path.name.endswith(".gz") else None)
+    os.replace(tmp, path)
 
 
-def arguments():
-    parser = argparse.ArgumentParser(
-        description="Formal molecular-QTL colocalisation (coloc.susie), one SLURM task per fine-mapped locus."
-    )
-    parser.add_argument("--phenotype", required=True)
-    parser.add_argument("--ancestry", required=True)
+def read_tsv(path: Path, **kwargs) -> pd.DataFrame:
+    if not nonempty(path):
+        return pd.DataFrame()
+    return pd.read_csv(path, sep="\t", compression="infer", low_memory=False, **kwargs)
 
-    modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--index", type=int,
-                       help="Study N of the Step02 download manifest: run its loci on this machine.")
-    modes.add_argument("--status", action="store_true", help="READ-ONLY: loci done / failed / pending.")
-    modes.add_argument("--stats", action="store_true", help="Colocalisation results per study (coloc_stats.tsv).")
-    modes.add_argument("--check-resources", action="store_true",
-                       help="Which eQTL Catalogue / custom QTL datasets are available locally.")
-    modes.add_argument("--worker-manifest", default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--locus", default=None, help="With --index: only this locus (e.g. L001).")
-    parser.add_argument("--study", default=None, help="Planner: only this GCST accession.")
 
-    parser.add_argument("--reference-panel", default=DEFAULT_PANEL,
-                        help="LD reference panel of Steps 04-06: 1000G (default), 1000G30x or a custom name. "
-                             "Other panels read 06_finemapping/<p>/<a>_<PANEL>/ and write 09_coloc/<p>/<a>_<PANEL>/.")
-    parser.add_argument("--registry", default="resources/coloc/custom_qtl_registry.tsv")
-    parser.add_argument("--qtl-types", default=",".join(SUPPORTED_QTL_TYPES))
-    parser.add_argument("--catalog-all-studies", action="store_true",
-                        help="Every downloaded eQTL Catalogue study (default: GTEx v8 + Sun_2018).")
-    parser.add_argument("--catalog-study-regex", default="")
+def find_executable(name: str) -> str | None:
+    local = PROJECT_ROOT / "envs" / "pipeline" / "bin" / name
+    if local.exists() and os.access(local, os.X_OK):
+        return str(local)
+    return shutil.which(name)
 
-    parser.add_argument("--candidate-p", type=float, default=DEFAULT_CANDIDATE_P)
-    parser.add_argument("--min-common-snps", type=int, default=DEFAULT_MIN_COMMON_SNPS)
-    parser.add_argument("--max-common-snps", type=int, default=DEFAULT_MAX_COMMON_SNPS)
-    parser.add_argument("--strong-pp4", type=float, default=DEFAULT_STRONG_PP4)
-    parser.add_argument("--suggestive-pp4", type=float, default=DEFAULT_SUGGESTIVE_PP4)
-    parser.add_argument("--max-candidates-per-context-locus", type=int,
-                        default=DEFAULT_MAX_CANDIDATES_PER_CONTEXT_LOCUS)
-    parser.add_argument("--ld-maf", type=float, default=DEFAULT_LD_MAF)
-    parser.add_argument("--ld-mismatch-s", type=float, default=DEFAULT_LD_MISMATCH_S)
-    parser.add_argument("--plink2")
-    parser.add_argument("--tabix")
-    parser.add_argument("--rscript")
-    parser.add_argument("--force", action="store_true", help="Re-run loci / candidates that are complete.")
 
-    slurm = parser.add_argument_group("SLURM (default: the #SBATCH header of HPC_CPU.sh)")
-    slurm.add_argument("--template", default="HPC_CPU.sh")
-    slurm.add_argument("--partition", default=None)
-    slurm.add_argument("--qos", default=None)
-    slurm.add_argument("--account", default=None)
-    slurm.add_argument("--cpus", type=int, default=None)
-    slurm.add_argument("--mem", "--memory", dest="mem", default=None)
-    slurm.add_argument("--time", type=validate_walltime, default=None)
-    slurm.add_argument("--max-parallel", type=int, default=0,
-                       help="Maximum simultaneously running locus tasks (0 = no throttle).")
-    args = parser.parse_args()
+def make_variant_key(chrom: Any, pos: Any, ref: Any, alt: Any) -> str:
+    c = re.sub(r"^chr", "", str(chrom).strip(), flags=re.I)
+    try:
+        c_int, p_int = int(float(c)), int(float(pos))
+    except Exception:
+        return ""
+    ref, alt = str(ref).strip().upper(), str(alt).strip().upper()
+    if not (1 <= c_int <= 22) or p_int <= 0 or ref in {"", "NAN", "NONE", "."} or alt in {"", "NAN", "NONE", "."}:
+        return ""
+    return f"{c_int}:{p_int}:{ref}:{alt}"
 
-    values = {"nodes": "1", "ntasks": "1", "cpus-per-task": str(DEFAULT_CPUS), "mem": "32G", "time": "12:00:00"}
+
+VARIANT_ID = re.compile(r"^(?:chr)?(\d{1,2})[:_](\d+)[:_]([A-Za-z]+)[:_]([A-Za-z]+)$")
+
+
+def variant_keys(ids: pd.Series) -> pd.Series:
+    """chr1_114643302_G_A / 1:114643302:G:A -> 1:114643302:G:A ('' if unparseable or not chr1-22)."""
+    parts = ids.astype(str).str.extract(VARIANT_ID)
+    chrom = pd.to_numeric(parts[0], errors="coerce")
+    ok = parts.notna().all(axis=1) & chrom.between(1, 22)
+    keys = (chrom.astype("Int64").astype(str) + ":" + parts[1] + ":" + parts[2].str.upper() + ":"
+            + parts[3].str.upper())
+    return keys.where(ok, "")
+
+
+# =============================================================================
+# CONFIGURATION AND SLURM
+# =============================================================================
+
+def load_config(path: Path) -> dict:
+    cfg = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+           for k, v in DEFAULT_CONFIG.items()}
+    if path.is_file():
+        values = runpy.run_path(str(path))
+        unknown = [k for k in values if k.isupper() and k not in DEFAULT_CONFIG]
+        if unknown:
+            print(f"[CONFIG] ignoring unknown settings in {path.name}: {', '.join(unknown)}")
+        cfg.update({k: v for k, v in values.items() if k in DEFAULT_CONFIG})
+        cfg["_FILE"] = str(path)
+    else:
+        print(f"[CONFIG] {path} not found - using built-in defaults")
+        cfg["_FILE"] = ""
+    if isinstance(cfg["QTL_TYPES"], str):
+        cfg["QTL_TYPES"] = [x.strip() for x in cfg["QTL_TYPES"].split(",") if x.strip()]
+    return cfg
+
+
+def apply_overrides(cfg: dict, args) -> dict:
+    if args.qtl_types:
+        cfg["QTL_TYPES"] = [x.strip() for x in args.qtl_types.split(",") if x.strip()]
+    if args.study_regex is not None:
+        cfg["STUDY_REGEX"] = args.study_regex
+    for name in ("candidate_p", "strong_pp4", "suggestive_pp4"):
+        if getattr(args, name) is not None:
+            cfg[name.upper()] = getattr(args, name)
+    return cfg
+
+
+PER_JOB_KEYS = {"job-name", "output", "error", "array"}
+
+
+def resolve_slurm(args, cfg: dict) -> dict:
+    """Built-in < HPC_CPU.sh #SBATCH header < config SLURM {...} < command line."""
+    values = {"nodes": "1", "ntasks": "1", "cpus-per-task": "4", "mem": "32G", "time": "24:00:00"}
     template = PROJECT_ROOT / args.template
     if template.is_file():
         for line in template.read_text(encoding="utf-8").splitlines():
             match = re.match(r"^\s*#SBATCH\s+--([A-Za-z-]+)(?:[=\s]+(.*))?$", line)
-            if match and (match.group(2) or "").strip() and match.group(1) not in {"job-name", "output", "error", "array"}:
+            if match and (match.group(2) or "").strip() and match.group(1) not in PER_JOB_KEYS:
                 values[match.group(1)] = match.group(2).strip()
+    for key, value in (cfg.get("SLURM") or {}).items():
+        if value not in (None, "") and key not in PER_JOB_KEYS:
+            values[str(key)] = str(value)
     for key, value in (("partition", args.partition), ("qos", args.qos), ("account", args.account),
                        ("cpus-per-task", args.cpus), ("mem", args.mem), ("time", args.time)):
         if value not in (None, ""):
             values[key] = str(value)
-    args.slurm_values = values
-    args.cpus = int(values["cpus-per-task"])
-    if args.max_common_snps < args.min_common_snps:
-        parser.error("--max-common-snps must be >= --min-common-snps")
-    if args.locus and args.index is None:
-        parser.error("--locus needs --index")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.reference_panel):
-        parser.error(f"--reference-panel {args.reference_panel!r}: use letters, digits, '_', '-' or '.'")
-    return args
+    return values
 
 
-DEFAULT_PANEL = "1000G"
-# LD reference panel of Steps 04-06 (set from --reference-panel in main()).
-REFERENCE_PANEL = DEFAULT_PANEL
+# =============================================================================
+# PATHS: Step02 study numbers, Step06 fine-mapping (per LD panel), this step's results
+# =============================================================================
 
-
-def results_slug(ancestry_slug: str, panel: str | None = None) -> str:
-    """Results folder per LD reference panel: <ancestry> (1000G) or <ancestry>_<panel>."""
-    panel = panel or REFERENCE_PANEL
+def results_slug(ancestry_slug: str, panel: str) -> str:
     return ancestry_slug if panel == DEFAULT_PANEL else f"{ancestry_slug}_{panel}"
 
 
-def panel_option(panel: str | None = None) -> str:
-    panel = panel or REFERENCE_PANEL
+def panel_option(panel: str) -> str:
     return "" if panel == DEFAULT_PANEL else f" --reference-panel {panel}"
 
 
-def project_paths(root: Path, phenotype: str, ancestry_label: str) -> dict[str, Path]:
-    p = slugify(phenotype)
-    a = slugify(ancestry_label)
-    r = results_slug(a)
+def project_paths(args) -> dict:
+    code, label = canonical_ancestry(args.ancestry)
+    p, a = slugify(args.phenotype), slugify(label)
+    r = results_slug(a, args.reference_panel)
     return {
-        "S02": root / "01_gwas_catalog" / p / a,      # study numbers: shared by every panel
-        "S06": root / "06_finemapping" / p / r,
-        "OUT": root / "09_coloc" / p / r,
-        "LOG": root / "logs" / "step09_coloc" / p / r,
+        "phenotype": args.phenotype.strip(), "code": code, "label": label, "p": p, "a": a, "r": r,
+        "panel": args.reference_panel,
+        "S02": PROJECT_ROOT / "01_gwas_catalog" / p / a,          # study numbers, shared by every panel
+        "S06": PROJECT_ROOT / "06_finemapping" / p / r,
+        "OUT": PROJECT_ROOT / STEP["OUT_DIR"] / p / r,
+        "LOG": PROJECT_ROOT / "logs" / STEP["LOG_DIR"] / p / r,
+        "BASH": PROJECT_ROOT / f"{STEP['SCRIPT_PREFIX']}_{p}_{r}.sh",
     }
 
 
-def discover_step06_studies(s06: Path) -> tuple[list[str], list[dict]]:
-    studies = []
-    excluded = []
-    if not s06.exists():
+def base_command(P: dict) -> str:
+    return (f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(P['phenotype'])} "
+            f"--ancestry {P['code']}{panel_option(P['panel'])}")
+
+
+def step02_order(P: dict) -> dict[str, int]:
+    path = P["S02"] / "GWAS_download_manifest.tsv"
+    if not path.is_file():
+        return {}
+    m = pd.read_csv(path, sep="\t", dtype=str)
+    ids = pd.to_numeric(m.get("ARRAY_ID"), errors="coerce")
+    return {str(acc).strip(): int(i) for acc, i in zip(m["STUDY_ACCESSION"], ids) if pd.notna(i)}
+
+
+def study_for_index(P: dict, index: int) -> str:
+    order = step02_order(P)
+    if not order:
+        raise SystemExit(f"No Step02 download manifest under {P['S02']} - run the Step02 planner first.")
+    for accession, i in order.items():
+        if i == index:
+            return accession
+    listing = "\n".join(f"  {i:>3}  {a}" for a, i in sorted(order.items(), key=lambda x: x[1]))
+    raise SystemExit(f"--index {index} is not in the Step02 manifest. Available:\n{listing}")
+
+
+# =============================================================================
+# STEP06 INPUT (GWAS side: the SuSiE-RSS fit of every fine-mapped locus)
+# =============================================================================
+
+def step06_studies(S06: Path) -> tuple[list[str], list[dict]]:
+    studies, excluded = [], []
+    if not S06.exists():
         return studies, excluded
-
-    accessions = set()
-    manifest = s06 / "finemapping_manifest.tsv"
-    if manifest.exists():
-        x = pd.read_csv(manifest, sep="\t", dtype=str, low_memory=False)
-        if "STUDY_ACCESSION" in x.columns:
-            accessions.update(
-                v.strip()
-                for v in x["STUDY_ACCESSION"].dropna().astype(str)
-                if v.strip()
-            )
-
-    for directory in s06.glob("GCST*"):
-        if directory.is_dir():
-            accessions.add(directory.name)
-
-    for accession in sorted(accessions):
-        study_dir = s06 / accession
-        summary = safe_json(study_dir / "finemapping_summary.json")
-        fine_file = study_dir / f"{accession}_finemapped_variants.tsv.gz"
+    for d in sorted(p for p in S06.iterdir() if p.is_dir() and p.name.startswith("GCST")):
+        summary = read_json(d / "finemapping_summary.json")
         status = str(summary.get("STATUS", "")).upper()
-        n_success = safe_int(summary.get("N_LOCI_SUCCESS")) or 0
-
-        reason = ""
         if not summary:
-            reason = "Step06 summary missing/unreadable"
+            excluded.append({"STUDY_ACCESSION": d.name, "REASON": "Step06 not finished (no finemapping_summary.json)"})
         elif status == "NO_SIGNIFICANT_LOCI":
-            reason = "No significant loci"
-        elif n_success <= 0 and status not in {"COMPLETE", "PARTIAL"}:
-            reason = f"No successful loci; status={status}"
-        elif not fine_file.exists() or fine_file.stat().st_size == 0:
-            reason = "Combined Step06 fine-mapped file missing/empty"
-
-        if reason:
-            excluded.append({
-                "STUDY_ACCESSION": accession,
-                "STEP06_STATUS": status,
-                "REASON": reason,
-            })
+            excluded.append({"STUDY_ACCESSION": d.name, "REASON": "no genome-wide significant loci"})
+        elif not list_loci(d):
+            excluded.append({"STUDY_ACCESSION": d.name, "REASON": "no locus with a SuSiE fit"})
         else:
-            studies.append(accession)
-
+            studies.append(d.name)
     return studies, excluded
 
 
 def list_loci(study_dir: Path) -> list[str]:
-    """Step06 loci that have a SuSiE fit (failed loci cannot be colocalised)."""
     loci_dir = study_dir / "loci"
     if not loci_dir.exists():
         return []
-    return sorted(
-        d.name for d in loci_dir.iterdir()
-        if d.is_dir() and re.fullmatch(r"L\d+", d.name) and (d / "susie" / "susie_fit.rds").exists()
-    )
-
-
-def load_gwas_metadata(s06: Path, accession: str) -> dict:
-    """Phenotype type and N from Step06 (finemapping_summary.json, which carries
-    Step02's PHENOTYPE_TYPE / N_CASES / N_CONTROLS / N_TOTAL / N_EFF), else
-    from Step02 GWAS_study_metadata.tsv. The GWAS side of coloc.susie is the
-    Step06 SuSiE fit, so N only documents the run."""
-    meta = safe_json(s06 / accession / "finemapping_summary.json")
-    step02 = s06.parents[2] / "01_gwas_catalog" / s06.parent.name / s06.name / "GWAS_study_metadata.tsv"
-    if step02.exists() and not meta.get("PHENOTYPE_TYPE"):
-        table = read_table(step02, dtype=str)
-        row = table[table.get("GCST_ID", pd.Series(dtype=str)).astype(str) == accession]
-        if not row.empty:
-            meta = {**row.iloc[0].to_dict(), **meta}
-
-    n_cases, n_controls = safe_int(meta.get("N_CASES")), safe_int(meta.get("N_CONTROLS"))
-    phenotype_type = str(meta.get("PHENOTYPE_TYPE", "") or "")
-    binary = phenotype_type == "Binary"
-    return {
-        "METADATA_FILE": str(s06 / accession / "finemapping_summary.json"),
-        "PHENOTYPE_TYPE": phenotype_type or "Unknown",
-        "COLOC_GWAS_N": safe_int(meta.get("GWAS_N")) or safe_int(meta.get("N_TOTAL")),
-        "GWAS_N_SOURCE": meta.get("GWAS_N_SOURCE", ""),
-        "N_CASES": n_cases if binary else None,
-        "N_CONTROLS": n_controls if binary else None,
-        "N_EFF": safe_int(meta.get("N_EFF")),
-        "GWAS_TYPE": "cc" if binary else "quant",
-        "CASE_PROPORTION": n_cases / (n_cases + n_controls) if binary and n_cases and n_controls else None,
-        "METADATA_STATUS": "OK" if phenotype_type in ("Binary", "Continuous") else "PHENOTYPE_TYPE_UNKNOWN",
-    }
+    return sorted(d.name for d in loci_dir.iterdir()
+                  if d.is_dir() and re.fullmatch(r"L\d+", d.name) and (d / "susie" / "susie_fit.rds").exists())
 
 
 def load_gwas_locus(study_dir: Path, locus_id: str) -> pd.DataFrame:
     locus_dir = study_dir / "loci" / locus_id
-    paths = [
-        locus_dir / "reference_qc_matched_variants.tsv.gz",
-        locus_dir / "matched_variants.tsv",
-    ]
-    source = next(
-        (p for p in paths if p.exists() and p.stat().st_size > 0),
-        None,
-    )
+    source = next((p for p in (locus_dir / "reference_qc_matched_variants.tsv.gz", locus_dir / "matched_variants.tsv")
+                   if nonempty(p)), None)
     if source is None:
-        raise FileNotFoundError(
-            f"No Step06 dense matched GWAS table for {locus_id} under {locus_dir}"
-        )
-
-    x = read_table(source)
-
-    chr_col = first_existing(x.columns, ["REFERENCE_CHR", "CHR"])
-    pos_col = first_existing(x.columns, ["REFERENCE_POS", "POS"])
-    ref_col = first_existing(x.columns, ["REFERENCE_REF"])
-    alt_col = first_existing(x.columns, ["REFERENCE_ALT"])
-    rid_col = first_existing(x.columns, ["REFERENCE_ID"])
-    beta_col = first_existing(x.columns, ["BETA_REF"])
-    se_col = first_existing(x.columns, ["SE"])
-    p_col = first_existing(x.columns, ["P"])
-
-    required = {
-        "CHR": chr_col, "POS": pos_col, "REF": ref_col, "ALT": alt_col,
-        "REFERENCE_ID": rid_col, "BETA_REF": beta_col, "SE": se_col, "P": p_col,
-    }
-    missing = [name for name, col in required.items() if col is None]
+        raise FileNotFoundError(f"No Step06 matched GWAS table for {locus_id} under {locus_dir}")
+    x = read_tsv(source)
+    cols = {name: first_existing(x.columns, aliases) for name, aliases in {
+        "CHR": ["REFERENCE_CHR", "CHR"], "POS": ["REFERENCE_POS", "POS"], "REF": ["REFERENCE_REF"],
+        "ALT": ["REFERENCE_ALT"], "REFERENCE_ID": ["REFERENCE_ID"], "P": ["P"]}.items()}
+    missing = [k for k, v in cols.items() if v is None]
     if missing:
-        raise RuntimeError(
-            f"{source} is missing fields needed for formal coloc: {missing}"
-        )
-
-    out = pd.DataFrame({
-        "CHR": x[chr_col].map(clean_chr),
-        "POS": numeric(x[pos_col]),
-        "REF": x[ref_col].map(clean_allele),
-        "ALT": x[alt_col].map(clean_allele),
-        "REFERENCE_ID": x[rid_col].astype(str),
-        "GWAS_BETA": numeric(x[beta_col]),
-        "GWAS_SE": numeric(x[se_col]),
-        "GWAS_P": numeric(x[p_col]),
-    })
-
-    out["VARIANT_KEY"] = [
-        make_variant_key(c, p, r, a)
-        for c, p, r, a in zip(out["CHR"], out["POS"], out["REF"], out["ALT"])
-    ]
-
-    out = out[
-        out["VARIANT_KEY"].ne("")
-        & out["GWAS_BETA"].notna()
-        & out["GWAS_SE"].notna()
-        & (out["GWAS_SE"] > 0)
-        & out["REFERENCE_ID"].notna()
-    ].copy()
-
-    out = (
-        out.sort_values(["CHR", "POS", "GWAS_P"], kind="stable")
-        .drop_duplicates("VARIANT_KEY", keep="first")
-        .reset_index(drop=True)
-    )
-    return out
+        raise RuntimeError(f"{source} lacks {missing}")
+    out = pd.DataFrame({k: x[v] for k, v in cols.items()})
+    out["VARIANT_KEY"] = [make_variant_key(c, p, r, a) for c, p, r, a in
+                          zip(out["CHR"], out["POS"], out["REF"], out["ALT"])]
+    out["POS"] = numeric(out["POS"])
+    out["CHR"] = numeric(out["CHR"].astype(str).str.replace("chr", "", regex=False))
+    out = out[out["VARIANT_KEY"].ne("") & out["REFERENCE_ID"].notna()].copy()
+    return out.drop_duplicates("VARIANT_KEY").reset_index(drop=True)
 
 
-def locus_region(gwas: pd.DataFrame) -> tuple[int, int, int]:
-    chroms = sorted(set(gwas["CHR"].dropna().astype(int)))
-    if len(chroms) != 1:
-        raise RuntimeError(f"Locus spans multiple chromosomes: {chroms}")
-    return chroms[0], int(gwas["POS"].min()), int(gwas["POS"].max())
-
-
-def ensure_catalogue_metadata(root: Path, auto_download: bool = False) -> None:
-    """The dataset lists come from Step00_Download_Resources.py --groups eqtl_catalogue."""
-    missing = [spec["path"] for spec in EQTL_CATALOG_PUBLIC.values()
-               if spec["path"].endswith("tabix_ftp_paths.tsv") and not (root / spec["path"]).exists()]
+def gwas_susie_inputs(study_dir: Path, locus_id: str, code: str, gwas: pd.DataFrame,
+                      work: Path) -> tuple[Path, Path]:
+    """Step06 SuSiE fit + its variant order as VARIANT_KEY (the LD .vars file order of the fit)."""
+    locus = study_dir / "loci" / locus_id
+    fit, var_file = locus / "susie" / "susie_fit.rds", locus / f"{code}_LD.unphased.vcor1.bin.vars"
+    if not nonempty(fit) or not nonempty(var_file):
+        raise FileNotFoundError(f"Step06 SuSiE fit or LD variant list missing for {locus_id}: {fit} / {var_file}")
+    order = [v.strip() for v in var_file.read_text().splitlines() if v.strip()]
+    mapping = gwas[["REFERENCE_ID", "VARIANT_KEY"]].drop_duplicates("REFERENCE_ID").set_index("REFERENCE_ID")
+    missing = [v for v in order if v not in mapping.index]
     if missing:
-        print("[INFO] eQTL Catalogue dataset list missing: " + ", ".join(missing)
-              + "\n       envs/pipeline/bin/python Step00_Download_Resources.py --groups eqtl_catalogue")
+        raise RuntimeError(f"{len(missing)} SuSiE variants of {locus_id} are not in the Step06 matched table "
+                           f"(e.g. {missing[:3]}) - rerun Step06 for this study")
+    path = work / "gwas_susie_variant_map.tsv"
+    pd.DataFrame({"REFERENCE_ID": order, "VARIANT_KEY": mapping.loc[order, "VARIANT_KEY"].values}).to_csv(
+        path, sep="\t", index=False)
+    return fit, path
 
 
-def normalize_catalogue_manifest(path: Path) -> pd.DataFrame:
-    x = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
-    rename = {}
-    mapping = {
-        "study_id": ["study_id"],
-        "dataset_id": ["dataset_id"],
-        "study_label": ["study_label", "study"],
-        "sample_group": ["sample_group", "qtl_group"],
-        "tissue_id": ["tissue_id"],
-        "tissue_label": ["tissue_label", "tissue"],
-        "condition_label": ["condition_label", "condition"],
-        "sample_size": ["sample_size", "n"],
-        "quant_method": ["quant_method", "quantification_method"],
-        "ftp_path": ["ftp_path", "sumstats_path"],
-        "ftp_cs_path": ["ftp_cs_path"],
-        "ftp_lbf_path": ["ftp_lbf_path"],
-    }
-    for target, aliases in mapping.items():
-        col = first_existing(x.columns, aliases)
-        if col:
-            rename[col] = target
-    x = x.rename(columns=rename)
-
-    for column in mapping:
-        if column not in x.columns:
-            x[column] = ""
-    return x
+def gwas_cs_indices(rscript: str, fit: Path) -> list[int]:
+    code = ("fit <- readRDS(commandArgs(trailingOnly=TRUE)[1]); "
+            "idx <- tryCatch(fit$sets$cs_index, error=function(e) NULL); "
+            "if (length(idx)) cat(paste(as.integer(idx), collapse=','))")
+    proc = subprocess.run([rscript, "-e", code, str(fit)], text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Cannot read the Step06 SuSiE credible sets of {fit}: {proc.stderr.strip()[-500:]}")
+    return sorted({int(v) for v in proc.stdout.strip().split(",") if v.strip().isdigit() and int(v) >= 1})
 
 
-def load_eqtl_catalogue(root: Path, auto_download: bool) -> pd.DataFrame:
-    ensure_catalogue_metadata(root, auto_download)
-    paths = [
-        root / EQTL_CATALOG_PUBLIC["TABIX_PATHS"]["path"],
-        root / EQTL_CATALOG_PUBLIC["TABIX_IMPORTED"]["path"],
-    ]
-    frames = [
-        normalize_catalogue_manifest(path)
-        for path in paths
-        if path.exists() and path.stat().st_size > 0
-    ]
-    if not frames:
-        return pd.DataFrame()
-    return (
-        pd.concat(frames, ignore_index=True)
-        .drop_duplicates(["dataset_id", "ftp_path"], keep="last")
-        .reset_index(drop=True)
-    )
-
+# =============================================================================
+# QTL RESOURCES: eQTL Catalogue metadata, dense summary statistics, provider SuSiE (LBF + CS)
+#   resources/coloc/eqtl_catalogue/tabix_ftp_paths*.tsv
+#   resources/coloc/eqtl_catalogue/dense/<dataset_id>/<file>.tsv.gz (+.tbi)
+#   resources/coloc/eqtl_catalogue/susie_provider/<dataset_id>/<id>.credible_sets.tsv.gz
+#   resources/coloc/eqtl_catalogue/susie_provider/<dataset_id>/<id>.lbf_variable.sorted.tsv.gz (+.tbi)
+#   (Step00_Download_Resources.py downloads them and position-sorts + tabix-indexes every LBF file)
+# =============================================================================
 
 def quant_method_to_qtl_type(value: Any) -> str | None:
     q = normalize_text(value)
@@ -885,2262 +515,977 @@ def quant_method_to_qtl_type(value: Any) -> str | None:
     return None
 
 
-def select_catalogue_contexts(
-    catalogue: pd.DataFrame,
-    args,
-    allowed_types: set[str],
-) -> pd.DataFrame:
+def basename(url: Any) -> str:
+    return str(url).strip().split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+
+
+def usable(value: Any) -> bool:
+    return str(value).strip().lower() not in {"", "na", "nan", "none", "."}
+
+
+def lbf_index_path(path: Path) -> Path:
+    """Position-sorted, bgzipped, tabix-indexed copy written by Step00 (same rule as Step00)."""
+    name = path.name
+    stem = name[:-7] if name.endswith(".txt.gz") else name[:-3] if name.endswith(".gz") else name
+    return path.with_name(stem + ".sorted.tsv.gz")
+
+
+def load_catalogue() -> pd.DataFrame:
+    frames = []
+    for name in CATALOGUE_TABLES:
+        path = EQTL_ROOT / name
+        if nonempty(path):
+            frames.append(pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False))
+    if not frames:
+        return pd.DataFrame()
+    x = pd.concat(frames, ignore_index=True)
+    for column in ("dataset_id", "study_label", "tissue_label", "sample_group", "condition_label", "sample_size",
+                   "quant_method", "ftp_path", "ftp_cs_path", "ftp_lbf_path"):
+        if column not in x.columns:
+            x[column] = ""
+    x["QTL_TYPE"] = x["quant_method"].map(quant_method_to_qtl_type)
+    return x.drop_duplicates("dataset_id", keep="last").reset_index(drop=True)
+
+
+def select_contexts(catalogue: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if catalogue.empty:
         return catalogue
-
-    x = catalogue.copy()
-    x["QTL_TYPE"] = x["quant_method"].map(quant_method_to_qtl_type)
-
-    unmapped = (
-        x.loc[x["QTL_TYPE"].isna(), "quant_method"]
-        .fillna("")
-        .astype(str)
-        .value_counts()
-    )
-    if not unmapped.empty:
-        print("[INFO] eQTL Catalogue quant_method values not mapped to a QTL class:")
-        for method, count in unmapped.items():
-            print(f"       {method or '<EMPTY>'}: {count}")
-
-    x = x[x["QTL_TYPE"].notna()].copy()
-    x = x[
-        x["QTL_TYPE"].astype(str).str.lower().isin(allowed_types)
-    ]
-
-    if args.catalog_study_regex:
-        pattern = re.compile(args.catalog_study_regex, flags=re.I)
-        x = x[
-            x["study_label"].astype(str).map(
-                lambda value: bool(pattern.search(value))
-            )
-        ]
-    elif not args.catalog_all_studies:
-        labels = x["study_label"].astype(str)
-        x = x[
-            labels.str.contains("GTEx", case=False, regex=False)
-            | labels.str.fullmatch("Sun_2018", case=False)
-        ].copy()
-
-    x = x[x["ftp_path"].astype(str).str.strip().ne("")].copy()
-
-    if not x.empty:
-        print("[INFO] Formal-coloc source counts by study/QTL type:")
-        counts = (
-            x.groupby(["study_label", "QTL_TYPE"], dropna=False)
-            .size()
-            .reset_index(name="N_CONTEXTS")
-        )
-        print(counts.to_string(index=False))
-        if x["study_label"].astype(str).str.contains("GTEx_v8", case=False, regex=False).any():
-            print("[INFO] GTEx data in the eQTL Catalogue are GTEx v8 (labelled GTEx_v8).")
-
+    types = {t.lower() for t in cfg["QTL_TYPES"]}
+    x = catalogue[catalogue["QTL_TYPE"].fillna("").str.lower().isin(types)].copy()
+    if cfg["DATASET_IDS"]:
+        x = x[x["dataset_id"].isin({str(d) for d in cfg["DATASET_IDS"]})]
+    elif cfg["STUDY_REGEX"]:
+        pattern = re.compile(cfg["STUDY_REGEX"], flags=re.I)
+        x = x[x["study_label"].map(lambda s: bool(pattern.search(str(s))))]
+    if cfg["TISSUE_REGEX"]:
+        pattern = re.compile(cfg["TISSUE_REGEX"], flags=re.I)
+        x = x[(x["tissue_label"] + " " + x["sample_group"]).map(lambda s: bool(pattern.search(s)))]
+    x = x[x["ftp_path"].map(usable) & x["ftp_lbf_path"].map(usable) & x["ftp_cs_path"].map(usable)]
     return x.reset_index(drop=True)
 
 
-_HEADER_CACHE: dict[str, list[str]] = {}
-
-
-def _is_remote_source(value: str) -> bool:
-    return bool(re.match(r"^(?:https?|ftp)://", str(value).strip(), flags=re.I))
-
-
-def _catalogue_basename(value: str) -> str:
-    text = str(value).strip().split("?", 1)[0].rstrip("/")
-    return text.rsplit("/", 1)[-1]
-
-
-def resolve_catalogue_local_sources(root: Path, contexts: pd.DataFrame) -> pd.DataFrame:
-    """Resolve every selected eQTL-Catalogue context to local BGZF + TBI files.
-
-    Normal Step09 analysis is deliberately network-free.  The manifest FTP URL
-    is retained only as provenance; ACCESS_PATH is always a local filesystem path.
-    """
-    if contexts.empty:
-        return contexts.copy()
-
-    dense_root = root / "resources" / "coloc" / "eqtl_catalogue" / "dense"
-    if not dense_root.exists():
-        print(f"[LOCAL QTL] no dense eQTL Catalogue files under {dense_root}")
-        return contexts.iloc[0:0].assign(ACCESS_PATH="", ACCESS_INDEX="", ACCESS_MODE="")
-
-    by_name: dict[str, list[Path]] = {}
-    for path in dense_root.rglob("*.tsv.gz"):
-        if path.is_file() and path.stat().st_size > 0:
-            by_name.setdefault(path.name, []).append(path.resolve())
-
+def resolve_resources(contexts: pd.DataFrame) -> pd.DataFrame:
+    """Local files and readiness of every selected context (nothing is downloaded here)."""
     rows = []
-    for _, row in contexts.iterrows():
-        out = row.to_dict()
-        dataset_id = str(row.get("dataset_id", "")).strip()
-        remote = str(row.get("ftp_path", "")).strip()
-        basename = _catalogue_basename(remote)
-
-        candidates: list[Path] = []
-        if dataset_id and basename:
-            candidates.append(dense_root / dataset_id / basename)
-        if basename:
-            candidates.append(dense_root / basename)
-            candidates.extend(by_name.get(basename, []))
-
-        # Prefer a path whose parent is the dataset_id when duplicates exist.
-        candidates = [Path(x) for x in dict.fromkeys(map(str, candidates))]
-        candidates.sort(
-            key=lambda x: (
-                0 if dataset_id and x.parent.name == dataset_id else 1,
-                len(str(x)),
-            )
-        )
-
-        data = None
-        index = None
-        for candidate in candidates:
-            if not candidate.exists() or candidate.stat().st_size == 0:
-                continue
-            tbi = Path(str(candidate) + ".tbi")
-            if tbi.exists() and tbi.stat().st_size > 0:
-                data = candidate.resolve()
-                index = tbi.resolve()
-                break
-
-        out["REMOTE_SOURCE_URL"] = remote
-        out["ACCESS_PATH"] = str(data) if data else ""
-        out["ACCESS_INDEX"] = str(index) if index else ""
-        out["ACCESS_MODE"] = "LOCAL_TABIX" if data and index else "MISSING_LOCAL"
-        rows.append(out)
-
-    result = pd.DataFrame(rows)
-    missing = result[result["ACCESS_MODE"].ne("LOCAL_TABIX")]
-    print(
-        f"[LOCAL QTL] {len(result) - len(missing)}/{len(result)} selected eQTL Catalogue datasets "
-        "are downloaded (.tsv.gz + .tbi)"
-    )
-    if not missing.empty:
-        print(f"[LOCAL QTL] {len(missing)} not downloaded - not tested (RESOURCE_NOT_CONFIGURED); get them with\n"
-              "            envs/pipeline/bin/python Step00_Download_Resources.py --groups qtl_catalogue")
-    return result[result["ACCESS_MODE"].eq("LOCAL_TABIX")].reset_index(drop=True)
+    for _, c in contexts.iterrows():
+        d = str(c["dataset_id"])
+        dense = EQTL_ROOT / "dense" / d / basename(c["ftp_path"])
+        if not nonempty(dense) and nonempty(EQTL_ROOT / "dense" / basename(c["ftp_path"])):
+            dense = EQTL_ROOT / "dense" / basename(c["ftp_path"])
+        cs = EQTL_ROOT / "susie_provider" / d / basename(c["ftp_cs_path"])
+        lbf = EQTL_ROOT / "susie_provider" / d / basename(c["ftp_lbf_path"])
+        lbf_idx = lbf_index_path(lbf)
+        dense_ok = complete_file(dense) and nonempty(Path(str(dense) + ".tbi"))
+        cs_ok = complete_file(cs)
+        indexed = complete_file(lbf_idx) and nonempty(Path(str(lbf_idx) + ".tbi"))
+        downloaded = complete_file(lbf)
+        status = ("READY" if dense_ok and cs_ok and indexed else
+                  "DENSE_MISSING" if not dense_ok else
+                  "PROVIDER_CS_MISSING" if not cs_ok else
+                  "LBF_NOT_INDEXED" if downloaded else "LBF_MISSING")
+        rows.append({**c.to_dict(), "DENSE_PATH": str(dense), "CS_PATH": str(cs), "LBF_PATH": str(lbf),
+                     "LBF_INDEX_PATH": str(lbf_idx), "DENSE_OK": dense_ok, "CS_OK": cs_ok,
+                     "LBF_DOWNLOADED": downloaded or indexed, "LBF_INDEXED": indexed, "RESOURCE_STATUS": status})
+    return pd.DataFrame(rows)
 
 
-def tabix_header(tabix: Path, source: str) -> list[str]:
-    source = str(source).strip()
-    if _is_remote_source(source):
-        raise RuntimeError(
-            f"Remote tabix is disabled in this Step09 build: {source}"
-        )
-    path = Path(source)
-    if not path.exists() or path.stat().st_size == 0:
-        raise FileNotFoundError(f"Local tabix source missing/empty: {path}")
-
-    key = str(path.resolve())
-    if key in _HEADER_CACHE:
-        return _HEADER_CACHE[key]
-
-    text = run_command([tabix, "-H", path], capture=True, check=False)
-    header_lines = [line for line in text.splitlines() if line.startswith("#")]
-
-    # Some BGZF files have a plain first header line rather than a tabix '#'-header.
-    if not header_lines:
-        try:
-            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
-                first = handle.readline().rstrip("\n\r")
-            if first:
-                header_lines = [first]
-        except Exception:
-            pass
-
-    if not header_lines:
-        raise RuntimeError(f"Could not retrieve header for local file: {path}")
-
-    header = header_lines[-1].lstrip("#").split("\t")
-    _HEADER_CACHE[key] = header
-    return header
+def context_hash(ready: pd.DataFrame) -> str:
+    return sha1_short("|".join(sorted(ready["dataset_id"].astype(str)))) if len(ready) else "none"
 
 
-def check_local_tabix_connectivity(tabix: Path, contexts: pd.DataFrame) -> None:
-    if contexts.empty:
-        return
-    source = str(contexts.iloc[0]["ACCESS_PATH"])
-    header = tabix_header(tabix, source)
-    if not header:
-        raise RuntimeError(f"Local eQTL-Catalogue header is empty: {source}")
-    print(f"[OK] Local tabix/header: {source}")
+def current_contexts(cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(every selected context with its resource status, the READY ones)."""
+    selected = select_contexts(load_catalogue(), cfg)
+    if selected.empty:
+        return selected, selected
+    status = resolve_resources(selected)
+    return status, status[status["RESOURCE_STATUS"] == "READY"].reset_index(drop=True)
 
 
-def tabix_region(
-    tabix: Path,
-    source: str,
-    chrom: int,
-    start: int,
-    end: int,
-) -> pd.DataFrame:
-    source = str(source).strip()
-    if _is_remote_source(source):
-        raise RuntimeError(f"Remote tabix is disabled: {source}")
-    path = Path(source)
-    if not path.exists() or path.stat().st_size == 0:
-        raise FileNotFoundError(f"Local tabix source missing/empty: {path}")
-    tbi = Path(str(path) + ".tbi")
-    if not tbi.exists() or tbi.stat().st_size == 0:
-        raise FileNotFoundError(f"Local tabix index missing/empty: {tbi}")
-
-    key = (str(path.resolve()), int(chrom), int(start), int(end))
-    if key in _REGION_CACHE:
-        _REGION_CACHE.move_to_end(key)
-        return _REGION_CACHE[key].copy()
-
-    header = tabix_header(tabix, str(path))
-    errors = []
-    successful_query = False
-
-    for region in (f"{chrom}:{start}-{end}", f"chr{chrom}:{start}-{end}"):
-        proc = subprocess.run(
-            [str(tabix), str(path), region],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-            timeout=120,
-        )
-        if proc.returncode != 0:
-            errors.append(proc.stderr.strip() or f"returncode={proc.returncode}")
-            continue
-
-        successful_query = True
-        lines = [
-            line for line in proc.stdout.splitlines()
-            if line and not line.startswith("#")
-        ]
-        if lines:
-            result = pd.read_csv(
-                io.StringIO("\n".join(lines)),
-                sep="\t",
-                names=header,
-                dtype=str,
-                low_memory=False,
-            )
-            _cache_put(_REGION_CACHE, key, result, _REGION_CACHE_LIMIT)
-            return result.copy()
-
-    if not successful_query and errors:
-        raise RuntimeError(
-            f"tabix failed for local file {path}: {errors[-1][:500]}"
-        )
-
-    result = pd.DataFrame(columns=header)
-    _cache_put(_REGION_CACHE, key, result, _REGION_CACHE_LIMIT)
-    return result.copy()
-
-def standardize_eqtl_catalogue_region(
-    x: pd.DataFrame,
-    context: pd.Series,
-) -> pd.DataFrame:
-    if x.empty:
-        return pd.DataFrame()
-
-    trait_col = first_existing(x.columns, ["molecular_trait_id", "phenotype_id", "trait_id"])
-    gene_col = first_existing(x.columns, ["gene_id"])
-    chr_col = first_existing(x.columns, ["chromosome", "chr", "chrom"])
-    pos_col = first_existing(x.columns, ["position", "pos", "bp"])
-    ref_col = first_existing(x.columns, ["ref", "reference_allele"])
-    alt_col = first_existing(x.columns, ["alt", "alternate_allele"])
-    variant_col = first_existing(x.columns, ["variant", "variant_id"])
-    p_col = first_existing(x.columns, ["pvalue", "p_value", "pval", "pval_nominal"])
-    beta_col = first_existing(x.columns, ["beta", "slope", "effect_size"])
-    se_col = first_existing(x.columns, ["se", "slope_se", "standard_error"])
-    maf_col = first_existing(x.columns, ["maf", "af", "allele_frequency"])
-    an_col = first_existing(x.columns, ["an", "allele_number"])
-
-    if trait_col is None or beta_col is None or se_col is None:
-        return pd.DataFrame()
-
-    out = pd.DataFrame(index=x.index)
-
-    if all(c is not None for c in [chr_col, pos_col, ref_col, alt_col]):
-        out["CHR"] = x[chr_col].map(clean_chr)
-        out["POS"] = numeric(x[pos_col])
-        out["REF"] = x[ref_col].map(clean_allele)
-        out["ALT"] = x[alt_col].map(clean_allele)
-    elif variant_col:
-        parsed = x[variant_col].map(parse_variant_id)
-        out["CHR"] = parsed.map(lambda z: z[0])
-        out["POS"] = parsed.map(lambda z: z[1])
-        out["REF"] = parsed.map(lambda z: z[2])
-        out["ALT"] = parsed.map(lambda z: z[3])
+def step00_command(cfg: dict) -> str:
+    regex = cfg["STUDY_REGEX"]
+    if STEP["STEP00_GROUP"] == "qtl_celltype":
+        flags = f" --celltype-study-regex {shlex.quote(regex)}" if regex else ""
+        types = ",".join(cfg["QTL_TYPES"])
+        flags += f" --celltype-qtl-types {shlex.quote(types)}" if types.lower() != "eqtl" else ""
+        groups = "eqtl_catalogue qtl_celltype"
     else:
-        return pd.DataFrame()
-
-    out["VARIANT_KEY"] = [
-        make_variant_key(c, p, r, a)
-        for c, p, r, a in zip(out["CHR"], out["POS"], out["REF"], out["ALT"])
-    ]
-    out["MOLECULAR_TRAIT_ID"] = x[trait_col].fillna("").astype(str)
-    out["GENE_ID"] = x[gene_col].fillna("").astype(str) if gene_col else ""
-    out["P"] = numeric(x[p_col]) if p_col else np.nan
-    out["BETA_ALT"] = numeric(x[beta_col])
-    out["SE"] = numeric(x[se_col])
-    out["MAF"] = numeric(x[maf_col]) if maf_col else np.nan
-    out["AN"] = numeric(x[an_col]) if an_col else np.nan
-
-    # eQTL Catalogue states ALT is the effect allele.
-    out["BETA_REF"] = -out["BETA_ALT"]
-
-    out["DATASET_ID"] = str(context.get("dataset_id", ""))
-    out["STUDY_LABEL"] = str(context.get("study_label", ""))
-    out["TISSUE"] = str(context.get("tissue_label", ""))
-    out["CONDITION"] = str(context.get("condition_label", ""))
-    out["QTL_TYPE"] = str(context.get("QTL_TYPE", ""))
-    metadata_n = safe_int(context.get("sample_size"))
-    if out["AN"].notna().any():
-        out["QTL_N"] = np.floor(out["AN"] / 2.0)
-        out["QTL_N"] = out["QTL_N"].where(out["QTL_N"] > 0, metadata_n)
-    else:
-        out["QTL_N"] = metadata_n
-    out["SOURCE_URL"] = str(context.get("ftp_path", ""))
-
-    out = out[
-        out["VARIANT_KEY"].ne("")
-        & out["MOLECULAR_TRAIT_ID"].str.strip().ne("")
-        & out["BETA_REF"].notna()
-        & out["SE"].notna()
-        & (out["SE"] > 0)
-    ].copy()
-
-    return (
-        out.drop_duplicates(
-            ["MOLECULAR_TRAIT_ID", "VARIANT_KEY"],
-            keep="first",
-        )
-        .reset_index(drop=True)
-    )
+        flags = "" if regex == STEP["DEFAULT_STUDY_REGEX"] else (
+            f" --catalogue-study-regex {shlex.quote(regex)}" if regex else " --catalogue-all-studies")
+        groups = "eqtl_catalogue qtl_catalogue qtl_catalogue_susie"
+    if cfg["TISSUE_REGEX"] and STEP["STEP00_GROUP"] != "qtl_celltype":
+        flags += f" --catalogue-tissue-regex {shlex.quote(cfg['TISSUE_REGEX'])}"
+    return (f"envs/pipeline/bin/python Step00_Download_Resources.py --groups {groups}{flags} "
+            f"--output Step00_Download_{STEP['NAME']}.sh\n  sbatch Step00_Download_{STEP['NAME']}.sh")
 
 
-def discover_catalogue_candidates_for_locus(
-    tabix: Path,
-    contexts: pd.DataFrame,
-    locus_id: str,
-    gwas: pd.DataFrame,
-    args,
-) -> tuple[pd.DataFrame, list[dict]]:
-    chrom, start, end = locus_region(gwas)
-    candidates = []
-    audit = []
+# =============================================================================
+# TABIX READING (pysam; one open handle per file, reused across loci of a task)
+# =============================================================================
 
-    for i, context in contexts.iterrows():
-        url = str(context["ACCESS_PATH"])
-        qtl_type = str(context["QTL_TYPE"])
-        status = "OK"
-        error = ""
-        n_region = 0
-        n_candidates = 0
+_TABIX: OrderedDict[str, Any] = OrderedDict()
+_HEADERS: dict[str, list[str]] = {}
 
-        print(
-            f"[CATALOG {i+1}/{len(contexts)}] "
-            f"{qtl_type:<8} | "
-            f"{context.get('study_label',''):<18} | "
-            f"{context.get('tissue_label',''):<35}",
-            flush=True,
-        )
 
+def tabix_file(path: str):
+    import pysam
+    if path in _TABIX:
+        _TABIX.move_to_end(path)
+        return _TABIX[path]
+    handle = pysam.TabixFile(path)
+    _TABIX[path] = handle
+    while len(_TABIX) > 64:
+        _TABIX.popitem(last=False)[1].close()
+    return handle
+
+
+def file_header(path: str) -> list[str]:
+    if path not in _HEADERS:
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+            _HEADERS[path] = handle.readline().rstrip("\n\r").lstrip("#").split("\t")
+    return _HEADERS[path]
+
+
+def tabix_fetch(path: str, chrom: int, start: int, end: int) -> list[list[str]]:
+    handle = tabix_file(path)
+    contigs = set(handle.contigs)
+    contig = next((c for c in (str(chrom), f"chr{chrom}") if c in contigs), None)
+    if contig is None:
+        return []
+    return [line.split("\t") for line in handle.fetch(contig, max(0, start - 1), end)]
+
+
+# =============================================================================
+# ONE LOCUS: discovery (dense QTL) -> provider credible-set filter -> provider LBF -> coloc.bf_bf
+# =============================================================================
+
+def discover_candidates(ready: pd.DataFrame, chrom: int, start: int, end: int,
+                        cfg: dict) -> tuple[pd.DataFrame, list[dict]]:
+    """Molecular traits with P <= CANDIDATE_P in the locus window, per ready context."""
+    candidates, audit = [], []
+    for _, c in ready.iterrows():
+        status, n_rows, n_cand = "OK", 0, 0
         try:
-            raw = tabix_region(tabix, url, chrom, start, end)
-            standardized = standardize_eqtl_catalogue_region(raw, context)
-            n_region = len(standardized)
-
-            if standardized.empty:
+            header = file_header(c["DENSE_PATH"])
+            i_trait = header.index(first_existing(header, ["molecular_trait_id", "phenotype_id"]))
+            i_p = header.index(first_existing(header, ["pvalue", "p_value", "pval"]))
+            gene_col = first_existing(header, ["gene_id"])
+            i_gene = header.index(gene_col) if gene_col else None
+            best: dict[str, list] = {}
+            for fields in tabix_fetch(c["DENSE_PATH"], chrom, start, end):
+                n_rows += 1
+                try:
+                    p = float(fields[i_p])
+                except (ValueError, IndexError):
+                    continue
+                if p <= cfg["CANDIDATE_P"]:
+                    trait = fields[i_trait]
+                    entry = best.setdefault(trait, [p, 0, fields[i_gene] if i_gene is not None else ""])
+                    entry[0] = min(entry[0], p)
+                    entry[1] += 1
+            if not n_rows:
                 status = "NO_REGION_ROWS"
-            else:
-                selected = standardized[
-                    standardized["P"].notna()
-                    & (standardized["P"] <= args.candidate_p)
-                ].copy()
-
-                if selected.empty:
-                    status = "NO_CANDIDATE_P_LE_THRESHOLD"
-                else:
-                    grouped = (
-                        selected.groupby(
-                            ["MOLECULAR_TRAIT_ID", "GENE_ID"],
-                            dropna=False,
-                            as_index=False,
-                        )
-                        .agg(
-                            DISCOVERY_MIN_P=("P", "min"),
-                            N_DISCOVERY_ROWS=("P", "size"),
-                        )
-                        .sort_values("DISCOVERY_MIN_P", kind="stable")
-                        .head(args.max_candidates_per_context_locus)
-                    )
-                    n_candidates = len(grouped)
-
-                    for _, item in grouped.iterrows():
-                        candidates.append({
-                            "SOURCE": "EQTL_CATALOGUE_DENSE_REGION",
-                            "LOCUS_ID": locus_id,
-                            "DATASET": str(context.get("FORMAL_DATASET", context.get("study_label", ""))),
-                            "DATASET_ID": str(context.get("dataset_id", "")),
-                            "QTL_TYPE": qtl_type,
-                            "TISSUE": str(context.get("tissue_label", "")),
-                            "CONDITION": str(context.get("condition_label", "")),
-                            "MOLECULAR_TRAIT_ID": str(item["MOLECULAR_TRAIT_ID"]),
-                            "GENE_ID": str(item["GENE_ID"]),
-                            "DISCOVERY_MIN_P": item["DISCOVERY_MIN_P"],
-                            "N_DISCOVERY_ROWS": item["N_DISCOVERY_ROWS"],
-                            "QTL_N": safe_int(context.get("sample_size")),
-                            "SOURCE_URL": str(context.get("REMOTE_SOURCE_URL", context.get("ftp_path", ""))),
-                            "ACCESS_PATH": url,
-                            "ACCESS_MODE": "local_tabix",
-                        })
-
+            elif not best:
+                status = "NO_TRAIT_P_LE_THRESHOLD"
+            for trait, (p, n, gene) in sorted(best.items(), key=lambda kv: kv[1][0])[
+                    :int(cfg["MAX_CANDIDATES_PER_CONTEXT_LOCUS"])]:
+                n_cand += 1
+                candidates.append({
+                    "DATASET_ID": c["dataset_id"], "STUDY_LABEL": c["study_label"], "QTL_TYPE": c["QTL_TYPE"],
+                    "TISSUE": c["tissue_label"], "SAMPLE_GROUP": c["sample_group"],
+                    "CONDITION": c["condition_label"], "QTL_N": safe_int(c["sample_size"]),
+                    "MOLECULAR_TRAIT_ID": trait, "GENE_ID": gene, "DISCOVERY_MIN_P": p, "N_DISCOVERY_ROWS": n,
+                    "CS_PATH": c["CS_PATH"], "LBF_INDEX_PATH": c["LBF_INDEX_PATH"],
+                })
         except Exception as exc:
-            status = "ERROR"
-            error = f"{type(exc).__name__}: {exc}"
-
-        audit.append({
-            "LOCUS_ID": locus_id,
-            "DATASET_ID": context.get("dataset_id", ""),
-            "STUDY_LABEL": context.get("study_label", ""),
-            "QTL_TYPE": qtl_type,
-            "TISSUE": context.get("tissue_label", ""),
-            "N_REGION_ROWS": n_region,
-            "N_CANDIDATES": n_candidates,
-            "STATUS": status,
-            "ERROR": error,
-        })
-
+            status = f"ERROR: {type(exc).__name__}: {exc}"
+        audit.append({"DATASET_ID": c["dataset_id"], "STUDY_LABEL": c["study_label"], "QTL_TYPE": c["QTL_TYPE"],
+                      "TISSUE": c["tissue_label"], "N_REGION_ROWS": n_rows, "N_CANDIDATES": n_cand,
+                      "STATUS": status})
     return pd.DataFrame(candidates), audit
 
 
-def load_custom_registry(root: Path, path_value: str) -> pd.DataFrame:
-    path = Path(path_value).expanduser()
-    if not path.is_absolute():
-        path = root / path
-
-    if not path.exists():
-        write_custom_registry_template(root)
-
-    if not path.exists() or path.stat().st_size == 0:
-        return pd.DataFrame(columns=CUSTOM_REGISTRY_COLUMNS)
-
-    x = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
-    for col in CUSTOM_REGISTRY_COLUMNS:
-        if col not in x.columns:
-            x[col] = ""
-    x["ENABLED_BOOL"] = x["ENABLED"].map(boolish)
-    return x
-
-
-def ensure_custom_registry_files(
-    root: Path,
-    registry: pd.DataFrame,
-    auto_download: bool = False,
-) -> pd.DataFrame:
-    """Resolve custom registry LOCAL_PATH values without downloading anything."""
-    if registry.empty:
-        return registry
-
-    x = registry.copy()
-    for idx, row in x[x["ENABLED_BOOL"]].iterrows():
-        local_text = str(row["LOCAL_PATH"]).strip()
-        if not local_text:
-            continue
-        local = Path(local_text).expanduser()
-        if not local.is_absolute():
-            local = root / local
-        x.at[idx, "LOCAL_PATH"] = str(local.resolve())
-    return x
-
-def custom_coordinates(x: pd.DataFrame, row: pd.Series) -> pd.DataFrame:
-    chr_col = str(row["CHR_COLUMN"]).strip()
-    pos_col = str(row["POS_COLUMN"]).strip()
-    ref_col = str(row["REF_COLUMN"]).strip()
-    alt_col = str(row["ALT_COLUMN"]).strip()
-    variant_col = str(row["VARIANT_COLUMN"]).strip()
-
-    out = pd.DataFrame(index=x.index)
-
-    if all(
-        c and c in x.columns
-        for c in [chr_col, pos_col, ref_col, alt_col]
-    ):
-        out["CHR"] = x[chr_col].map(clean_chr)
-        out["POS"] = numeric(x[pos_col])
-        out["REF"] = x[ref_col].map(clean_allele)
-        out["ALT"] = x[alt_col].map(clean_allele)
-    elif variant_col and variant_col in x.columns:
-        parsed = x[variant_col].map(parse_variant_id)
-        out["CHR"] = parsed.map(lambda z: z[0])
-        out["POS"] = parsed.map(lambda z: z[1])
-        out["REF"] = parsed.map(lambda z: z[2])
-        out["ALT"] = parsed.map(lambda z: z[3])
-    else:
-        raise RuntimeError(
-            f"Custom registry row {row.get('DATASET')} has no usable coordinates."
-        )
-
-    out["VARIANT_KEY"] = [
-        make_variant_key(c, p, r, a)
-        for c, p, r, a in zip(out["CHR"], out["POS"], out["REF"], out["ALT"])
-    ]
+def provider_cs_components(cs_path: str, traits: set[str]) -> dict[str, dict[int, tuple[int, int, int]]]:
+    """trait -> {SuSiE component L: (chrom, min_pos, max_pos)} from the provider credible-set file."""
+    header = file_header(cs_path)
+    trait_col = first_existing(header, ["molecular_trait_id"])
+    cs_col = first_existing(header, ["cs_id", "cs_index"])
+    var_col = first_existing(header, ["variant", "variant_id"])
+    purity_col = first_existing(header, ["low_purity"])
+    if not trait_col or not cs_col or not var_col:
+        raise RuntimeError(f"Unexpected provider credible-set columns in {cs_path}: {header[:15]}")
+    usecols = [c for c in (trait_col, cs_col, var_col, purity_col) if c]
+    x = pd.read_csv(cs_path, sep="\t", usecols=usecols, dtype=str, keep_default_na=False)
+    x = x[x[trait_col].isin(traits)]
+    if purity_col:
+        x = x[~x[purity_col].str.lower().isin({"true", "t", "1", "yes"})]
+    if x.empty:
+        return {}
+    comp = x[cs_col].str.extract(r"(?:^|[_:.-])(?:L|CS)?(\d+)$", expand=False)
+    parts = x[var_col].str.extract(VARIANT_ID)
+    frame = pd.DataFrame({"TRAIT": x[trait_col].values, "COMP": pd.to_numeric(comp, errors="coerce").values,
+                          "CHR": pd.to_numeric(parts[0], errors="coerce").values,
+                          "POS": pd.to_numeric(parts[1], errors="coerce").values}).dropna()
+    out: dict[str, dict[int, tuple[int, int, int]]] = {}
+    for (trait, comp), g in frame.groupby(["TRAIT", "COMP"]):
+        out.setdefault(str(trait), {})[int(comp)] = (int(g["CHR"].mode().iloc[0]), int(g["POS"].min()),
+                                                     int(g["POS"].max()))
     return out
 
 
-def standardize_custom_region(raw: pd.DataFrame, row: pd.Series) -> pd.DataFrame:
-    if raw.empty:
-        return pd.DataFrame()
-
-    trait_col = str(row["TRAIT_COLUMN"]).strip()
-    gene_col = str(row["GENE_COLUMN"]).strip()
-    beta_col = str(row["BETA_COLUMN"]).strip()
-    se_col = str(row["SE_COLUMN"]).strip()
-    p_col = str(row["P_COLUMN"]).strip()
-    maf_col = str(row["MAF_COLUMN"]).strip()
-
-    for needed in [trait_col, beta_col, se_col]:
-        if not needed or needed not in raw.columns:
-            raise RuntimeError(
-                f"Custom dataset {row.get('DATASET')} missing column {needed!r}."
-            )
-
-    out = custom_coordinates(raw, row)
-    out["MOLECULAR_TRAIT_ID"] = raw[trait_col].fillna("").astype(str)
-    out["GENE_ID"] = (
-        raw[gene_col].fillna("").astype(str)
-        if gene_col and gene_col in raw.columns
-        else ""
-    )
-    out["BETA_RAW"] = numeric(raw[beta_col])
-    out["SE"] = numeric(raw[se_col])
-    out["P"] = numeric(raw[p_col]) if p_col and p_col in raw.columns else np.nan
-    out["MAF"] = numeric(raw[maf_col]) if maf_col and maf_col in raw.columns else np.nan
-
-    mode = str(row["EFFECT_ALLELE_MODE"]).strip().upper() or "ALT"
-
-    if mode == "ALT":
-        out["BETA_REF"] = -out["BETA_RAW"]
-    elif mode == "REF":
-        out["BETA_REF"] = out["BETA_RAW"]
-    elif mode == "COLUMN":
-        ea_col = str(row["EFFECT_ALLELE_COLUMN"]).strip()
-        if not ea_col or ea_col not in raw.columns:
-            raise RuntimeError(
-                "EFFECT_ALLELE_MODE=COLUMN requires EFFECT_ALLELE_COLUMN."
-            )
-        values = []
-        for ea, ref, alt, beta in zip(
-            raw[ea_col].map(clean_allele),
-            out["REF"], out["ALT"], out["BETA_RAW"],
-        ):
-            if ea == ref:
-                values.append(beta)
-            elif ea == alt:
-                values.append(-beta)
-            else:
-                values.append(np.nan)
-        out["BETA_REF"] = values
-    else:
-        raise RuntimeError(f"Unsupported EFFECT_ALLELE_MODE={mode!r}")
-
-    out["DATASET"] = str(row["DATASET"])
-    out["QTL_TYPE"] = str(row["QTL_TYPE"])
-    out["TISSUE"] = str(row["TISSUE"])
-    out["CONDITION"] = str(row["CONDITION"])
-    out["QTL_N"] = safe_int(row["SAMPLE_SIZE"])
-
-    out = out[
-        out["VARIANT_KEY"].ne("")
-        & out["MOLECULAR_TRAIT_ID"].str.strip().ne("")
-        & out["BETA_REF"].notna()
-        & out["SE"].notna()
-        & (out["SE"] > 0)
-    ].copy()
-
-    return (
-        out.drop_duplicates(
-            ["MOLECULAR_TRAIT_ID", "VARIANT_KEY"],
-            keep="first",
-        )
-        .reset_index(drop=True)
-    )
-
-
-def load_custom_region(
-    tabix: Path,
-    row: pd.Series,
-    chrom: int,
-    start: int,
-    end: int,
-) -> pd.DataFrame:
-    access = str(row["ACCESS_MODE"]).strip().lower() or "file"
-
-    if access in {"tabix", "remote_tabix"}:
-        source = str(row["LOCAL_PATH"]).strip()
-        if not source:
-            raise RuntimeError(
-                f"{row.get('DATASET')} has no LOCAL_PATH; remote custom QTL access is disabled."
-            )
-        return standardize_custom_region(
-            tabix_region(tabix, source, chrom, start, end),
-            row,
-        )
-
-    path_text = str(row["LOCAL_PATH"]).strip()
-    if not path_text:
-        raise RuntimeError(f"{row.get('DATASET')} has no LOCAL_PATH.")
-
-    path = Path(path_text)
-    if not path.exists():
-        raise FileNotFoundError(path)
-
-    if Path(str(path) + ".tbi").exists():
-        raw = tabix_region(tabix, str(path), chrom, start, end)
-    else:
-        raw = cached_custom_file(path)
-
-    standardized = standardize_custom_region(raw, row)
-    return standardized[
-        (standardized["CHR"] == chrom)
-        & (standardized["POS"] >= start)
-        & (standardized["POS"] <= end)
-    ].copy()
-
-
-def discover_custom_candidates_for_locus(
-    tabix: Path,
-    registry: pd.DataFrame,
-    locus_id: str,
-    gwas: pd.DataFrame,
-    args,
-    allowed_types: set[str],
-) -> tuple[pd.DataFrame, list[dict]]:
-    chrom, start, end = locus_region(gwas)
-    candidates = []
-    audit = []
-
-    for _, row in registry[registry["ENABLED_BOOL"]].iterrows():
-        qtl_type = str(row["QTL_TYPE"])
-        if qtl_type.lower() not in allowed_types:
-            continue
-
-        status = "OK"
-        error = ""
-        n_region = 0
-        n_candidates = 0
-
-        try:
-            region = load_custom_region(tabix, row, chrom, start, end)
-            n_region = len(region)
-
-            selected = region[
-                region["P"].notna()
-                & (region["P"] <= args.candidate_p)
-            ].copy()
-
-            if region.empty:
-                status = "NO_REGION_ROWS"
-            elif selected.empty:
-                status = "NO_CANDIDATE_P_LE_THRESHOLD"
-            else:
-                grouped = (
-                    selected.groupby(
-                        ["MOLECULAR_TRAIT_ID", "GENE_ID"],
-                        dropna=False,
-                        as_index=False,
-                    )
-                    .agg(
-                        DISCOVERY_MIN_P=("P", "min"),
-                        N_DISCOVERY_ROWS=("P", "size"),
-                    )
-                    .sort_values("DISCOVERY_MIN_P", kind="stable")
-                    .head(args.max_candidates_per_context_locus)
-                )
-                n_candidates = len(grouped)
-
-                for _, item in grouped.iterrows():
-                    candidates.append({
-                        "SOURCE": "CUSTOM_QTL_REGISTRY",
-                        "LOCUS_ID": locus_id,
-                        "DATASET": str(row["DATASET"]),
-                        "DATASET_ID": str(row["DATASET"]),
-                        "QTL_TYPE": qtl_type,
-                        "TISSUE": str(row["TISSUE"]),
-                        "CONDITION": str(row["CONDITION"]),
-                        "MOLECULAR_TRAIT_ID": str(item["MOLECULAR_TRAIT_ID"]),
-                        "GENE_ID": str(item["GENE_ID"]),
-                        "DISCOVERY_MIN_P": item["DISCOVERY_MIN_P"],
-                        "N_DISCOVERY_ROWS": item["N_DISCOVERY_ROWS"],
-                        "QTL_N": safe_int(row["SAMPLE_SIZE"]),
-                        "SOURCE_URL": str(row["SOURCE_URL"]),
-                        "ACCESS_MODE": "custom_registry",
-                    })
-
-        except Exception as exc:
-            status = "ERROR"
-            error = f"{type(exc).__name__}: {exc}"
-
-        audit.append({
-            "LOCUS_ID": locus_id,
-            "DATASET": row["DATASET"],
-            "QTL_TYPE": qtl_type,
-            "TISSUE": row["TISSUE"],
-            "N_REGION_ROWS": n_region,
-            "N_CANDIDATES": n_candidates,
-            "STATUS": status,
-            "ERROR": error,
-        })
-
-    return pd.DataFrame(candidates), audit
-
-
-def context_from_catalogue_candidate(
-    contexts: pd.DataFrame,
-    candidate: pd.Series,
-) -> pd.Series | None:
-    if contexts.empty:
-        return None
-    match = contexts[
-        contexts["dataset_id"].astype(str)
-        == str(candidate.get("DATASET_ID", ""))
-    ]
-    return None if match.empty else match.iloc[0]
-
-
-def dense_qtl_for_candidate(
-    tabix: Path,
-    candidate: pd.Series,
-    gwas: pd.DataFrame,
-    catalogue_contexts: pd.DataFrame,
-    custom_registry: pd.DataFrame,
-) -> pd.DataFrame:
-    chrom, start, end = locus_region(gwas)
-    source = str(candidate["SOURCE"])
-
-    if source == "EQTL_CATALOGUE_DENSE_REGION":
-        context = context_from_catalogue_candidate(catalogue_contexts, candidate)
-        if context is None:
-            return pd.DataFrame()
-        region = standardize_eqtl_catalogue_region(
-            tabix_region(tabix, str(context["ACCESS_PATH"]), chrom, start, end),
-            context,
-        )
-
-    elif source == "CUSTOM_QTL_REGISTRY":
-        enabled = custom_registry[custom_registry["ENABLED_BOOL"]].copy()
-        match = enabled[
-            (enabled["DATASET"].astype(str) == str(candidate["DATASET"]))
-            & (
-                enabled["QTL_TYPE"].astype(str).str.lower()
-                == str(candidate["QTL_TYPE"]).lower()
-            )
-            & (enabled["TISSUE"].astype(str) == str(candidate["TISSUE"]))
-        ]
-        if match.empty:
-            return pd.DataFrame()
-        region = load_custom_region(tabix, match.iloc[0], chrom, start, end)
-    else:
-        return pd.DataFrame()
-
-    if region.empty:
-        return region
-
-    return region[
-        region["MOLECULAR_TRAIT_ID"].astype(str)
-        == str(candidate["MOLECULAR_TRAIT_ID"])
-    ].reset_index(drop=True)
-
-
-def reference_prefix(root: Path, ancestry_code: str, chrom: int) -> Path:
-    base = (root / "resources" / "1000G" if REFERENCE_PANEL == DEFAULT_PANEL
-            else root / "resources" / "LD_panels" / REFERENCE_PANEL)
-    return base / ancestry_code / f"chr{chrom}_{ancestry_code}_GRCh38"
-
-
-def build_external_ld(
-    root: Path,
-    plink2: Path,
-    ancestry_code: str,
-    common: pd.DataFrame,
-    out_dir: Path,
-    threads: int,
-    maf: float = DEFAULT_LD_MAF,
-) -> tuple[Path, Path, list[str], Path]:
-    """Build/cache ONE signed-LD matrix + frequency table per GWAS locus.
-
-    Candidate-specific QTL tests subset this locus-wide matrix in R, so PLINK2
-    is not rerun for every gene/protein/splicing trait.
-    """
-    chroms = sorted(set(common["CHR"].dropna().astype(int)))
-    if len(chroms) != 1:
-        raise RuntimeError(f"Cannot construct one LD matrix across chromosomes: {chroms}")
-    chrom = chroms[0]
-
-    prefix = reference_prefix(root, ancestry_code, chrom)
-    for ext in [".pgen", ".pvar", ".psam"]:
-        path = Path(str(prefix) + ext)
-        if not path.exists() or path.stat().st_size == 0:
-            raise FileNotFoundError(f"Missing {REFERENCE_PANEL} LD reference file: {path}")
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ids_file = out_dir / "common_reference_ids.txt"
-    ld_prefix = out_dir / "external_LD"
-    ld_file = Path(str(ld_prefix) + ".unphased.vcor1.bin")
-    vars_file = Path(str(ld_prefix) + ".unphased.vcor1.bin.vars")
-    freq_file = out_dir / "external_FREQ.afreq"
-
-    # Fast resume: reuse a validated locus-wide LD/frequency cache.
-    if ld_file.exists() and vars_file.exists() and freq_file.exists():
-        order = [x.strip() for x in vars_file.read_text().splitlines() if x.strip()]
-        expected = len(order) * len(order) * 4
-        if order and ld_file.stat().st_size == expected and freq_file.stat().st_size > 0:
-            print(f"[CACHE] locus LD/frequency: {out_dir}")
-            return ld_file, vars_file, order, freq_file
-
-    ids = common["REFERENCE_ID"].dropna().astype(str).drop_duplicates()
-    ids_file.write_text("\n".join(ids) + "\n", encoding="utf-8")
-
-    run_command(
-        [
-            plink2,
-            "--pfile", prefix,
-            "--extract", ids_file,
-            "--maf", str(maf),
-            "--geno", "0.05",
-            "--min-alleles", "2",
-            "--max-alleles", "2",
-            "--r-unphased", "square", "bin4", "ref-based", "yes-really",
-            "--threads", str(threads),
-            "--out", ld_prefix,
-        ],
-        log_file=out_dir / "plink_ld.log",
-    )
-
-    if not ld_file.exists() or not vars_file.exists():
-        raise RuntimeError("PLINK2 did not generate signed-r LD output.")
-
-    order = [line.strip() for line in vars_file.read_text().splitlines() if line.strip()]
-    expected = len(order) * len(order) * 4
-    actual = ld_file.stat().st_size
-    if actual != expected:
-        raise RuntimeError(
-            f"LD validation failed: p={len(order)}, expected={expected} bytes, actual={actual}"
-        )
-
-    freq_prefix = out_dir / "external_FREQ"
-    run_command(
-        [
-            plink2,
-            "--pfile", prefix,
-            "--extract", vars_file,
-            "--freq",
-            "--threads", str(threads),
-            "--out", freq_prefix,
-        ],
-        log_file=out_dir / "plink_freq.log",
-    )
-    if not freq_file.exists() or freq_file.stat().st_size == 0:
-        raise RuntimeError("PLINK2 did not generate reference allele frequencies.")
-
-    return ld_file, vars_file, order, freq_file
-
-def load_reference_maf(freq_file: Path) -> dict[str, float]:
-    if not freq_file.exists() or freq_file.stat().st_size == 0:
-        raise FileNotFoundError(f"Missing PLINK frequency file: {freq_file}")
-
-    x = pd.read_csv(freq_file, sep=r"\s+", dtype=str, comment=None)
-    if "ID" not in x.columns:
-        raise RuntimeError(
-            f"PLINK frequency file lacks ID column: {freq_file}; columns={list(x.columns)}"
-        )
-    freq_col = "ALT_FREQS" if "ALT_FREQS" in x.columns else (
-        "ALT_FREQ" if "ALT_FREQ" in x.columns else None
-    )
-    if freq_col is None:
-        raise RuntimeError(
-            f"PLINK frequency file lacks ALT frequency column: {freq_file}; columns={list(x.columns)}"
-        )
-
-    af = pd.to_numeric(
-        x[freq_col].astype(str).str.split(",").str[0],
-        errors="coerce",
-    )
-    maf = np.minimum(af, 1.0 - af)
-    return dict(zip(x["ID"].astype(str), maf))
-
-
-def step06_susie_paths(study_dir: Path, locus_id: str, ancestry_code: str) -> dict[str, Path]:
-    locus = study_dir / "loci" / locus_id
-    return {
-        "fit": locus / "susie" / "susie_fit.rds",
-        "diag": locus / "susie" / "susie_diagnostics.tsv",
-        "vars": locus / f"{ancestry_code}_LD.unphased.vcor1.bin.vars",
-    }
-
-
-def prepare_gwas_susie_map(
-    study_dir: Path,
-    locus_id: str,
-    ancestry_code: str,
-    gwas: pd.DataFrame,
-    out_dir: Path,
-) -> tuple[Path | None, Path | None]:
-    paths = step06_susie_paths(study_dir, locus_id, ancestry_code)
-    if not paths["fit"].exists() or not paths["vars"].exists():
-        return None, None
-
-    order = [x.strip() for x in paths["vars"].read_text().splitlines() if x.strip()]
-    mapping = gwas[["REFERENCE_ID", "VARIANT_KEY"]].drop_duplicates("REFERENCE_ID")
-    order_map = {v: i for i, v in enumerate(order)}
-    mapping = mapping[mapping["REFERENCE_ID"].isin(order_map)].copy()
-    mapping["_ORDER"] = mapping["REFERENCE_ID"].map(order_map)
-    mapping = mapping.sort_values("_ORDER").drop(columns="_ORDER")
-
-    if len(mapping) != len(order):
-        return None, None
-
-    path = out_dir / "gwas_susie_variant_map.tsv"
-    mapping.to_csv(path, sep="\t", index=False)
-    return paths["fit"], path
-
-
-def read_step06_s_rss(study_dir: Path, locus_id: str) -> float:
-    diag = study_dir / "loci" / locus_id / "susie" / "susie_diagnostics.tsv"
-    x = read_table(diag)
-    if x.empty or "ESTIMATE_S_RSS" not in x.columns:
-        return np.nan
-    vals = numeric(x["ESTIMATE_S_RSS"]).dropna()
-    return float(vals.iloc[0]) if not vals.empty else np.nan
-
-
-def catalogue_context_for_candidate(
-    contexts: pd.DataFrame,
-    candidate: pd.Series,
-) -> pd.Series | None:
-    if contexts.empty:
-        return None
-    x = contexts[
-        contexts["dataset_id"].astype(str)
-        == str(candidate.get("DATASET_ID", ""))
-    ]
-    return None if x.empty else x.iloc[0]
-
-
-R_WORKER = r"""
-args <- commandArgs(trailingOnly=TRUE)
-if (length(args) < 18) stop("Expected 18 arguments")
-
-stats_file <- args[1]
-ld_file <- args[2]
-vars_file <- args[3]
-out_summary <- args[4]
-out_results <- args[5]
-out_sensitivity <- args[6]
-out_diag <- args[7]
-gwas_n <- as.numeric(args[8])
-qtl_n <- as.numeric(args[9])
-gwas_type <- args[10]
-case_prop <- suppressWarnings(as.numeric(args[11]))
-p1 <- as.numeric(args[12])
-p2 <- as.numeric(args[13])
-p12 <- as.numeric(args[14])
-p12_low <- as.numeric(args[15])
-p12_high <- as.numeric(args[16])
-gwas_fit_file <- args[17]
-gwas_map_file <- args[18]
-
-suppressPackageStartupMessages(library(coloc))
-suppressPackageStartupMessages(library(susieR))
-
-stats <- read.delim(stats_file, header=TRUE, stringsAsFactors=FALSE, check.names=FALSE)
-full_vars <- scan(vars_file, what="character", quiet=TRUE)
-
-# Load the locus-wide LD ONCE, then subset it to this molecular-trait candidate.
-p <- length(full_vars)
-con <- file(ld_file, "rb")
-values <- readBin(con, what="numeric", n=p*p, size=4, endian="little")
-close(con)
-if (length(values) != p*p) stop("LD binary length mismatch")
-Rfull <- matrix(values, nrow=p, ncol=p, byrow=TRUE)
-rm(values); gc()
-Rfull <- (Rfull + t(Rfull))/2
-diag(Rfull) <- 1
-dimnames(Rfull) <- list(full_vars, full_vars)
-
-idx <- match(as.character(stats$REFERENCE_ID), full_vars)
-keep <- which(!is.na(idx))
-if (length(keep) < 20) stop("Too few candidate SNPs represented in locus LD")
-stats <- stats[keep,,drop=FALSE]
-idx <- idx[keep]
-
-# Remove duplicated LD IDs while preserving common_stats order.
-dup <- duplicated(idx)
-if (any(dup)) {
-    stats <- stats[!dup,,drop=FALSE]
-    idx <- idx[!dup]
-}
-R <- Rfull[idx, idx, drop=FALSE]
-rm(Rfull); gc()
-vars <- as.character(stats$REFERENCE_ID)
-dimnames(R) <- list(vars, vars)
-
-bad <- which(!apply(is.finite(R), 1, all) | !apply(is.finite(R), 2, all))
-if (length(bad) > 0) {
-    cat("Filtering", length(bad), "variants with non-finite LD rows/columns\n")
-    keep <- setdiff(seq_len(nrow(R)), bad)
-    R <- R[keep, keep, drop=FALSE]
-    stats <- stats[keep,,drop=FALSE]
-    vars <- vars[keep]
-}
-if (nrow(R) < 20) stop("Too few SNPs after non-finite LD filtering")
-
-ok <- is.finite(stats$QTL_BETA) &
-      is.finite(stats$QTL_SE) & stats$QTL_SE > 0 &
-      is.finite(stats$QTL_MAF) &
-      stats$QTL_MAF > 0 & stats$QTL_MAF < 0.5
-if (!all(ok)) {
-    R <- R[ok, ok, drop=FALSE]
-    stats <- stats[ok,,drop=FALSE]
-    vars <- vars[ok]
-}
-if (nrow(R) < 20) stop("Too few finite QTL SNPs after MAF/statistic filtering")
-diag(R) <- 1
-dimnames(R) <- list(vars, vars)
-
-# Reuse Step06 GWAS SuSiE fit instead of rerunning GWAS SuSiE for every QTL.
-s1 <- readRDS(gwas_fit_file)
-gmap <- read.delim(gwas_map_file, stringsAsFactors=FALSE, check.names=FALSE)
-if (!"REFERENCE_ID" %in% names(gmap)) stop("GWAS SuSiE map lacks REFERENCE_ID")
-gwas_snps <- as.character(gmap$REFERENCE_ID)
-if (is.null(s1$lbf_variable)) stop("Step06 SuSiE fit has no lbf_variable")
-if (ncol(s1$lbf_variable) > length(gwas_snps) + 1) {
-    stop("Step06 SuSiE lbf_variable has more columns than the variant map")
-}
-colnames(s1$lbf_variable) <- c(gwas_snps, "null")[seq_len(ncol(s1$lbf_variable))]
-if (!is.null(s1$alpha)) {
-    if (ncol(s1$alpha) > length(gwas_snps) + 1) stop("Step06 alpha/map dimension mismatch")
-    colnames(s1$alpha) <- c(gwas_snps, "null")[seq_len(ncol(s1$alpha))]
-}
-if (!is.null(s1$pip)) {
-    if (length(s1$pip) != length(gwas_snps)) stop("Step06 PIP/map dimension mismatch")
-    names(s1$pip) <- gwas_snps
-}
-if (!is.null(s1$sets$cs) && length(s1$sets$cs)) {
-    s1$sets$cs <- lapply(s1$sets$cs, function(x) {
-        good <- x[x >= 1 & x <= length(gwas_snps)]
-        names(good) <- gwas_snps[good]
-        good
-    })
-}
-class(s1) <- unique(c("susie", class(s1)))
-
-# Fine-map only the molecular QTL side for this candidate.
-d2 <- list(
-    beta=as.numeric(stats$QTL_BETA),
-    varbeta=as.numeric(stats$QTL_SE)^2,
-    snp=as.character(stats$REFERENCE_ID),
-    position=as.integer(stats$POS),
-    N=as.numeric(qtl_n),
-    type="quant",
-    MAF=as.numeric(stats$QTL_MAF),
-    LD=R
-)
-coloc::check_dataset(d2, req=c("type","snp","LD","N"))
-cat("QTL CHECK = PASS\n")
-
-z2 <- d2$beta / sqrt(d2$varbeta)
-s_qtl <- tryCatch(susieR::estimate_s_rss(z=z2, R=R, n=qtl_n), error=function(e) NA_real_)
-diag_df <- data.frame(
-    TRAIT="QTL",
-    ESTIMATE_S_RSS=s_qtl,
-    MAX_ABS_Z=max(abs(z2), na.rm=TRUE),
-    N_SNPS=length(z2),
-    stringsAsFactors=FALSE
-)
-write.table(diag_df, out_diag, sep="\t", quote=FALSE, row.names=FALSE)
-
-cat("Running coloc::runsusie for molecular QTL only\n")
-s2 <- coloc::runsusie(
-    d2, suffix="QTL", maxit=200, repeat_until_convergence=TRUE
-)
-cat("QTL SuSiE COMPLETE; reusing Step06 GWAS SuSiE\n")
-
-run_susie_coloc <- function(prior12, label) {
-    res <- suppressWarnings(coloc::coloc.susie(s1, s2, p1=p1, p2=p2, p12=prior12))
-    if (!is.list(res) || is.null(res$summary)) {
-        sm <- data.frame(
-            NO_SIGNAL_PAIR="YES", METHOD="coloc.susie_step06_reuse",
-            PRIOR_SET=label, P12=prior12, stringsAsFactors=FALSE
-        )
-        return(list(result=list(results=NULL), summary=sm))
-    }
-    sm <- tryCatch(as.data.frame(res$summary), error=function(e) data.frame())
-    if (nrow(sm) == 0) {
-        sm <- data.frame(
-            NO_SIGNAL_PAIR="YES", METHOD="coloc.susie_step06_reuse",
-            PRIOR_SET=label, P12=prior12, stringsAsFactors=FALSE
-        )
-    } else {
-        sm$NO_SIGNAL_PAIR <- "NO"
-        sm$METHOD <- "coloc.susie_step06_reuse"
-        sm$PRIOR_SET <- label
-        sm$P12 <- prior12
-    }
-    list(result=res, summary=sm)
-}
-
-base <- run_susie_coloc(p12, "DEFAULT")
-low <- run_susie_coloc(p12_low, "LOW_P12")
-high <- run_susie_coloc(p12_high, "HIGH_P12")
-
-write.table(base$summary, out_summary, sep="\t", quote=FALSE, row.names=FALSE)
-results_df <- tryCatch(as.data.frame(base$result$results), error=function(e) data.frame())
-write.table(results_df, out_results, sep="\t", quote=FALSE, row.names=FALSE)
-sens <- rbind(base$summary, low$summary, high$summary)
-write.table(sens, out_sensitivity, sep="\t", quote=FALSE, row.names=FALSE)
-
-cat("\n===== COLOC SUMMARY =====\n")
-print(base$summary)
-cat("\n===== QTL LD MISMATCH DIAGNOSTICS =====\n")
-print(diag_df)
-"""
-
-
-def write_r_worker(output_root: Path) -> Path:
-    path = output_root / "_step09_coloc_susie_worker.R"
-    path.write_text(R_WORKER, encoding="utf-8")
-    return path
-
-
-def verify_r_packages(rscript: Path) -> dict:
-    text = run_command(
-        [
-            rscript,
-            "-e",
-            (
-                'stopifnot(requireNamespace("coloc", quietly=TRUE)); '
-                'stopifnot(requireNamespace("susieR", quietly=TRUE)); '
-                'cat("coloc=", as.character(packageVersion("coloc")), "\\n", sep=""); '
-                'cat("susieR=", as.character(packageVersion("susieR")), "\\n", sep="")'
-            ),
-        ],
-        capture=True,
-    )
-    result = {}
-    for line in text.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            result[key.strip()] = value.strip()
-    return result
-
-
-def posterior_column(columns: Iterable[str], hypothesis: str) -> str | None:
-    target = hypothesis.upper()
-    patterns = [f"PP.{target}", f"PP_{target}", f"PP.{target}.ABF", target]
-    for column in columns:
-        upper = str(column).upper()
-        for pattern in patterns:
-            if pattern.upper() in upper:
-                return column
-    return None
-
-
-def _best_coloc_row(summary: pd.DataFrame) -> pd.Series | None:
-    if summary.empty:
-        return None
-    h4_col = posterior_column(summary.columns, "H4")
-    if h4_col is None:
-        return summary.iloc[0]
-    vals = numeric(summary[h4_col])
-    if not vals.notna().any():
-        return summary.iloc[0]
-    return summary.loc[vals.idxmax()]
-
-
-def _row_posterior(row: pd.Series | None, summary: pd.DataFrame, hypothesis: str) -> float:
-    if row is None:
-        return np.nan
-    col = posterior_column(summary.columns, hypothesis)
-    if col is None:
-        return np.nan
-    try:
-        return float(row[col])
-    except Exception:
-        return np.nan
-
-
-def _hit_value(row: pd.Series | None, names: list[str]) -> str:
-    if row is None:
-        return ""
-    lookup = {str(c).lower(): c for c in row.index}
-    for name in names:
-        if name.lower() in lookup:
-            value = row[lookup[name.lower()]]
-            if pd.notna(value):
-                return str(value)
-    return ""
-
-
-def classify_coloc(
-    summary: pd.DataFrame,
-    strong_pp4: float,
-    suggestive_pp4: float,
-) -> dict:
-    row = _best_coloc_row(summary)
-    values = {
-        h: _row_posterior(row, summary, h)
-        for h in ["H0", "H1", "H2", "H3", "H4"]
-    }
-    h3 = values["H3"]
-    h4 = values["H4"]
-
-    hit1 = _hit_value(row, ["hit1", "signal1", "cs1"])
-    hit2 = _hit_value(row, ["hit2", "signal2", "cs2"])
-    method = _hit_value(row, ["METHOD"]) or "coloc.susie"
-
-    if pd.isna(h4):
-        classification = "NO_PP_H4_RETURNED"
-        strong = "NO"
-        shared = "UNKNOWN"
-    elif h4 >= strong_pp4 and (pd.isna(h3) or h4 > h3):
-        classification = "STRONG_SHARED_SIGNAL"
-        strong = "YES"
-        shared = "YES"
-    elif h4 >= suggestive_pp4:
-        classification = "SUGGESTIVE_SHARED_SIGNAL"
-        strong = "NO"
-        shared = "SUGGESTIVE"
-    elif pd.notna(h3) and h3 > h4:
-        classification = "BOTH_ASSOCIATED_DIFFERENT_SIGNALS_FAVORED"
-        strong = "NO"
-        shared = "NO"
-    else:
-        classification = "NO_STRONG_SHARED_SIGNAL"
-        strong = "NO"
-        shared = "NO"
-
-    return {
-        "MAX_PP_H0": values["H0"],
-        "MAX_PP_H1": values["H1"],
-        "MAX_PP_H2": values["H2"],
-        "MAX_PP_H3": values["H3"],
-        "MAX_PP_H4": values["H4"],
-        "BEST_HIT1": hit1,
-        "BEST_HIT2": hit2,
-        "BEST_SIGNAL_PAIR": (f"{hit1}|{hit2}" if hit1 or hit2 else ""),
-        "COLOC_METHOD": method,
-        "COLOCALIZED_STRONG": strong,
-        "SHARED_SIGNAL": shared,
-        "COLOC_CLASS": classification,
-    }
-
-
-def sensitivity_pp4_for_pair(
-    sensitivity: pd.DataFrame,
-    prior_label: str,
-    hit1: str,
-    hit2: str,
-) -> float:
-    if sensitivity.empty or "PRIOR_SET" not in sensitivity.columns:
-        return np.nan
-    sub = sensitivity[sensitivity["PRIOR_SET"].astype(str) == prior_label].copy()
-    if sub.empty:
-        return np.nan
-
-    # Keep the same signal pair used for the default classification whenever possible.
-    if hit1 and hit2:
-        h1col = first_existing(sub.columns, ["hit1", "signal1", "cs1"])
-        h2col = first_existing(sub.columns, ["hit2", "signal2", "cs2"])
-        if h1col and h2col:
-            exact = sub[
-                (sub[h1col].astype(str) == hit1)
-                & (sub[h2col].astype(str) == hit2)
-            ]
-            if not exact.empty:
-                sub = exact
-
-    row = _best_coloc_row(sub)
-    return _row_posterior(row, sub, "H4")
-
-
-def process_candidate(
-    root: Path,
-    accession: str,
-    study_dir: Path,
-    ancestry_code: str,
-    gwas_meta: dict,
-    candidate: pd.Series,
-    catalogue_contexts: pd.DataFrame,
-    custom_registry: pd.DataFrame,
-    plink2: Path,
-    tabix: Path,
-    rscript: Path,
-    r_worker: Path,
-    locus_output_dir: Path,
-    locus_resources: dict,
-    args,
-) -> dict:
-    locus_id = str(candidate["LOCUS_ID"])
-    qtl_type = str(candidate["QTL_TYPE"])
-    dataset = str(candidate["DATASET"])
-    tissue = str(candidate["TISSUE"])
-    condition = str(candidate.get("CONDITION", ""))
-    trait_id = str(candidate["MOLECULAR_TRAIT_ID"])
-    gene_id = str(candidate.get("GENE_ID", ""))
-
-    candidate_id = slugify(
-        f"{locus_id}_{dataset}_{qtl_type}_{tissue}_{condition}_{trait_id}"
-    )[:220]
-    out = locus_output_dir / "candidates" / candidate_id
-    out.mkdir(parents=True, exist_ok=True)
-    result_json = out / "candidate_result.json"
-
-    if not args.force and result_json.exists():
-        previous = safe_json(result_json)
-        if previous.get("STATUS") == "COMPLETE":
-            print(f"[RESUME] {candidate_id}")
-            return previous
-
-    result = {
-        "STUDY_ACCESSION": accession,
-        "LOCUS_ID": locus_id,
-        "QTL_TYPE": qtl_type,
-        "DATASET": dataset,
-        "DATASET_ID": candidate.get("DATASET_ID", ""),
-        "TISSUE": tissue,
-        "CONDITION": condition,
-        "MOLECULAR_TRAIT_ID": trait_id,
-        "GENE_ID": gene_id,
-        "DISCOVERY_SOURCE": candidate.get("SOURCE", ""),
-        "DISCOVERY_MIN_P": candidate.get("DISCOVERY_MIN_P", np.nan),
-        "QTL_N": candidate.get("QTL_N", np.nan),
-        "RESOURCE_AVAILABLE": "YES",
-        "CANDIDATE_PRESENT": "YES",
-        "COLOC_TESTED": "NO",
-        "N_GWAS_VARIANTS": 0,
-        "N_QTL_VARIANTS": 0,
-        "N_COMMON_SNPS": 0,
-        "LD_SOURCE": "",
-        "QTL_MAF_SOURCE": "",
-        "QTL_MAF_REFERENCE_FALLBACK_N": 0,
-        "GWAS_STEP06_S_RSS": read_step06_s_rss(study_dir, locus_id),
-        "GWAS_S_RSS": read_step06_s_rss(study_dir, locus_id),
-        "QTL_S_RSS": np.nan,
-        "LD_MISMATCH_WARNING": "NO",
-        "MAX_PP_H0": np.nan,
-        "MAX_PP_H1": np.nan,
-        "MAX_PP_H2": np.nan,
-        "MAX_PP_H3": np.nan,
-        "MAX_PP_H4": np.nan,
-        "PP_H4_P12_LOW": np.nan,
-        "PP_H4_P12_DEFAULT": np.nan,
-        "PP_H4_P12_HIGH": np.nan,
-        "PRIOR_ROBUST_STRONG": "NO",
-        "BEST_HIT1": "",
-        "BEST_HIT2": "",
-        "BEST_SIGNAL_PAIR": "",
-        "COLOC_METHOD": "",
-        "COLOCALIZED_STRONG": "NO",
-        "SHARED_SIGNAL": "UNKNOWN",
-        "COLOC_CLASS": "",
-        "STATUS": "",
-        "ERROR": "",
-        "OUTPUT_DIR": str(out),
-    }
-
-    def finish(status: str | None = None):
-        if status is not None:
-            result["STATUS"] = status
-        write_json(result_json, result)
-        return result
-
-    try:
-        gwas = locus_resources["gwas"]
-        result["N_GWAS_VARIANTS"] = len(gwas)
-
-        # LOCAL dense path only: no eQTL-Catalogue LBF download/use.
-        qtl = dense_qtl_for_candidate(
-            tabix, candidate, gwas, catalogue_contexts, custom_registry
-        )
-        result["N_QTL_VARIANTS"] = len(qtl)
-        if qtl.empty:
-            return finish("NOT_TESTED_NO_DENSE_QTL_ROWS")
-
-        qtl_n = None
-        if "QTL_N" in qtl.columns:
-            qn = numeric(qtl["QTL_N"]).dropna()
-            qn = qn[qn > 0]
-            if not qn.empty:
-                qtl_n = int(round(float(qn.median())))
-        if not qtl_n:
-            qtl_n = safe_int(candidate.get("QTL_N"))
-        if not qtl_n:
-            return finish("NOT_TESTED_QTL_SAMPLE_SIZE_MISSING")
-        result["QTL_N"] = qtl_n
-
-        common = gwas.merge(
-            qtl[["VARIANT_KEY", "BETA_REF", "SE", "P", "MAF"]].rename(
-                columns={
-                    "BETA_REF": "QTL_BETA",
-                    "SE": "QTL_SE",
-                    "P": "QTL_P",
-                    "MAF": "QTL_MAF",
-                }
-            ),
-            on="VARIANT_KEY",
-            how="inner",
-            validate="one_to_one",
-        )
-        common = common[
-            common["GWAS_BETA"].notna()
-            & common["GWAS_SE"].notna()
-            & (common["GWAS_SE"] > 0)
-            & common["QTL_BETA"].notna()
-            & common["QTL_SE"].notna()
-            & (common["QTL_SE"] > 0)
-            & common["REFERENCE_ID"].notna()
-        ].drop_duplicates("REFERENCE_ID", keep="first")
-        result["N_COMMON_SNPS"] = len(common)
-
-        if len(common) < args.min_common_snps:
-            return finish("NOT_TESTED_TOO_FEW_COMMON_SNPS")
-        if len(common) > args.max_common_snps:
-            result["ERROR"] = (
-                f"{len(common)} common SNPs > {args.max_common_snps}; no significance-based subsampling."
-            )
-            return finish("NOT_TESTED_TOO_MANY_COMMON_SNPS_NO_SUBSAMPLING")
-
-        # The GWAS side is the Step06 SuSiE fit (fitted with Step06's N), so
-        # N / case fraction are recorded here but not needed by coloc.susie.
-        gwas_n = safe_int(gwas_meta.get("COLOC_GWAS_N")) or 0
-
-        if "ld" not in locus_resources:
-            ld_dir = locus_output_dir / "locus_ld"
-            locus_resources["ld"] = build_external_ld(
-                root, plink2, ancestry_code, gwas, ld_dir, args.cpus, maf=args.ld_maf
-            )
-        ld_file, vars_file, ld_order, freq_file = locus_resources["ld"]
-        result["LD_SOURCE"] = f"1000G_{ancestry_code}_SIGNED_R_MAF_GE_{args.ld_maf}"
-
-        available = set(ld_order)
-        common = common[common["REFERENCE_ID"].isin(available)].copy()
-
-        reference_maf = load_reference_maf(freq_file)
-        common["GWAS_MAF"] = common["REFERENCE_ID"].astype(str).map(reference_maf)
-
-        # Prefer cohort QTL MAF when supplied.  If the dense QTL file does not
-        # carry MAF, use the same ancestry-matched 1000G reference MAF used for
-        # LD.  coloc needs MAF+N for quantitative traits when sdY is unavailable.
-        qtl_raw = numeric(common["QTL_MAF"])
-        qtl_raw = np.minimum(qtl_raw, 1.0 - qtl_raw)
-        valid_qtl = qtl_raw.notna() & (qtl_raw > 0) & (qtl_raw < 0.5)
-        fallback_mask = ~valid_qtl
-        common["QTL_MAF"] = qtl_raw.where(valid_qtl, common["GWAS_MAF"])
-        result["QTL_MAF_REFERENCE_FALLBACK_N"] = int(fallback_mask.sum())
-        result["QTL_MAF_SOURCE"] = (
-            "QTL_FILE+1000G_FALLBACK" if valid_qtl.any() and fallback_mask.any()
-            else "QTL_FILE" if valid_qtl.all()
-            else f"1000G_{ancestry_code}_REFERENCE"
-        )
-
-        if gwas_meta.get("GWAS_TYPE") == "quant":
-            common = common[common["GWAS_MAF"].notna()].copy()
-        common = common[common["QTL_MAF"].notna()].copy()
-
-        result["N_COMMON_SNPS"] = len(common)
-        if len(common) < args.min_common_snps:
-            return finish("NOT_TESTED_TOO_FEW_SNPS_AFTER_LD_OR_MAF")
-
-        common_file = out / "common_stats.tsv.gz"
-        common[
-            [
-                "REFERENCE_ID", "CHR", "POS", "REF", "ALT", "VARIANT_KEY",
-                "GWAS_BETA", "GWAS_SE", "GWAS_P", "GWAS_MAF",
-                "QTL_BETA", "QTL_SE", "QTL_P", "QTL_MAF",
-            ]
-        ].to_csv(common_file, sep="\t", index=False, compression="gzip")
-
-        gwas_fit_file, gwas_map_file = prepare_gwas_susie_map(
-            study_dir, locus_id, ancestry_code, gwas, locus_output_dir
-        )
-        if gwas_fit_file is None or gwas_map_file is None:
-            return finish("NOT_TESTED_STEP06_SUSIE_FIT_OR_MAP_MISSING")
-
-        summary_file = out / "coloc_summary.tsv"
-        results_file = out / "coloc_results.tsv"
-        sensitivity_file = out / "prior_sensitivity.tsv"
-        diagnostics_file = out / "diagnostics.tsv"
-        case_prop = gwas_meta.get("CASE_PROPORTION")
-
-        run_command(
-            [
-                rscript, r_worker, common_file, ld_file, vars_file,
-                summary_file, results_file, sensitivity_file, diagnostics_file,
-                str(gwas_n), str(qtl_n), str(gwas_meta.get("GWAS_TYPE", "quant")),
-                str(case_prop) if case_prop is not None else "NA",
-                str(COLOC_PRIOR_P1), str(COLOC_PRIOR_P2), str(COLOC_PRIOR_P12),
-                str(COLOC_PRIOR_P12_LOW), str(COLOC_PRIOR_P12_HIGH),
-                gwas_fit_file, gwas_map_file,
-            ],
-            log_file=out / "coloc.log",
-        )
-
-        summary = read_table(summary_file)
-        no_signal_pair = (
-            not summary.empty
-            and "NO_SIGNAL_PAIR" in summary.columns
-            and summary["NO_SIGNAL_PAIR"].astype(str).eq("YES").all()
-        )
-        classification = classify_coloc(summary, args.strong_pp4, args.suggestive_pp4)
-        result.update(classification)
-        sensitivity = read_table(sensitivity_file)
-        result["PP_H4_P12_LOW"] = sensitivity_pp4_for_pair(
-            sensitivity, "LOW_P12",
-            classification.get("BEST_HIT1", ""),
-            classification.get("BEST_HIT2", ""),
-        )
-        result["PP_H4_P12_DEFAULT"] = sensitivity_pp4_for_pair(
-            sensitivity, "DEFAULT",
-            classification.get("BEST_HIT1", ""),
-            classification.get("BEST_HIT2", ""),
-        )
-        result["PP_H4_P12_HIGH"] = sensitivity_pp4_for_pair(
-            sensitivity, "HIGH_P12",
-            classification.get("BEST_HIT1", ""),
-            classification.get("BEST_HIT2", ""),
-        )
-        result["PRIOR_ROBUST_STRONG"] = (
-            "YES"
-            if pd.notna(result["PP_H4_P12_LOW"])
-            and result["PP_H4_P12_LOW"] >= args.strong_pp4
-            else "NO"
-        )
-
-        diagnostics = read_table(diagnostics_file)
-        if not diagnostics.empty and "TRAIT" in diagnostics.columns:
-            for trait, field in [("GWAS", "GWAS_S_RSS"), ("QTL", "QTL_S_RSS")]:
-                sub = diagnostics[diagnostics["TRAIT"].astype(str) == trait]
-                if not sub.empty and "ESTIMATE_S_RSS" in sub.columns:
-                    vals = numeric(sub["ESTIMATE_S_RSS"]).dropna()
-                    if not vals.empty:
-                        result[field] = float(vals.iloc[0])
-        svals = [result.get("GWAS_S_RSS"), result.get("QTL_S_RSS")]
-        result["LD_MISMATCH_WARNING"] = (
-            "YES"
-            if any(pd.notna(v) and float(v) > args.ld_mismatch_s for v in svals)
-            else "NO"
-        )
-
-        if results_file.exists() and results_file.stat().st_size > 0:
-            rr = read_table(results_file)
-            rr.to_csv(
-                out / "coloc_variant_results.tsv.gz",
-                sep="\t", index=False, compression="gzip"
-            )
-            results_file.unlink(missing_ok=True)
-
-        result["COLOC_TESTED"] = "YES"
-        result["STATUS"] = "COMPLETE_NO_SIGNAL_PAIR" if no_signal_pair else "COMPLETE"
-        return finish()
-
-    except Exception as exc:
-        result["STATUS"] = "FAILED"
-        result["ERROR"] = f"{type(exc).__name__}: {exc}"
-        (out / "FAILED.txt").write_text(
-            result["ERROR"] + "\n\n" + traceback.format_exc(),
-            encoding="utf-8",
-        )
-        return finish()
-
-
-def resource_status_table(
-    allowed_types: set[str],
-    catalogue_contexts: pd.DataFrame,
-    custom_registry: pd.DataFrame,
-) -> pd.DataFrame:
-    rows = []
-    for qtl_type in SUPPORTED_QTL_TYPES:
-        if qtl_type.lower() not in allowed_types:
-            continue
-        catalog_n = int((catalogue_contexts["QTL_TYPE"].astype(str).str.lower() == qtl_type.lower()).sum()) \
-            if not catalogue_contexts.empty else 0
-        custom_n = int((custom_registry["ENABLED_BOOL"]
-                        & (custom_registry["QTL_TYPE"].astype(str).str.lower() == qtl_type.lower())).sum()) \
-            if not custom_registry.empty else 0
-        formal = catalog_n > 0 or custom_n > 0
-        rows.append({
-            "QTL_TYPE": qtl_type,
-            "FORMAL_RESOURCE_AVAILABLE": formal,
-            "N_EQTL_CATALOG_CONTEXTS": catalog_n,
-            "N_CUSTOM_CONTEXTS": custom_n,
-            "INTERPRETATION": "FORMAL_RESOURCE_AVAILABLE" if formal else "RESOURCE_NOT_CONFIGURED",
-        })
-    return pd.DataFrame(rows)
-
-
-def print_candidates(candidates: pd.DataFrame) -> None:
-    banner("MOLECULAR-QTL CANDIDATES — ALL CONFIGURED TISSUES / CONTEXTS")
-    if candidates.empty:
-        print("No candidates found.")
-        return
-
-    cols = [
-        "LOCUS_ID", "QTL_TYPE", "DATASET", "TISSUE", "CONDITION",
-        "MOLECULAR_TRAIT_ID", "GENE_ID", "DISCOVERY_MIN_P", "QTL_N", "SOURCE",
-    ]
-    cols = [c for c in cols if c in candidates.columns]
-
-    with pd.option_context(
-        "display.max_rows", 1000,
-        "display.max_columns", None,
-        "display.width", 300,
-        "display.max_colwidth", 55,
-        "display.float_format", lambda value: f"{value:.4g}",
-    ):
-        print(candidates[cols].to_string(index=False))
-
-
-def print_formal_summary(summary: pd.DataFrame) -> None:
-    banner("FORMAL COLOCALIZATION RESULTS")
-    if summary.empty:
-        print("No formal candidates/results.")
-        return
-
-    cols = [
-        "LOCUS_ID", "QTL_TYPE", "DATASET", "TISSUE", "CONDITION",
-        "MOLECULAR_TRAIT_ID", "GENE_ID", "COLOC_TESTED", "STATUS",
-        "N_COMMON_SNPS", "MAX_PP_H3", "MAX_PP_H4",
-        "PP_H4_P12_LOW", "PP_H4_P12_DEFAULT", "PP_H4_P12_HIGH",
-        "PRIOR_ROBUST_STRONG", "BEST_HIT1", "BEST_HIT2",
-        "GWAS_S_RSS", "QTL_S_RSS", "LD_MISMATCH_WARNING",
-        "SHARED_SIGNAL", "COLOC_METHOD", "COLOC_CLASS",
-    ]
-    cols = [c for c in cols if c in summary.columns]
-
-    with pd.option_context(
-        "display.max_rows", 2000,
-        "display.max_columns", None,
-        "display.width", 340,
-        "display.max_colwidth", 55,
-        "display.float_format", lambda value: f"{value:.4g}",
-    ):
-        print(summary[cols].to_string(index=False))
-
-
-def build_locus_qtl_matrix(
-    summary: pd.DataFrame,
-    loci: list[str],
-    resource_status: pd.DataFrame,
-    audit: pd.DataFrame,
-    suggestive_pp4: float,
-) -> pd.DataFrame:
-    rows = []
-    status_map = {str(row["QTL_TYPE"]): row for _, row in resource_status.iterrows()}
-
-    for locus in loci:
-        for qtl_type, rs in status_map.items():
-            local = (
-                summary[
-                    (summary["LOCUS_ID"].astype(str) == locus)
-                    & (summary["QTL_TYPE"].astype(str).str.lower() == qtl_type.lower())
-                ] if not summary.empty else pd.DataFrame()
-            )
-            errors = (
-                audit[
-                    (audit["LOCUS_ID"].astype(str) == locus)
-                    & (audit["QTL_TYPE"].astype(str).str.lower() == qtl_type.lower())
-                    & (audit["STATUS"].astype(str) == "ERROR")
-                ] if not audit.empty and "QTL_TYPE" in audit.columns else pd.DataFrame()
-            )
-
-            tested = int((local["COLOC_TESTED"] == "YES").sum()) if not local.empty else 0
-            strong = int((local["COLOCALIZED_STRONG"] == "YES").sum()) if not local.empty else 0
-            robust = int((local["PRIOR_ROBUST_STRONG"] == "YES").sum()) if not local.empty and "PRIOR_ROBUST_STRONG" in local.columns else 0
-            max_h4 = (
-                float(numeric(local["MAX_PP_H4"]).max())
-                if not local.empty and numeric(local["MAX_PP_H4"]).notna().any()
-                else np.nan
-            )
-
-            best_tissue = best_trait = best_gene = best_hit1 = best_hit2 = ""
-            if not local.empty and numeric(local["MAX_PP_H4"]).notna().any():
-                best = local.loc[numeric(local["MAX_PP_H4"]).idxmax()]
-                best_tissue = str(best.get("TISSUE", ""))
-                best_trait = str(best.get("MOLECULAR_TRAIT_ID", ""))
-                best_gene = str(best.get("GENE_ID", ""))
-                best_hit1 = str(best.get("BEST_HIT1", ""))
-                best_hit2 = str(best.get("BEST_HIT2", ""))
-
-            if strong > 0:
-                evidence = "YES_STRONG_COLOC"
-            elif tested > 0 and pd.notna(max_h4) and max_h4 >= suggestive_pp4:
-                evidence = "SUGGESTIVE_COLOC"
-            elif tested > 0:
-                evidence = "NO_STRONG_COLOC"
-            elif len(local) > 0:
-                evidence = "CANDIDATE_NOT_FORMALLY_TESTED"
-            elif len(errors) > 0:
-                evidence = "RESOURCE_ERROR"
-            elif bool(rs["FORMAL_RESOURCE_AVAILABLE"]):
-                evidence = "NO_CANDIDATE_IN_CONFIGURED_RESOURCE"
-            else:
-                evidence = "RESOURCE_NOT_CONFIGURED"
-
-            rows.append({
-                "LOCUS_ID": locus,
-                "QTL_TYPE": qtl_type,
-                "FORMAL_RESOURCE_AVAILABLE": bool(rs["FORMAL_RESOURCE_AVAILABLE"]),
-                "N_RESOURCE_ERRORS": len(errors),
-                "N_CANDIDATES": len(local),
-                "N_FORMALLY_TESTED": tested,
-                "N_STRONG_COLOC": strong,
-                "N_PRIOR_ROBUST_STRONG": robust,
-                "MAX_PP_H4": max_h4,
-                "BEST_TISSUE": best_tissue,
-                "BEST_TRAIT": best_trait,
-                "BEST_GENE": best_gene,
-                "BEST_HIT1": best_hit1,
-                "BEST_HIT2": best_hit2,
-                "EVIDENCE_STATUS": evidence,
-            })
-
-    return pd.DataFrame(rows)
-
-
-def build_wide_evidence_table(matrix: pd.DataFrame) -> pd.DataFrame:
-    if matrix.empty:
-        return matrix
-
-    records = []
-    for locus, group in matrix.groupby("LOCUS_ID", sort=False):
-        record = {"LOCUS_ID": locus}
-        for _, row in group.iterrows():
-            prefix = re.sub(r"[^A-Za-z0-9]+", "_", str(row["QTL_TYPE"])).upper()
-            record[f"{prefix}_STATUS"] = row["EVIDENCE_STATUS"]
-            record[f"{prefix}_MAX_PP_H4"] = row["MAX_PP_H4"]
-            record[f"{prefix}_BEST_TISSUE"] = row["BEST_TISSUE"]
-            record[f"{prefix}_BEST_TRAIT"] = row["BEST_TRAIT"]
-            record[f"{prefix}_BEST_GENE"] = row["BEST_GENE"]
-        records.append(record)
-
-    return pd.DataFrame(records)
-
-
-def _combine_tables(paths: list[Path]) -> pd.DataFrame:
-    frames = [read_table(p) for p in paths if p.exists() and p.stat().st_size > 0]
-    frames = [x for x in frames if not x.empty]
-    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
-
-
-def aggregate_study_outputs(
-    root: Path,
-    phenotype: str,
-    ancestry_label: str,
-    accession: str,
-    args,
-) -> None:
-    paths = project_paths(root, phenotype, ancestry_label)
-    study_out = paths["OUT"] / accession
-    locus_root = study_out / "loci"
-    study_out.mkdir(parents=True, exist_ok=True)
-
-    with exclusive_file_lock(study_out / ".aggregate"):
-        candidate_files = sorted(locus_root.glob("L*/locus_candidates.tsv"))
-        result_files = sorted(locus_root.glob("L*/locus_formal_coloc.tsv"))
-        audit_files = sorted(locus_root.glob("L*/locus_resource_audit.tsv"))
-        resource_files = sorted(locus_root.glob("L*/resource_status.tsv"))
-
-        candidates = _combine_tables(candidate_files)
-        summary = _combine_tables(result_files)
-        audit = _combine_tables(audit_files)
-
-        if resource_files:
-            resource_status = read_table(resource_files[0])
-        else:
-            resource_status = pd.DataFrame()
-
-        candidates.to_csv(
-            study_out / f"{accession}_molecular_qtl_candidates.tsv",
-            sep="\t", index=False
-        )
-        summary.to_csv(
-            study_out / f"{accession}_formal_coloc_summary.tsv",
-            sep="\t", index=False
-        )
-        audit.to_csv(study_out / "resource_scan_audit.tsv", sep="\t", index=False)
-        resource_status.to_csv(study_out / "resource_status.tsv", sep="\t", index=False)
-
-        manifest = read_table(paths["OUT"] / "coloc_manifest.tsv")
-        study_manifest = (
-            manifest[manifest["STUDY_ACCESSION"].astype(str) == accession]
-            if not manifest.empty else pd.DataFrame()
-        )
-        loci = sorted(study_manifest["LOCUS_ID"].astype(str).unique()) if not study_manifest.empty else []
-
-        matrix = build_locus_qtl_matrix(
-            summary, loci, resource_status, audit, args.suggestive_pp4
-        ) if not resource_status.empty else pd.DataFrame()
-        matrix.to_csv(
-            study_out / f"{accession}_locus_qtl_matrix.tsv",
-            sep="\t", index=False
-        )
-        wide = build_wide_evidence_table(matrix)
-        wide.to_csv(
-            study_out / f"{accession}_locus_evidence_table.tsv",
-            sep="\t", index=False
-        )
-
-        done_loci = 0
-        for locus in loci:
-            meta = safe_json(locus_root / locus / "locus_summary.json")
-            if meta.get("STATUS") == "COMPLETE":
-                done_loci += 1
-
-        status = "COMPLETE" if loci and done_loci == len(loci) else "PARTIAL"
-        write_json(
-            study_out / "coloc_summary.json",
-            {
-                "STEP09_VERSION": STEP09_VERSION,
-                "METHOD": "local dense QTL + Step06 GWAS SuSiE fit + QTL runsusie + coloc.susie",
-                "STUDY_ACCESSION": accession,
-                "PHENOTYPE": phenotype,
-                "N_LOCI_EXPECTED": len(loci),
-                "N_LOCI_COMPLETE": done_loci,
-                "N_TESTS": int((summary["COLOC_TESTED"] == "YES").sum()) if not summary.empty else 0,
-                "N_STRONG": int((summary["COLOCALIZED_STRONG"] == "YES").sum()) if not summary.empty else 0,
-                "N_PRIOR_ROBUST_STRONG": int((summary["PRIOR_ROBUST_STRONG"] == "YES").sum()) if not summary.empty and "PRIOR_ROBUST_STRONG" in summary.columns else 0,
-                "STATUS": status,
-                "UPDATED_UTC": utcnow(),
-            },
-        )
-
-
-def process_locus_task(root: Path, manifest_row: pd.Series, args) -> None:
-    phenotype = str(manifest_row["PHENOTYPE"])
-    ancestry_code = str(manifest_row["ANCESTRY_CODE"])
-    ancestry_label = str(manifest_row["ANCESTRY_LABEL"])
-    accession = str(manifest_row["STUDY_ACCESSION"])
-    locus_id = str(manifest_row["LOCUS_ID"])
-
-    paths = project_paths(root, phenotype, ancestry_label)
-    study_dir = paths["S06"] / accession
-    study_out = paths["OUT"] / accession
-    locus_out = study_out / "loci" / locus_id
-    locus_out.mkdir(parents=True, exist_ok=True)
-
-    locus_meta = locus_out / "locus_summary.json"
-    if not args.force and safe_json(locus_meta).get("STATUS") == "COMPLETE":
-        banner(f"STEP09 LOCUS ALREADY COMPLETE — {accession} {locus_id}")
-        aggregate_study_outputs(root, phenotype, ancestry_label, accession, args)
-        return
-
-    allowed_types = {v.strip().lower() for v in args.qtl_types.split(",") if v.strip()}
-    plink2 = find_executable(root, args.plink2, "PLINK2", "plink2")
-    tabix = find_executable(root, args.tabix, "TABIX", "tabix")
-    rscript = find_executable(root, args.rscript, "RSCRIPT", "Rscript")
-    verify_r_packages(rscript)
-
-    # Local files only (Step00_Download_Resources.py); nothing is downloaded.
-    catalogue = load_eqtl_catalogue(root, False)
-    contexts = select_catalogue_contexts(catalogue, args, allowed_types) if not catalogue.empty else catalogue
-    contexts = resolve_catalogue_local_sources(root, contexts)
-    if not contexts.empty:
-        check_local_tabix_connectivity(tabix, contexts)
-
-    custom_registry = ensure_custom_registry_files(
-        root, load_custom_registry(root, args.registry), False
-    )
-    gwas_meta = load_gwas_metadata(paths["S06"], accession)
-    gwas = load_gwas_locus(study_dir, locus_id)
-
-    banner(f"STEP09 LOCUS TASK — {accession} | {locus_id}")
-    print(f"Phenotype      : {phenotype}")
-    print(f"Ancestry       : {ancestry_label} ({ancestry_code})")
-    print(f"GWAS           : {gwas_meta['PHENOTYPE_TYPE']}, N {gwas_meta['COLOC_GWAS_N']} [{gwas_meta['GWAS_N_SOURCE']}]")
-    print(f"QTL datasets   : {len(contexts)} eQTL Catalogue + "
-          f"{int(custom_registry['ENABLED_BOOL'].sum()) if not custom_registry.empty else 0} custom")
-
-    resource_status = resource_status_table(allowed_types, contexts, custom_registry)
-    resource_status.to_csv(locus_out / "resource_status.tsv", sep="\t", index=False)
-
-    candidates_frames = []
-    audits = []
-    if not contexts.empty:
-        cand, audit = discover_catalogue_candidates_for_locus(
-            tabix, contexts, locus_id, gwas, args
-        )
-        if not cand.empty:
-            candidates_frames.append(cand)
-        audits.extend(audit)
-    if not custom_registry.empty:
-        cand, audit = discover_custom_candidates_for_locus(
-            tabix, custom_registry, locus_id, gwas, args, allowed_types
-        )
-        if not cand.empty:
-            candidates_frames.append(cand)
-        audits.extend(audit)
-
-    candidates = (
-        pd.concat(candidates_frames, ignore_index=True, sort=False)
-        if candidates_frames else pd.DataFrame(columns=[
-            "SOURCE","LOCUS_ID","DATASET","DATASET_ID","QTL_TYPE","TISSUE",
-            "CONDITION","MOLECULAR_TRAIT_ID","GENE_ID","DISCOVERY_MIN_P",
-            "N_DISCOVERY_ROWS","QTL_N","SOURCE_URL","ACCESS_PATH","ACCESS_MODE",
-        ])
-    )
-    if not candidates.empty:
-        candidates = (
-            candidates.drop_duplicates(
-                ["LOCUS_ID","QTL_TYPE","DATASET_ID","TISSUE","CONDITION","MOLECULAR_TRAIT_ID"],
-                keep="first",
-            )
-            .sort_values(["DATASET_ID","QTL_TYPE","DISCOVERY_MIN_P"], kind="stable")
-            .reset_index(drop=True)
-        )
-
-    candidates.to_csv(locus_out / "locus_candidates.tsv", sep="\t", index=False)
-    audit_df = pd.DataFrame(audits)
-    audit_df.to_csv(locus_out / "locus_resource_audit.tsv", sep="\t", index=False)
-    print_candidates(candidates)
-
-    r_worker = write_r_worker(locus_out)
-    locus_resources = {"gwas": gwas}
-    results = []
-
-    for number, (_, candidate) in enumerate(candidates.iterrows(), start=1):
-        banner(
-            f"FORMAL COLOC {number}/{len(candidates)} — {locus_id} | "
-            f"{candidate['QTL_TYPE']} | {candidate['TISSUE']} | {candidate['MOLECULAR_TRAIT_ID']}"
-        )
-        result = process_candidate(
-            root, accession, study_dir, ancestry_code, gwas_meta, candidate,
-            contexts, custom_registry, plink2, tabix, rscript,
-            r_worker, locus_out, locus_resources, args,
-        )
-        results.append(result)
-        print(
-            f"RESULT tested={result['COLOC_TESTED']} status={result['STATUS']} "
-            f"method={result.get('COLOC_METHOD','')} PP.H4={result['MAX_PP_H4']} "
-            f"pair={result.get('BEST_SIGNAL_PAIR','')}"
-        )
-
-    summary = pd.DataFrame(results)
-    summary.to_csv(locus_out / "locus_formal_coloc.tsv", sep="\t", index=False)
-    print_formal_summary(summary)
-
-    write_json(
-        locus_meta,
-        {
-            "STEP09_VERSION": STEP09_VERSION,
-            "STUDY_ACCESSION": accession,
-            "LOCUS_ID": locus_id,
-            "N_CANDIDATES": len(candidates),
-            "N_TESTED": int((summary["COLOC_TESTED"] == "YES").sum()) if not summary.empty else 0,
-            "N_STRONG": int((summary["COLOCALIZED_STRONG"] == "YES").sum()) if not summary.empty else 0,
-            "N_RESOURCE_ERRORS": int((audit_df["STATUS"] == "ERROR").sum()) if not audit_df.empty else 0,
-            "STATUS": (
-                "COMPLETE"
-                if not summary.empty
-                and int((summary["COLOC_TESTED"] == "YES").sum()) > 0
-                and int((summary["STATUS"] == "FAILED").sum()) == 0
-                else "PARTIAL_FORMAL_ERROR"
-                if not summary.empty
-                and int((summary["COLOC_TESTED"] == "YES").sum()) > 0
-                and int((summary["STATUS"] == "FAILED").sum()) > 0
-                else "NOT_TESTED_FORMAL_ERROR"
-                if not summary.empty
-                and int((summary["STATUS"] == "FAILED").sum()) > 0
-                else "NOT_TESTED_NO_FORMAL_RESULT"
-            ),
-            "COMPLETED_UTC": utcnow(),
-        },
-    )
-
-    aggregate_study_outputs(root, phenotype, ancestry_label, accession, args)
-
-
-def study_for_index(root: Path, phenotype: str, ancestry_label: str, index: int) -> str:
-    """Accession of study N in the Step02 download manifest (the ARRAY_ID the
-    Step02 planner prints) - the same N in Steps 02, 05, 06, 07, 08 and 09."""
-    path = project_paths(root, phenotype, ancestry_label)["S02"] / "GWAS_download_manifest.tsv"
-    if not path.is_file():
-        raise SystemExit(f"No Step02 download manifest: {path}\nRun the Step02 planner first.")
-    manifest = pd.read_csv(path, sep="\t", dtype=str)
-    ids = pd.to_numeric(manifest["ARRAY_ID"], errors="coerce")
-    selected = manifest[ids == index]
-    if selected.empty:
-        listing = "\n".join(f"  {int(i):>3}  {a}" for i, a in zip(ids, manifest["STUDY_ACCESSION"]) if pd.notna(i))
-        raise SystemExit(f"--index {index} is not in {path}\nAvailable:\n{listing}")
-    return str(selected.iloc[0]["STUDY_ACCESSION"]).strip()
-
-
-def available_qtl_resources(root: Path, args) -> tuple[pd.DataFrame, pd.DataFrame]:
-    allowed = {v.strip().lower() for v in args.qtl_types.split(",") if v.strip()}
-    catalogue = load_eqtl_catalogue(root, False)
-    contexts = select_catalogue_contexts(catalogue, args, allowed) if not catalogue.empty else catalogue
-    contexts = resolve_catalogue_local_sources(root, contexts)
-    registry = ensure_custom_registry_files(root, load_custom_registry(root, args.registry), False)
-    return contexts, registry
-
-
-def passthrough_options(args) -> list[str]:
-    options = ["--registry", args.registry, "--qtl-types", args.qtl_types,
-               "--candidate-p", str(args.candidate_p), "--min-common-snps", str(args.min_common_snps),
-               "--max-common-snps", str(args.max_common_snps), "--strong-pp4", str(args.strong_pp4),
-               "--suggestive-pp4", str(args.suggestive_pp4),
-               "--max-candidates-per-context-locus", str(args.max_candidates_per_context_locus),
-               "--ld-maf", str(args.ld_maf), "--ld-mismatch-s", str(args.ld_mismatch_s)]
-    if args.catalog_all_studies:
-        options.append("--catalog-all-studies")
-    if args.catalog_study_regex:
-        options += ["--catalog-study-regex", args.catalog_study_regex]
-    if args.force:
-        options.append("--force")
-    if REFERENCE_PANEL != DEFAULT_PANEL:
-        options += ["--reference-panel", REFERENCE_PANEL]
-    return options
-
-
-def planner_mode(root: Path, args) -> None:
-    phenotype = args.phenotype.strip()
-    ancestry_code, ancestry_label = canonical_ancestry(args.ancestry)
-    paths = project_paths(root, phenotype, ancestry_label)
-    studies, excluded = discover_step06_studies(paths["S06"])
-    if args.study:
-        studies = [x for x in studies if x == args.study]
-    if not studies:
-        raise SystemExit(f"No fine-mapped studies under {paths['S06']} - run Step06 first.")
-
-    contexts, registry = available_qtl_resources(root, args)
-    n_custom = int(registry["ENABLED_BOOL"].sum()) if not registry.empty else 0
-    if contexts.empty and n_custom == 0:
-        raise SystemExit(
-            "No molecular-QTL data available locally. Download the eQTL Catalogue datasets with\n"
-            "  envs/pipeline/bin/python Step00_Download_Resources.py --groups eqtl_catalogue qtl_catalogue "
-            "--output Step00_Download_QTL.sh\n  sbatch Step00_Download_QTL.sh\n"
-            f"or enable datasets in {args.registry}"
-        )
-
-    rows = []
-    for study_index, accession in enumerate(studies, start=1):
-        loci = list_loci(paths["S06"] / accession)
-        if not loci:
-            excluded.append({"STUDY_ACCESSION": accession, "STEP06_STATUS": "", "REASON": "no locus with a SuSiE fit"})
-        for locus_id in loci:
-            rows.append({"STUDY_INDEX": study_index, "STUDY_ACCESSION": accession, "LOCUS_ID": locus_id,
-                         "PHENOTYPE": phenotype, "ANCESTRY_CODE": ancestry_code, "ANCESTRY_LABEL": ancestry_label})
+def provider_lbf_rows(lbf_index: str, chrom: int, start: int, end: int, traits: set[str]) -> pd.DataFrame:
+    header = file_header(lbf_index)
+    i_trait = header.index(first_existing(header, ["molecular_trait_id"]))
+    rows = [f for f in tabix_fetch(lbf_index, chrom, start, end) if f[i_trait] in traits]
     if not rows:
-        raise SystemExit("No fine-mapped loci with a SuSiE fit (see Step06 --status).")
-
-    n_tasks = min(len(rows), MAX_ARRAY_TASKS)
-    manifest = pd.DataFrame(rows)
-    manifest.insert(0, "COLOC_TASK_ID", [i % n_tasks + 1 for i in range(len(rows))])
-    paths["OUT"].mkdir(parents=True, exist_ok=True)
-    paths["LOG"].mkdir(parents=True, exist_ok=True)
-    manifest_file = paths["OUT"] / "coloc_manifest.tsv"
-    manifest.to_csv(manifest_file, sep="\t", index=False)
-    pd.DataFrame(excluded, columns=["STUDY_ACCESSION", "STEP06_STATUS", "REASON"]).to_csv(
-        paths["OUT"] / "coloc_excluded_studies.tsv", sep="\t", index=False)
-
-    array = (f"1-{n_tasks}" if n_tasks > 1 else "1") + (f"%{args.max_parallel}" if args.max_parallel else "")
-    directives = {**args.slurm_values, "job-name": f"COLOC_{slugify(phenotype)}_{ancestry_code.lower()}"[:100],
-                  "array": array, "output": f"{paths['LOG']}/coloc.%A_%a.out",
-                  "error": f"{paths['LOG']}/coloc.%A_%a.err"}
-    order = ["job-name", "account", "partition", "qos", "nodes", "ntasks", "cpus-per-task", "mem", "time",
-             "array", "output", "error"]
-    header = "\n".join(f"#SBATCH --{k}={directives[k]}" for k in order if directives.get(k))
-    header += "".join(f"\n#SBATCH --{k}={v}" for k, v in directives.items() if k not in order and v)
-    python = root / "envs" / "pipeline" / "bin" / "python"
-    if not python.exists():
-        python = Path(sys.executable).resolve()
-    command = [str(python), str(Path(__file__).resolve()), "--phenotype", phenotype, "--ancestry", ancestry_code,
-               "--worker-manifest", str(manifest_file)] + passthrough_options(args)
-    bash_file = root / f"Step09_Coloc_{slugify(phenotype)}_{results_slug(slugify(ancestry_label))}.sh"
-    bash_file.write_text(f"""#!/bin/bash --login
-{header}
-
-set -euo pipefail
-cd {shlex.quote(str(root))}
-export PATH={shlex.quote(str(root / 'envs' / 'pipeline' / 'bin'))}:"$PATH"
-export OMP_NUM_THREADS="${{SLURM_CPUS_PER_TASK:-{args.cpus}}}"
-
-{' '.join(shlex.quote(x) for x in command)}
-""", encoding="utf-8", newline="\n")
-    bash_file.chmod(0o755)
-
-    banner("STEP 09 COLOCALISATION PLANNER - ONE ARRAY TASK PER LOCUS")
-    print(f"Phenotype       : {phenotype}")
-    print(f"Ancestry        : {ancestry_label} ({ancestry_code})")
-    print(f"LD panel        : {REFERENCE_PANEL}  (Step06 results: {paths['S06']})")
-    print(f"Studies         : {len(studies)}  ({len(excluded)} excluded, see coloc_excluded_studies.tsv)")
-    print(f"Locus tasks     : {len(manifest)}  -> array {array}"
-          + (f"  ({len(manifest) / n_tasks:.1f} loci per task)" if len(manifest) > n_tasks else ""))
-    print(f"QTL datasets    : {len(contexts)} eQTL Catalogue (downloaded) + {n_custom} custom")
-    print()
-    per_study = manifest.groupby("STUDY_ACCESSION")["COLOC_TASK_ID"].agg(["min", "max", "size"])
-    for accession, r in per_study.iterrows():
-        print(f"  {accession:<15} {int(r['size']):>4} loci   tasks {int(r['min'])}-{int(r['max'])}")
-    print(f"\nManifest: {manifest_file}\n\nRUN ALL LOCI:\n  sbatch {bash_file.name}")
-    if len(manifest) <= n_tasks and len(per_study) > 1:
-        accession, r = next(iter(per_study.iterrows()))
-        print(f"ONLY {accession}:\n  sbatch --array={int(r['min'])}-{int(r['max'])} {bash_file.name}")
-    base = (f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(phenotype)} "
-            f"--ancestry {ancestry_code}{panel_option()}")
-    print(f"THEN:\n  {base} --status\n  {base} --stats")
+        return pd.DataFrame(columns=header)
+    return pd.DataFrame(rows, columns=header[:len(rows[0])])
 
 
-def run_locus(root: Path, row: pd.Series, args) -> bool:
+R_WORKER = r'''
+args <- commandArgs(trailingOnly=TRUE)
+if (length(args) != 15) stop("Expected 15 arguments")
+fit_file <- args[1]; map_file <- args[2]; qtl_file <- args[3]; cand_file <- args[4]
+out_summary <- args[5]; out_status <- args[6]; out_varpp <- args[7]
+p1 <- as.numeric(args[8]); p2 <- as.numeric(args[9]); p12 <- as.numeric(args[10])
+p12_low <- as.numeric(args[11]); p12_high <- as.numeric(args[12])
+overlap_min <- as.numeric(args[13]); trim <- as.logical(args[14]); save_min <- as.numeric(args[15])
+suppressPackageStartupMessages(library(coloc))
+if (!("coloc.bf_bf" %in% getNamespaceExports("coloc"))) stop("installed coloc has no coloc.bf_bf (need coloc >= 5)")
+
+# GWAS side: Step06 susieR fit, signal x variant LBFs in the Step06 LD variant order.
+fit <- readRDS(fit_file)
+map <- read.delim(map_file, stringsAsFactors=FALSE, check.names=FALSE)
+if (is.null(fit$lbf_variable)) stop("Step06 SuSiE object has no lbf_variable")
+gbf <- as.matrix(fit$lbf_variable)
+if (ncol(gbf) != nrow(map) && nrow(gbf) == nrow(map)) gbf <- t(gbf)
+if (ncol(gbf) != nrow(map)) stop(sprintf("GWAS lbf_variable %dx%d does not match %d mapped variants",
+                                         nrow(gbf), ncol(gbf), nrow(map)))
+colnames(gbf) <- map$VARIANT_KEY
+gidx <- tryCatch(as.integer(fit$sets$cs_index), error=function(e) integer())
+gidx <- unique(gidx[is.finite(gidx) & gidx >= 1 & gidx <= nrow(gbf)])
+if (length(gidx) == 0) stop("Step06 GWAS SuSiE has no credible-set component")
+gbf <- gbf[gidx, , drop=FALSE]
+rownames(gbf) <- paste0("L", gidx)
+gbf <- gbf[, !is.na(colnames(gbf)) & nzchar(colnames(gbf)) & !duplicated(colnames(gbf)), drop=FALSE]
+gbf <- gbf[apply(gbf, 1, function(z) any(is.finite(z))), , drop=FALSE]
+
+# QTL side: provider SuSiE LBFs of every candidate, restricted to its provider credible-set components.
+qtl <- read.delim(gzfile(qtl_file), stringsAsFactors=FALSE, check.names=FALSE)
+cands <- read.delim(cand_file, stringsAsFactors=FALSE, check.names=FALSE, colClasses="character")
+rows_of <- split(seq_len(nrow(qtl)), qtl$CANDIDATE_ID)
+status <- list(); summaries <- list(); varpp <- list()
+priors <- list(DEFAULT=p12, LOW_P12=p12_low, HIGH_P12=p12_high)
+
+for (i in seq_len(nrow(cands))) {
+  cid <- cands$CANDIDATE_ID[i]
+  st <- list(CANDIDATE_ID=cid, R_STATUS="", N_GWAS_SIGNALS=nrow(gbf), N_QTL_SIGNALS=0L,
+             N_QTL_LBF_VARIANTS=0L, N_COMMON_VARIANTS=0L, MESSAGE="")
+  res <- tryCatch({
+    rows <- rows_of[[cid]]
+    comps <- suppressWarnings(as.integer(strsplit(cands$QTL_COMPONENTS[i], ",", fixed=TRUE)[[1]]))
+    cols <- intersect(paste0("lbf_variable", comps[is.finite(comps)]), names(qtl))
+    if (is.null(rows) || length(rows) == 0) { st$R_STATUS <- "NO_PROVIDER_LBF_ROWS"; NULL }
+    else if (length(cols) == 0) { st$R_STATUS <- "NO_PROVIDER_LBF_COLUMNS"; NULL }
+    else {
+      sub <- qtl[rows, c("VARIANT_KEY", cols), drop=FALSE]
+      sub <- sub[nzchar(sub$VARIANT_KEY) & !duplicated(sub$VARIANT_KEY), , drop=FALSE]
+      qbf <- t(as.matrix(sub[, cols, drop=FALSE]))
+      storage.mode(qbf) <- "double"
+      colnames(qbf) <- sub$VARIANT_KEY
+      rownames(qbf) <- sub("^lbf_variable", "L", cols)
+      qbf <- qbf[apply(qbf, 1, function(z) any(is.finite(z))), , drop=FALSE]
+      st$N_QTL_SIGNALS <- nrow(qbf)
+      st$N_QTL_LBF_VARIANTS <- ncol(qbf)
+      st$N_COMMON_VARIANTS <- length(intersect(colnames(gbf), colnames(qbf)))
+      if (nrow(qbf) == 0) { st$R_STATUS <- "NO_FINITE_LBF_SIGNAL"; NULL }
+      else if (st$N_COMMON_VARIANTS == 0) { st$R_STATUS <- "NO_SHARED_VARIANTS"; NULL }
+      else {
+        out <- list()
+        for (label in names(priors)) {
+          z <- suppressWarnings(coloc::coloc.bf_bf(gbf, qbf, p1=p1, p2=p2, p12=priors[[label]],
+                                                   overlap.min=overlap_min, trim_by_posterior=trim))
+          sm <- tryCatch(as.data.frame(z$summary), error=function(e) data.frame())
+          if (nrow(sm) > 0) {
+            sm$CANDIDATE_ID <- cid; sm$PRIOR_SET <- label; sm$P12 <- priors[[label]]
+            out[[label]] <- list(summary=sm, obj=z)
+          }
+        }
+        if (is.null(out[["DEFAULT"]])) { st$R_STATUS <- "INSUFFICIENT_POSTERIOR_OVERLAP"; NULL }
+        else { st$R_STATUS <- "OK"; out }
+      }
+    }
+  }, error=function(e) { st$R_STATUS <<- "ERROR"; st$MESSAGE <<- gsub("[\t\n]", " ", conditionMessage(e)); NULL })
+  status[[length(status) + 1]] <- as.data.frame(st, stringsAsFactors=FALSE)
+  if (!is.null(res)) {
+    for (label in names(res)) summaries[[length(summaries) + 1]] <- res[[label]]$summary
+    h4 <- suppressWarnings(max(as.numeric(res$DEFAULT$summary$PP.H4.abf), na.rm=TRUE))
+    if (is.finite(h4) && h4 >= save_min) {
+      rr <- tryCatch(as.data.frame(res$DEFAULT$obj$results), error=function(e) data.frame())
+      if (nrow(rr) > 0 && "snp" %in% names(rr)) {
+        for (pc in setdiff(names(rr), "snp")) {
+          varpp[[length(varpp) + 1]] <- data.frame(CANDIDATE_ID=cid, PAIR=pc, VARIANT_KEY=rr$snp,
+                                                   SNP_PP_H4=as.numeric(rr[[pc]]), stringsAsFactors=FALSE)
+        }
+      }
+    }
+  }
+}
+write.table(do.call(rbind, status), out_status, sep="\t", quote=FALSE, row.names=FALSE)
+if (length(summaries)) {
+  keep <- Reduce(intersect, lapply(summaries, names))
+  write.table(do.call(rbind, lapply(summaries, function(s) s[, keep, drop=FALSE])), out_summary,
+              sep="\t", quote=FALSE, row.names=FALSE)
+} else {
+  write.table(data.frame(CANDIDATE_ID=character()), out_summary, sep="\t", quote=FALSE, row.names=FALSE)
+}
+if (length(varpp)) {
+  con <- gzfile(out_varpp, "w"); write.table(do.call(rbind, varpp), con, sep="\t", quote=FALSE, row.names=FALSE)
+  close(con)
+}
+cat("CANDIDATES=", nrow(cands), " TESTED=", sum(sapply(status, function(s) s$R_STATUS == "OK")), "\n", sep="")
+'''
+
+
+def classify(summary: pd.DataFrame, strong: float, suggestive: float) -> dict:
+    """Classify one candidate from its best (max PP.H4) signal pair - one consistent posterior vector."""
+    h4 = numeric(summary["PP.H4.abf"])
+    if not np.isfinite(h4.to_numpy(dtype=float)).any():
+        return {"STATUS": "NOT_TESTED_NO_FINITE_H4"}
+    best = summary.loc[h4.idxmax()]
+    pp = [float(numeric(pd.Series([best.get(f"PP.H{i}.abf")])).iloc[0]) for i in range(5)]
+    dominant = int(np.nanargmax(pp))
+    pp4 = pp[4]
+    if pp4 >= strong:
+        label = "STRONG_SHARED_SIGNAL"
+    elif pp4 >= suggestive:
+        label = "SUGGESTIVE_SHARED_SIGNAL"
+    else:
+        label = {0: "NEITHER_ASSOCIATED_FAVORED", 1: "GWAS_ONLY_FAVORED", 2: "QTL_ONLY_FAVORED",
+                 3: "BOTH_ASSOCIATED_DIFFERENT_SIGNALS_FAVORED", 4: "SHARED_SIGNAL_BELOW_THRESHOLD"}[dominant]
+    out = {f"PP_H{i}": pp[i] for i in range(5)}
+    out.update({"BEST_GWAS_VARIANT": str(best.get("hit1", "")), "BEST_QTL_VARIANT": str(best.get("hit2", "")),
+                "BEST_GWAS_SIGNAL": str(best.get("idx1", "")), "BEST_QTL_SIGNAL": str(best.get("idx2", "")),
+                "DOMINANT_HYPOTHESIS": f"H{dominant}", "N_SIGNAL_PAIRS": int(len(summary)),
+                "COLOC_CLASS": label, "COLOCALIZED_STRONG": "YES" if pp4 >= strong else "NO",
+                "SHARED_SIGNAL": "YES" if pp4 >= suggestive else "NO"})
+    return out
+
+
+def sensitivity_pp4(rows: pd.DataFrame, label: str, hit1: str, hit2: str) -> float:
+    sub = rows[rows["PRIOR_SET"] == label]
+    same = sub[(sub["hit1"].astype(str) == hit1) & (sub["hit2"].astype(str) == hit2)]
+    sub = same if len(same) else sub
+    vals = numeric(sub["PP.H4.abf"]) if len(sub) else pd.Series(dtype=float)
+    return float(vals.max()) if vals.notna().any() else np.nan
+
+
+def process_locus(row: pd.Series, args, cfg: dict, ready: pd.DataFrame, rscript: str) -> str:
+    """Colocalise one Step06 locus with every ready QTL context. Returns the locus status."""
+    P = project_paths(args)
+    accession, locus_id = str(row["STUDY_ACCESSION"]), str(row["LOCUS_ID"])
+    study_dir = P["S06"] / accession
+    out = P["OUT"] / accession / "loci" / locus_id
+    done_file = out / DONE_FILE
+    c_hash = context_hash(ready)
+    previous = read_json(done_file)
+    if previous and not args.force and previous.get("CONTEXT_HASH") == c_hash:
+        print(f"[RESUME] {accession} {locus_id}: {previous.get('STATUS')} (same {len(ready)} QTL contexts)")
+        return str(previous.get("STATUS"))
+    out.mkdir(parents=True, exist_ok=True)
+    (out / FAILED_FILE).unlink(missing_ok=True)
+    work = out / "work"
+    work.mkdir(exist_ok=True)
+    started = time.time()
+    banner(f"{STEP['NAME']} - {accession} {locus_id} - {len(ready)} QTL contexts")
+
+    def finish(status: str, results: pd.DataFrame, extra: dict) -> str:
+        write_tsv(results, out / RESULTS_FILE)
+        tested = results[results.get("COLOC_TESTED", pd.Series(dtype=str)).astype(str) == "YES"] \
+            if len(results) else results
+        write_json(done_file, {
+            "VERSION": VERSION, "STEP": STEP["NAME"], "STATUS": status, "STUDY_ACCESSION": accession,
+            "LOCUS_ID": locus_id, "CONTEXT_HASH": c_hash, "N_CONTEXTS_READY": int(len(ready)),
+            "N_CANDIDATES": int(len(results)), "N_TESTED": int(len(tested)),
+            "N_STRONG": int((tested.get("COLOCALIZED_STRONG", pd.Series(dtype=str)) == "YES").sum()) if len(tested) else 0,
+            "SECONDS": round(time.time() - started, 1), "COMPLETED_UTC": utcnow(), **extra})
+        if not args.keep_work:
+            shutil.rmtree(work, ignore_errors=True)
+        print(f"[OK] {accession} {locus_id}: {status}; {len(results)} candidates, {len(tested)} tested "
+              f"({time.time() - started:.0f}s)")
+        return status
+
+    # 1. GWAS side from Step06.
+    gwas = load_gwas_locus(study_dir, locus_id)
+    chroms = sorted(set(gwas["CHR"].dropna().astype(int)))
+    if len(chroms) != 1:
+        raise RuntimeError(f"Locus spans chromosomes {chroms}")
+    chrom, start, end = chroms[0], int(gwas["POS"].min()), int(gwas["POS"].max())
+    fit, gmap = gwas_susie_inputs(study_dir, locus_id, P["code"], gwas, work)
+    gidx = gwas_cs_indices(rscript, fit)
+    region = {"CHR": chrom, "LOCUS_START": start, "LOCUS_END": end, "GWAS_CS_INDEXES": ",".join(f"L{i}" for i in gidx)}
+    if not gidx:
+        return finish("NO_GWAS_CREDIBLE_SET", pd.DataFrame(columns=RESULT_COLUMNS), region)
+
+    # 2. Discovery in the dense QTL summary statistics of every ready context.
+    candidates, audit = discover_candidates(ready, chrom, start, end, cfg)
+    write_tsv(pd.DataFrame(audit), out / "discovery_audit.tsv")
+    if candidates.empty:
+        return finish("NO_QTL_CANDIDATES", pd.DataFrame(columns=RESULT_COLUMNS), region)
+    candidates.insert(0, "CANDIDATE_ID", [sha1_short(f"{accession}|{locus_id}|{d}|{t}", 20) for d, t in
+                                          zip(candidates["DATASET_ID"], candidates["MOLECULAR_TRAIT_ID"])])
+    for key, value in (("STUDY_ACCESSION", accession), ("LOCUS_ID", locus_id), *region.items()):
+        candidates[key] = value
+    for column in RESULT_COLUMNS:
+        if column not in candidates.columns:
+            candidates[column] = np.nan if column.startswith(("PP_", "N_")) else ""
+    candidates["COLOC_TESTED"] = "NO"
+
+    # 3. Provider credible-set filter: only real provider SuSiE components overlapping the GWAS locus.
+    # 4. Provider LBFs of the surviving traits, read from the position-indexed LBF file (locus window only).
+    lbf_frames = []
+    for dataset_id, group in candidates.groupby("DATASET_ID", sort=False):
+        traits = set(group["MOLECULAR_TRAIT_ID"])
+        comps = provider_cs_components(group["CS_PATH"].iloc[0], traits)
+        keep_traits = set()
+        for i, r in group.iterrows():
+            trait_comps = comps.get(r["MOLECULAR_TRAIT_ID"], {})
+            overlap = [k for k, (c, lo, hi) in sorted(trait_comps.items()) if c == chrom and hi >= start and lo <= end]
+            if not trait_comps:
+                candidates.at[i, "STATUS"] = "EXCLUDED_NO_PROVIDER_CS_FOR_TRAIT"
+            elif not overlap:
+                candidates.at[i, "STATUS"] = "EXCLUDED_PROVIDER_CS_OUTSIDE_LOCUS"
+                candidates.at[i, "QTL_CS_INDEXES"] = ",".join(f"L{k}" for k in sorted(trait_comps))
+            else:
+                candidates.at[i, "QTL_CS_INDEXES"] = ",".join(f"L{k}" for k in overlap)
+                keep_traits.add(r["MOLECULAR_TRAIT_ID"])
+        if keep_traits:
+            lbf = provider_lbf_rows(group["LBF_INDEX_PATH"].iloc[0], chrom, start, end, keep_traits)
+            if len(lbf):
+                trait_col = first_existing(lbf.columns, ["molecular_trait_id"])
+                var_col = first_existing(lbf.columns, ["variant", "variant_id"])
+                ids = group.set_index("MOLECULAR_TRAIT_ID")["CANDIDATE_ID"]
+                frame = pd.DataFrame({"CANDIDATE_ID": lbf[trait_col].map(ids).values,
+                                      "VARIANT_KEY": variant_keys(lbf[var_col]).values})
+                for column in [c for c in lbf.columns if str(c).startswith("lbf_variable")]:
+                    frame[column] = lbf[column].values
+                lbf_frames.append(frame[frame["VARIANT_KEY"].ne("")])
+
+    to_test = candidates[candidates["STATUS"] == ""].copy()
+    if to_test.empty:
+        return finish("COMPLETE", tidy_results(candidates), region)
+    to_test["QTL_COMPONENTS"] = to_test["QTL_CS_INDEXES"].str.replace("L", "", regex=False)
+    qtl_long = pd.concat(lbf_frames, ignore_index=True) if lbf_frames else pd.DataFrame(
+        columns=["CANDIDATE_ID", "VARIANT_KEY", "lbf_variable1"])
+    write_tsv(qtl_long, work / "qtl_provider_lbf.tsv.gz")
+    write_tsv(to_test[["CANDIDATE_ID", "QTL_COMPONENTS"]], work / "candidates.tsv")
+
+    # 5. coloc::coloc.bf_bf for every candidate of the locus in one R session.
+    worker = work / "provider_coloc_bf_bf.R"
+    worker.write_text(R_WORKER, encoding="utf-8")
+    summary_file, status_file, varpp_file = out / "coloc_signal_pairs.tsv", work / "r_status.tsv", \
+        out / "coloc_variant_pp_h4.tsv.gz"
+    varpp_file.unlink(missing_ok=True)
+    command = [rscript, str(worker), str(fit), str(gmap), str(work / "qtl_provider_lbf.tsv.gz"),
+               str(work / "candidates.tsv"), str(summary_file), str(status_file), str(varpp_file),
+               *(str(cfg[k]) for k in ("P1", "P2", "P12", "P12_LOW", "P12_HIGH", "OVERLAP_MIN")),
+               "TRUE" if cfg["TRIM_BY_POSTERIOR"] else "FALSE", str(cfg["SAVE_VARIANT_PP_MIN_PP4"])]
+    proc = subprocess.run(command, text=True, capture_output=True)
+    (out / "coloc.log").write_text(proc.stdout + proc.stderr, encoding="utf-8")
+    if proc.returncode != 0:
+        raise RuntimeError(f"R coloc worker failed (log {out / 'coloc.log'}):\n{proc.stderr[-3000:]}")
+
+    r_status = read_tsv(status_file, dtype=str).set_index("CANDIDATE_ID")
+    summary = read_tsv(summary_file)
+    r_codes = {"NO_PROVIDER_LBF_ROWS": "NOT_TESTED_NO_PROVIDER_LBF_ROWS",
+               "NO_PROVIDER_LBF_COLUMNS": "NOT_TESTED_NO_PROVIDER_LBF_COLUMNS",
+               "NO_FINITE_LBF_SIGNAL": "NOT_TESTED_NO_FINITE_LBF_SIGNAL",
+               "NO_SHARED_VARIANTS": "NOT_TESTED_NO_SHARED_VARIANTS",
+               "INSUFFICIENT_POSTERIOR_OVERLAP": "NOT_TESTED_INSUFFICIENT_POSTERIOR_OVERLAP", "ERROR": "FAILED_R"}
+    for i, r in to_test.iterrows():
+        st = r_status.loc[r["CANDIDATE_ID"]] if r["CANDIDATE_ID"] in r_status.index else None
+        if st is None:
+            candidates.at[i, "STATUS"] = "FAILED_NO_R_RESULT"
+            continue
+        for key in ("N_GWAS_SIGNALS", "N_QTL_SIGNALS", "N_QTL_LBF_VARIANTS", "N_COMMON_VARIANTS"):
+            candidates.at[i, key] = safe_int(st.get(key))
+        if st["R_STATUS"] != "OK":
+            candidates.at[i, "STATUS"] = r_codes.get(st["R_STATUS"], "FAILED_R")
+            candidates.at[i, "ERROR"] = str(st.get("MESSAGE", "") or "")
+            continue
+        rows = summary[summary["CANDIDATE_ID"].astype(str) == r["CANDIDATE_ID"]]
+        result = classify(rows[rows["PRIOR_SET"] == "DEFAULT"], cfg["STRONG_PP4"], cfg["SUGGESTIVE_PP4"])
+        if result.get("STATUS"):
+            candidates.at[i, "STATUS"] = result["STATUS"]
+            continue
+        for key, value in result.items():
+            candidates.at[i, key] = value
+        hit1, hit2 = result["BEST_GWAS_VARIANT"], result["BEST_QTL_VARIANT"]
+        low, high = sensitivity_pp4(rows, "LOW_P12", hit1, hit2), sensitivity_pp4(rows, "HIGH_P12", hit1, hit2)
+        candidates.at[i, "PP_H4_P12_LOW"], candidates.at[i, "PP_H4_P12_HIGH"] = low, high
+        candidates.at[i, "PRIOR_ROBUST_STRONG"] = "YES" if np.isfinite(low) and low >= cfg["STRONG_PP4"] else "NO"
+        candidates.at[i, "COLOC_TESTED"] = "YES"
+        candidates.at[i, "STATUS"] = "TESTED"
+    return finish("COMPLETE", tidy_results(candidates), region)
+
+
+RESULT_COLUMNS = [
+    "STUDY_ACCESSION", "LOCUS_ID", "CHR", "LOCUS_START", "LOCUS_END", "QTL_TYPE", "STUDY_LABEL", "TISSUE",
+    "SAMPLE_GROUP", "CONDITION", "DATASET_ID", "MOLECULAR_TRAIT_ID", "GENE_ID", "QTL_N", "DISCOVERY_MIN_P",
+    "N_DISCOVERY_ROWS", "GWAS_CS_INDEXES", "QTL_CS_INDEXES", "STATUS", "COLOC_TESTED", "PP_H4", "COLOC_CLASS",
+    "COLOCALIZED_STRONG", "SHARED_SIGNAL", "PRIOR_ROBUST_STRONG", "PP_H4_P12_LOW", "PP_H4_P12_HIGH",
+    "PP_H0", "PP_H1", "PP_H2", "PP_H3", "DOMINANT_HYPOTHESIS", "BEST_GWAS_VARIANT", "BEST_QTL_VARIANT",
+    "BEST_GWAS_SIGNAL", "BEST_QTL_SIGNAL", "N_SIGNAL_PAIRS", "N_GWAS_SIGNALS", "N_QTL_SIGNALS",
+    "N_QTL_LBF_VARIANTS", "N_COMMON_VARIANTS", "ERROR", "CANDIDATE_ID",
+]
+
+
+def tidy_results(candidates: pd.DataFrame) -> pd.DataFrame:
+    x = candidates.copy()
+    for column in RESULT_COLUMNS:
+        if column not in x.columns:
+            x[column] = np.nan if column.startswith(("PP_", "N_")) else ""
+    x = x[RESULT_COLUMNS]
+    order = numeric(x["PP_H4"]).fillna(-1)
+    return x.assign(_O=order).sort_values(["_O", "DISCOVERY_MIN_P"], ascending=[False, True]).drop(columns="_O")
+
+
+# =============================================================================
+# CONTEXT SNAPSHOT (frozen when the job script is made, so every task tests the same contexts)
+# =============================================================================
+
+def snapshot_file(P: dict) -> Path:
+    return P["OUT"] / "qtl_contexts_snapshot.tsv"
+
+
+def load_snapshot(P: dict) -> pd.DataFrame:
+    x = read_tsv(snapshot_file(P), dtype=str, keep_default_na=False)
+    if x.empty:
+        raise SystemExit(f"QTL context snapshot missing: {snapshot_file(P)} - run the planner again.")
+    still = x["DENSE_PATH"].map(lambda p: nonempty(Path(p))) & x["LBF_INDEX_PATH"].map(lambda p: nonempty(Path(p)))
+    if (~still).any():
+        print(f"[WARN] {int((~still).sum())} snapshot contexts disappeared from disk - not tested")
+    return x[still].reset_index(drop=True)
+
+
+# =============================================================================
+# MODES
+# =============================================================================
+
+def require_tools() -> str:
+    rscript = find_executable("Rscript")
+    if not rscript:
+        raise SystemExit("Rscript not found - run Step00_Installation.py")
+    import importlib.util
+    if importlib.util.find_spec("pysam") is None:
+        raise SystemExit("python pysam not installed - run Step00_Installation.py")
+    return rscript
+
+
+def run_locus(row: pd.Series, args, cfg, ready, rscript) -> bool:
     try:
-        process_locus_task(root, row, args)
+        process_locus(row, args, cfg, ready, rscript)
         return True
     except Exception as exc:
-        paths = project_paths(root, str(row["PHENOTYPE"]), str(row["ANCESTRY_LABEL"]))
-        out = paths["OUT"] / str(row["STUDY_ACCESSION"]) / "loci" / str(row["LOCUS_ID"])
+        out = project_paths(args)["OUT"] / str(row["STUDY_ACCESSION"]) / "loci" / str(row["LOCUS_ID"])
         out.mkdir(parents=True, exist_ok=True)
-        (out / "LOCUS_FAILED.txt").write_text(f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}",
-                                              encoding="utf-8")
+        (out / FAILED_FILE).write_text(f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}", encoding="utf-8")
         print(f"[FAILED] {row['STUDY_ACCESSION']} {row['LOCUS_ID']}: {exc}", file=sys.stderr)
         return False
 
 
-def worker_mode(root: Path, args) -> None:
+def config_path(args) -> Path:
+    path = Path(args.config)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def passthrough(args) -> list[str]:
+    options = ["--config", str(config_path(args))]
+    if args.reference_panel != DEFAULT_PANEL:
+        options += ["--reference-panel", args.reference_panel]
+    for flag, value in (("--qtl-types", args.qtl_types), ("--study-regex", args.study_regex),
+                        ("--candidate-p", args.candidate_p), ("--strong-pp4", args.strong_pp4),
+                        ("--suggestive-pp4", args.suggestive_pp4)):
+        if value is not None:
+            options += [flag, str(value)]
+    if args.force:
+        options.append("--force")
+    if args.keep_work:
+        options.append("--keep-work")
+    return options
+
+
+def planner_mode(args, cfg) -> None:
+    P = project_paths(args)
+    studies, excluded = step06_studies(P["S06"])
+    if args.study:
+        studies = [s for s in studies if s == args.study]
+    if not studies:
+        raise SystemExit(f"No fine-mapped studies under {P['S06']} - run Step06{panel_option(P['panel'])} first.")
+    status, ready = current_contexts(cfg)
+    banner(f"{STEP['NAME']} PLANNER - {STEP['TITLE']} - {P['phenotype']} / {P['label']} - LD panel {P['panel']}")
+    print_context_summary(status, cfg)
+    if ready.empty:
+        raise SystemExit(f"\nNo QTL context is ready (dense + provider credible sets + indexed provider LBF).\n"
+                         f"  {step00_command(cfg)}\nthen: {base_command(P)} --check-resources")
+    order = step02_order(P)
+    rows = [{"STUDY_INDEX": order.get(acc, ""), "STUDY_ACCESSION": acc, "LOCUS_ID": locus}
+            for acc in studies for locus in list_loci(P["S06"] / acc)]
+    n_tasks = min(len(rows), MAX_ARRAY_TASKS)
+    manifest = pd.DataFrame(rows)
+    manifest.insert(0, "TASK_ID", [i % n_tasks + 1 for i in range(len(rows))])   # >1000 loci: several per task
+    P["OUT"].mkdir(parents=True, exist_ok=True)
+    P["LOG"].mkdir(parents=True, exist_ok=True)
+    manifest_file = P["OUT"] / "coloc_manifest.tsv"
+    write_tsv(manifest, manifest_file)
+    write_tsv(pd.DataFrame(excluded, columns=["STUDY_ACCESSION", "REASON"]), P["OUT"] / "coloc_excluded_studies.tsv")
+    write_tsv(ready, snapshot_file(P))
+
+    values = resolve_slurm(args, cfg)
+    array = (f"1-{n_tasks}" if n_tasks > 1 else "1") + (f"%{args.max_parallel}" if args.max_parallel else "")
+    directives = {**values, "job-name": f"{STEP['JOB']}_{P['p']}_{P['code'].lower()}"[:100], "array": array,
+                  "output": f"{P['LOG']}/coloc.%A_%a.out", "error": f"{P['LOG']}/coloc.%A_%a.err"}
+    order_keys = ["job-name", "account", "partition", "qos", "nodes", "ntasks", "cpus-per-task", "mem", "time",
+                  "array", "output", "error"]
+    header = "\n".join(f"#SBATCH --{k}={directives[k]}" for k in order_keys if directives.get(k))
+    header += "".join(f"\n#SBATCH --{k}={v}" for k, v in directives.items() if k not in order_keys and v)
+    python = PROJECT_ROOT / "envs" / "pipeline" / "bin" / "python"
+    command = [str(python), str(Path(__file__).resolve()), "--phenotype", P["phenotype"], "--ancestry", P["code"],
+               "--worker-manifest", str(manifest_file)] + passthrough(args)
+    P["BASH"].write_text(f"""#!/bin/bash --login
+{header}
+
+set -euo pipefail
+cd {shlex.quote(str(PROJECT_ROOT))}
+export PATH={shlex.quote(str(PROJECT_ROOT / 'envs' / 'pipeline' / 'bin'))}:"$PATH"
+export OMP_NUM_THREADS="${{SLURM_CPUS_PER_TASK:-1}}"
+
+{' '.join(shlex.quote(x) for x in command)}
+""", encoding="utf-8", newline="\n")
+    P["BASH"].chmod(0o755)
+
+    print(f"\nStudies         : {len(studies)}  ({len(excluded)} excluded, see coloc_excluded_studies.tsv)")
+    print(f"Loci            : {len(manifest)} -> array {array}"
+          + (f" ({len(manifest) / n_tasks:.1f} loci per task)" if len(manifest) > n_tasks else " (one locus per task)"))
+    print(f"QTL contexts    : {len(ready)} ready, frozen in {snapshot_file(P).name}")
+    print(f"Config          : {cfg['_FILE'] or 'built-in defaults'}")
+    per = manifest.groupby("STUDY_ACCESSION").agg(IDX=("STUDY_INDEX", "first"), LOCI=("LOCUS_ID", "size"),
+                                                   FIRST=("TASK_ID", "min"), LAST=("TASK_ID", "max"))
+    for accession, r in per.iterrows():
+        print(f"  {str(r['IDX']):>4}  {accession:<15} {int(r['LOCI']):>4} loci   tasks {int(r['FIRST'])}-{int(r['LAST'])}")
+    print(f"\nManifest: {manifest_file}\n\nRUN:\n  sbatch {P['BASH'].name}")
+    print(f"THEN:\n  {base_command(P)} --status\n  {base_command(P)} --stats")
+
+
+def worker_mode(args, cfg) -> None:
+    P = project_paths(args)
     task = int(os.environ.get("SLURM_ARRAY_TASK_ID", "1"))
-    args.cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", args.cpus))
-    manifest = pd.read_csv(args.worker_manifest, sep="\t", dtype=str)
-    selected = manifest[pd.to_numeric(manifest["COLOC_TASK_ID"], errors="coerce") == task]
+    manifest = read_tsv(Path(args.worker_manifest), dtype=str)
+    selected = manifest[numeric(manifest["TASK_ID"]) == task]
     if selected.empty:
         raise SystemExit(f"No manifest rows for array task {task}")
-    failed = [f"{r['STUDY_ACCESSION']} {r['LOCUS_ID']}" for _, r in selected.iterrows() if not run_locus(root, r, args)]
+    rscript = require_tools()
+    ready = load_snapshot(P)
+    failed = [f"{r['STUDY_ACCESSION']} {r['LOCUS_ID']}" for _, r in selected.iterrows()
+              if not run_locus(r, args, cfg, ready, rscript)]
     if failed:
         raise SystemExit("Colocalisation failed for: " + ", ".join(failed))
 
 
-def index_mode(root: Path, args) -> None:
-    phenotype = args.phenotype.strip()
-    ancestry_code, ancestry_label = canonical_ancestry(args.ancestry)
-    paths = project_paths(root, phenotype, ancestry_label)
-    accession = study_for_index(root, phenotype, ancestry_label, args.index)
-    loci = list_loci(paths["S06"] / accession)
+def index_mode(args, cfg) -> None:
+    P = project_paths(args)
+    accession = study_for_index(P, args.index)
+    loci = list_loci(P["S06"] / accession)
     if not loci:
-        raise SystemExit(
-            f"Study {args.index} ({accession}) has no fine-mapped locus with a SuSiE fit. Run:\n"
-            f"  envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype {shlex.quote(phenotype)} "
-            f"--ancestry {ancestry_code} --index {args.index}{panel_option()}")
+        raise SystemExit(f"Study {args.index} ({accession}) has no fine-mapped locus with a SuSiE fit. Run:\n"
+                         f"  envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "
+                         f"{shlex.quote(P['phenotype'])} --ancestry {P['code']} --index {args.index}"
+                         f"{panel_option(P['panel'])}")
     if args.locus:
         if args.locus not in loci:
             raise SystemExit(f"{args.locus} is not a fine-mapped locus of {accession}: {', '.join(loci)}")
         loci = [args.locus]
-    args.cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", args.cpus))
-    failed = []
-    for locus_id in loci:
-        row = pd.Series({"STUDY_ACCESSION": accession, "LOCUS_ID": locus_id, "PHENOTYPE": phenotype,
-                         "ANCESTRY_CODE": ancestry_code, "ANCESTRY_LABEL": ancestry_label})
-        if not run_locus(root, row, args):
-            failed.append(locus_id)
+    rscript = require_tools()
+    status, ready = current_contexts(cfg)
+    print_context_summary(status, cfg)
+    if ready.empty:
+        raise SystemExit(f"No QTL context is ready.\n  {step00_command(cfg)}")
+    failed = [locus for locus in loci if not run_locus(
+        pd.Series({"STUDY_ACCESSION": accession, "LOCUS_ID": locus}), args, cfg, ready, rscript)]
     if failed:
         raise SystemExit(f"{accession}: colocalisation failed for {', '.join(failed)}")
 
 
-def check_resources_mode(root: Path, args) -> None:
-    banner("STEP 09 - MOLECULAR-QTL RESOURCES (local)")
-    contexts, registry = available_qtl_resources(root, args)
-    if not contexts.empty:
-        counts = contexts.groupby(["study_label", "QTL_TYPE"]).size().reset_index(name="DATASETS")
-        print(counts.to_string(index=False))
-    n_custom = int(registry["ENABLED_BOOL"].sum()) if not registry.empty else 0
-    print(f"\nCustom registry ({args.registry}): {n_custom} enabled datasets")
-    _, ancestry_label = canonical_ancestry(args.ancestry)
-    code = canonical_ancestry(args.ancestry)[0]
-    panels = all(Path(str(reference_prefix(root, code, c)) + ".pgen").exists() for c in range(1, 23))
-    print(f"{REFERENCE_PANEL} {code} LD panels (Step04): "
-          f"{'OK' if panels else 'MISSING - run Step04' + panel_option()}")
+def print_context_summary(status: pd.DataFrame, cfg: dict) -> None:
+    if status.empty:
+        print("QTL contexts    : none selected - check the eQTL Catalogue tables "
+              "(Step00 --groups eqtl_catalogue) and the config")
+        return
+    table = status.groupby(["study_label", "QTL_TYPE"]).agg(
+        SELECTED=("dataset_id", "size"), DENSE=("DENSE_OK", "sum"), PROVIDER_CS=("CS_OK", "sum"),
+        LBF_DOWNLOADED=("LBF_DOWNLOADED", "sum"), LBF_INDEXED=("LBF_INDEXED", "sum"),
+        READY=("RESOURCE_STATUS", lambda s: int((s == "READY").sum()))).reset_index()
+    table = table.rename(columns={"study_label": "STUDY"})
+    with pd.option_context("display.width", 200, "display.max_rows", None):
+        print(table.to_string(index=False))
+    n_ready = int((status["RESOURCE_STATUS"] == "READY").sum())
+    print(f"QTL contexts ready: {n_ready}/{len(status)}  (QTL types {','.join(cfg['QTL_TYPES'])}; "
+          f"studies /{cfg['STUDY_REGEX'] or 'all'}/{'; ' + str(len(cfg['DATASET_IDS'])) + ' dataset ids' if cfg['DATASET_IDS'] else ''})")
+    not_ready = status["RESOURCE_STATUS"].value_counts().drop("READY", errors="ignore")
+    if len(not_ready):
+        print("Not ready (skipped, never counted as 'no colocalisation'): "
+              + ", ".join(f"{k} {v}" for k, v in not_ready.items()))
+
+
+def check_resources_mode(args, cfg) -> None:
+    P = project_paths(args)
+    problems = []
+    banner(f"{STEP['NAME']} - RESOURCE CHECK - {STEP['TITLE']}")
+    print(f"Config file     : {cfg['_FILE'] or 'missing - built-in defaults'}")
+    print(f"Parameters      : CANDIDATE_P {cfg['CANDIDATE_P']}, priors p1 {cfg['P1']} p2 {cfg['P2']} p12 {cfg['P12']} "
+          f"(sensitivity {cfg['P12_LOW']} / {cfg['P12_HIGH']}), strong PP.H4 >= {cfg['STRONG_PP4']}")
+
+    banner("TOOLS")
+    rscript = find_executable("Rscript")
+    print(f"  {'OK     ' if rscript else 'MISSING'}  Rscript                {rscript or ''}")
+    if not rscript:
+        problems.append("Rscript not found (Step00_Installation.py)")
+    else:
+        proc = subprocess.run([rscript, "-e", 'cat(as.character(packageVersion("coloc")), '
+                               '"coloc.bf_bf" %in% getNamespaceExports("coloc"))'], text=True, capture_output=True)
+        ok = proc.returncode == 0 and proc.stdout.strip().endswith("TRUE")
+        print(f"  {'OK     ' if ok else 'MISSING'}  R coloc (coloc.bf_bf)  {proc.stdout.strip() if ok else proc.stderr.strip()[-200:]}")
+        if not ok:
+            problems.append("R package coloc >= 5 with coloc.bf_bf (Step00_Installation.py)")
     try:
-        rscript = find_executable(root, args.rscript, "RSCRIPT", "Rscript")
-        print("R coloc / susieR: " + ", ".join(f"{k} {v}" for k, v in verify_r_packages(rscript).items()))
-    except Exception as exc:
-        print(f"R coloc / susieR: MISSING ({exc})")
+        import pysam
+        print(f"  OK       python pysam           {pysam.__version__}")
+    except ImportError:
+        print("  MISSING  python pysam")
+        problems.append("python pysam (Step00_Installation.py)")
+
+    banner("QTL RESOURCES (eQTL Catalogue: dense sumstats + provider SuSiE credible sets + indexed LBF)")
+    tables = [EQTL_ROOT / name for name in CATALOGUE_TABLES]
+    for t in tables:
+        print(f"  {'OK     ' if nonempty(t) else 'MISSING'}  {t.relative_to(PROJECT_ROOT)}")
+    status, ready = current_contexts(cfg)
+    print()
+    print_context_summary(status, cfg)
+    if ready.empty:
+        problems.append("no QTL context ready")
+    if len(status) and (status["RESOURCE_STATUS"] == "LBF_NOT_INDEXED").any():
+        print("\nLBF_NOT_INDEXED = downloaded but not yet position-sorted + tabix-indexed. Run the Step00 command "
+              "below again: finished downloads are only indexed (and the unsorted copy removed).")
+
+    banner(f"STEP06 INPUT - {P['phenotype']} / {P['label']} - LD panel {P['panel']}")
+    studies, excluded = step06_studies(P["S06"])
+    n_loci = sum(len(list_loci(P["S06"] / s)) for s in studies)
+    print(f"  Fine-mapping folder : {P['S06']} ({'exists' if P['S06'].exists() else 'MISSING'})")
+    print(f"  Studies / loci      : {len(studies)} studies, {n_loci} loci with a SuSiE fit ({len(excluded)} studies excluded)")
+    print(f"  Results will go to  : {P['OUT']}")
+    if not n_loci:
+        problems.append(f"no Step06 loci - run Step06{panel_option(P['panel'])} first")
+
+    banner("CHECK RESULT")
+    if problems:
+        print(f"NOT READY - {len(problems)} problem(s):")
+        for p in problems:
+            print(f"  - {p}")
+        if any("QTL" in p for p in problems) or (len(status) and len(ready) < len(status)):
+            print(f"\nDownload + index the QTL resources with:\n  {step00_command(cfg)}")
+        raise SystemExit(1)
+    print(f"READY - {len(ready)} QTL contexts, {n_loci} loci.")
+    if len(ready) < len(status):
+        print(f"({len(status) - len(ready)} contexts not ready yet; get them with:\n  {step00_command(cfg)})")
+    print(f"NEXT:\n  {base_command(P)}\n  sbatch {P['BASH'].name}")
 
 
-def status_mode(root: Path, args) -> None:
-    phenotype = args.phenotype.strip()
-    _, ancestry_label = canonical_ancestry(args.ancestry)
-    paths = project_paths(root, phenotype, ancestry_label)
-    studies, _ = discover_step06_studies(paths["S06"])
-    banner(f"STEP 09 STATUS - {phenotype} / {ancestry_label} - LD panel {REFERENCE_PANEL}")
-    print(f"{'STUDY':<15}{'LOCI':>6}{'DONE':>6}{'FAILED':>8}{'PENDING':>9}{'TESTS':>7}{'STRONG':>8}")
-    totals = {"DONE": 0, "FAILED": 0, "PENDING": 0}
+def locus_state(P: dict, accession: str, locus: str) -> tuple[str, dict]:
+    d = P["OUT"] / accession / "loci" / locus
+    done = read_json(d / DONE_FILE)
+    if done:
+        return str(done.get("STATUS", "COMPLETE")), done
+    if (d / FAILED_FILE).exists():
+        return "FAILED", {"ERROR": (d / FAILED_FILE).read_text(encoding="utf-8", errors="replace").splitlines()[0][:100]}
+    return "PENDING", {}
+
+
+def status_mode(args, cfg) -> None:
+    P = project_paths(args)
+    studies, _ = step06_studies(P["S06"])
+    order = step02_order(P)
+    banner(f"{STEP['NAME']} STATUS - {P['phenotype']} / {P['label']} - LD panel {P['panel']}")
+    snap = read_tsv(snapshot_file(P), dtype=str)
+    print(f"QTL contexts in the submitted snapshot: {len(snap)}" if len(snap) else
+          "No job script made yet (run the planner).")
+    rows, failures = [], []
     for accession in studies:
-        loci = list_loci(paths["S06"] / accession)
-        done = failed = 0
-        for locus in loci:
-            d = paths["OUT"] / accession / "loci" / locus
-            if (d / "locus_summary.json").exists():
-                done += 1
-            elif (d / "LOCUS_FAILED.txt").exists():
-                failed += 1
-        summary = safe_json(paths["OUT"] / accession / "coloc_summary.json")
-        pending = len(loci) - done - failed
-        totals["DONE"] += done
-        totals["FAILED"] += failed
-        totals["PENDING"] += pending
-        print(f"{accession:<15}{len(loci):>6}{done:>6}{failed:>8}{pending:>9}"
-              f"{summary.get('N_TESTS', 0):>7}{summary.get('N_STRONG', 0):>8}")
-    print("\nLoci    : " + "  ".join(f"{k}={v}" for k, v in totals.items()))
-
-
-def stats_mode(root: Path, args) -> None:
-    phenotype = args.phenotype.strip()
-    _, ancestry_label = canonical_ancestry(args.ancestry)
-    paths = project_paths(root, phenotype, ancestry_label)
-    banner(f"STEP 09 COLOCALISATION RESULTS - {phenotype} / {ancestry_label} - LD panel {REFERENCE_PANEL}")
-    rows = []
-    for d in sorted(p for p in paths["OUT"].iterdir() if p.is_dir()) if paths["OUT"].exists() else []:
-        summary = read_table(d / f"{d.name}_formal_coloc_summary.tsv")
-        if summary.empty:
-            continue
-        tested = summary[summary["COLOC_TESTED"].astype(str) == "YES"]
-        strong = tested[tested["COLOCALIZED_STRONG"].astype(str) == "YES"]
-        robust = tested[tested.get("PRIOR_ROBUST_STRONG", pd.Series(dtype=str)).astype(str) == "YES"]
-        rows.append({"STUDY_ACCESSION": d.name, "N_LOCI": summary["LOCUS_ID"].nunique(),
-                     "N_CANDIDATE_TRAITS": len(summary), "N_TESTED": len(tested), "N_STRONG": len(strong),
-                     "N_PRIOR_ROBUST_STRONG": len(robust),
-                     "N_LOCI_WITH_STRONG": strong["LOCUS_ID"].nunique() if len(strong) else 0,
-                     "N_LD_MISMATCH_WARNINGS": int((tested.get("LD_MISMATCH_WARNING", pd.Series(dtype=str))
-                                                    .astype(str) == "YES").sum())})
-        print(f"\n{d.name}: {len(tested)} tests in {summary['LOCUS_ID'].nunique()} loci; "
-              f"{len(strong)} strong (PP.H4>={args.strong_pp4}), {len(robust)} robust to the low p12 prior")
-        top = tested.assign(_H4=numeric(tested["MAX_PP_H4"])).sort_values("_H4", ascending=False).head(10)
-        for _, r in top.iterrows():
-            print(f"   {r['LOCUS_ID']} {r['QTL_TYPE']:<7} {str(r['TISSUE'])[:30]:<30} {r['GENE_ID'] or r['MOLECULAR_TRAIT_ID']}"
-                  f"  PP.H4 {r['_H4']:.3f}  {r['COLOC_CLASS']}"
-                  + ("  [LD mismatch]" if str(r.get("LD_MISMATCH_WARNING", "")) == "YES" else ""))
+        counts = {"LOCI": 0, "DONE": 0, "NO_GWAS_CS": 0, "NO_CANDIDATES": 0, "FAILED": 0, "PENDING": 0,
+                  "CANDIDATES": 0, "TESTED": 0, "STRONG": 0}
+        for locus in list_loci(P["S06"] / accession):
+            state, info = locus_state(P, accession, locus)
+            counts["LOCI"] += 1
+            key = {"COMPLETE": "DONE", "NO_GWAS_CREDIBLE_SET": "NO_GWAS_CS", "NO_QTL_CANDIDATES": "NO_CANDIDATES",
+                   "FAILED": "FAILED"}.get(state, "PENDING")
+            counts[key] += 1
+            if key == "FAILED":
+                failures.append(f"{accession} {locus}: {info.get('ERROR', '')}")
+            for k in ("CANDIDATES", "TESTED", "STRONG"):
+                counts[k] += int(info.get(f"N_{k}", 0) or 0)
+        rows.append({"IDX": order.get(accession, ""), "STUDY": accession, **counts})
     if not rows:
+        print(f"No fine-mapped studies under {P['S06']}.")
+        return
+    table = pd.DataFrame(rows)
+    with pd.option_context("display.width", 200, "display.max_rows", None):
+        print(table.to_string(index=False))
+    total = table.drop(columns=["IDX", "STUDY"]).sum()
+    print("\nLoci: " + "  ".join(f"{k}={int(total[k])}" for k in ("LOCI", "DONE", "NO_GWAS_CS", "NO_CANDIDATES",
+                                                                       "FAILED", "PENDING")))
+    for line in failures[:20]:
+        print(f"  FAILED {line}")
+    if int(total["FAILED"]) or int(total["PENDING"]):
+        print(f"\nRe-run failed / pending loci: sbatch {P['BASH'].name}   (finished loci are skipped)")
+
+
+def collect_results(P: dict, studies: list[str]) -> pd.DataFrame:
+    frames = []
+    for accession in studies:
+        for locus in list_loci(P["S06"] / accession):
+            f = P["OUT"] / accession / "loci" / locus / RESULTS_FILE
+            if nonempty(f):
+                x = read_tsv(f)
+                if len(x):
+                    frames.append(x)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=RESULT_COLUMNS)
+
+
+def gene_label(row) -> str:
+    gene = str(row.get("GENE_ID", "") or "")
+    return gene if gene and gene.lower() != "nan" else str(row.get("MOLECULAR_TRAIT_ID", ""))
+
+
+def stats_mode(args, cfg) -> None:
+    P = project_paths(args)
+    studies, _ = step06_studies(P["S06"])
+    order = step02_order(P)
+    banner(f"{STEP['NAME']} RESULTS - {STEP['TITLE']} - {P['phenotype']} / {P['label']} - LD panel {P['panel']}")
+    x = collect_results(P, studies)
+    if x.empty:
         print("No colocalisation results yet (see --status).")
         return
-    output = paths["OUT"] / "coloc_stats.tsv"
-    pd.DataFrame(rows).to_csv(output, sep="\t", index=False)
-    print(f"\nTable: {output}")
+    tested = x[x["COLOC_TESTED"].astype(str) == "YES"].copy()
+    tested["PP_H4"] = numeric(tested["PP_H4"])
+    strong, suggestive = cfg["STRONG_PP4"], cfg["SUGGESTIVE_PP4"]
+
+    rows = []
+    for accession in studies:
+        sx, st = x[x["STUDY_ACCESSION"] == accession], tested[tested["STUDY_ACCESSION"] == accession]
+        states = [locus_state(P, accession, locus)[0] for locus in list_loci(P["S06"] / accession)]
+        best = st.sort_values("PP_H4", ascending=False).head(1)
+        rows.append({
+            "IDX": order.get(accession, ""), "STUDY": accession, "LOCI": len(states),
+            "LOCI_DONE": sum(s in ("COMPLETE", "NO_GWAS_CREDIBLE_SET", "NO_QTL_CANDIDATES") for s in states),
+            "CANDIDATES": len(sx), "CS_EXCLUDED": int(sx["STATUS"].astype(str).str.startswith("EXCLUDED").sum()),
+            "TESTED": len(st), "STRONG": int((st["PP_H4"] >= strong).sum()),
+            "SUGGESTIVE": int(((st["PP_H4"] >= suggestive) & (st["PP_H4"] < strong)).sum()),
+            "PRIOR_ROBUST": int((st["PRIOR_ROBUST_STRONG"].astype(str) == "YES").sum()),
+            "LOCI_WITH_STRONG": int(st.loc[st["PP_H4"] >= strong, "LOCUS_ID"].nunique()),
+            "TOP (PP.H4)": (f"{gene_label(best.iloc[0])} "
+                            f"{str(best.iloc[0]['TISSUE'])[:22]} ({best.iloc[0]['PP_H4']:.2f})") if len(best) else ""})
+    table = pd.DataFrame(rows)
+    print(f"\nPER STUDY (STRONG = PP.H4 >= {strong}; PRIOR_ROBUST = still strong at p12 = {cfg['P12_LOW']})")
+    with pd.option_context("display.width", 250, "display.max_rows", None, "display.max_colwidth", 45):
+        print(table.to_string(index=False))
+
+    top = tested.sort_values("PP_H4", ascending=False).head(25)
+    if len(top):
+        print("\nTOP COLOCALISATIONS (best signal pair per molecular trait)")
+        show = top.assign(IDX=top["STUDY_ACCESSION"].map(order).fillna(""),
+                          GENE=[gene_label(r) for _, r in top.iterrows()], PP_H4=top["PP_H4"].round(3))
+        cols = {"IDX": "IDX", "STUDY_ACCESSION": "STUDY", "LOCUS_ID": "LOCUS", "QTL_TYPE": "QTL",
+                "STUDY_LABEL": "QTL_STUDY", "TISSUE": "TISSUE", "GENE": "GENE / TRAIT", "PP_H4": "PP.H4",
+                "PRIOR_ROBUST_STRONG": "ROBUST", "COLOC_CLASS": "CLASS"}
+        with pd.option_context("display.width", 250, "display.max_rows", None, "display.max_colwidth", 30):
+            print(show[list(cols)].rename(columns=cols).to_string(index=False))
+    counts = x["STATUS"].astype(str).value_counts()
+    print("\nCandidate status: " + "  ".join(f"{k}={v}" for k, v in counts.items()))
+
+    # Tables on disk: every candidate, per study, and one row per locus x QTL type (best trait).
+    write_tsv(x, P["OUT"] / "coloc_all_candidates.tsv")
+    for accession, g in x.groupby("STUDY_ACCESSION"):
+        write_tsv(g, P["OUT"] / accession / f"{accession}_coloc_results.tsv")
+    locus_rows = []
+    for (accession, locus, qtl), g in tested.groupby(["STUDY_ACCESSION", "LOCUS_ID", "QTL_TYPE"]):
+        b = g.sort_values("PP_H4", ascending=False).iloc[0]
+        locus_rows.append({"STUDY_ACCESSION": accession, "LOCUS_ID": locus, "QTL_TYPE": qtl, "N_TESTED": len(g),
+                           "N_STRONG": int((g["PP_H4"] >= strong).sum()), "BEST_PP_H4": b["PP_H4"],
+                           "BEST_TRAIT": b["MOLECULAR_TRAIT_ID"], "BEST_GENE": b["GENE_ID"], "BEST_TISSUE": b["TISSUE"],
+                           "BEST_DATASET": b["DATASET_ID"], "BEST_GWAS_VARIANT": b["BEST_GWAS_VARIANT"],
+                           "BEST_QTL_VARIANT": b["BEST_QTL_VARIANT"], "PRIOR_ROBUST_STRONG": b["PRIOR_ROBUST_STRONG"]})
+    write_tsv(pd.DataFrame(locus_rows), P["OUT"] / "coloc_locus_qtl_summary.tsv")
+    write_tsv(table, P["OUT"] / "coloc_stats.tsv")
+    print(f"\nTables: {P['OUT'] / 'coloc_stats.tsv'}\n        {P['OUT'] / 'coloc_all_candidates.tsv'}\n"
+          f"        {P['OUT'] / 'coloc_locus_qtl_summary.tsv'}")
+
+
+def arguments():
+    parser = argparse.ArgumentParser(description=f"{STEP['NAME']}: {STEP['TITLE']} - provider-SuSiE coloc.bf_bf, "
+                                                 "one SLURM task per fine-mapped locus.")
+    parser.add_argument("--phenotype", required=True)
+    parser.add_argument("--ancestry", required=True)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--index", type=int, help="Study N of the Step02 download manifest: run its loci here.")
+    modes.add_argument("--status", action="store_true", help="READ-ONLY: loci done / failed / pending per study.")
+    modes.add_argument("--stats", action="store_true", help="Colocalisation results (tables on screen + TSV).")
+    modes.add_argument("--check-resources", action="store_true",
+                       help="Verify tools, QTL resources (dense, provider CS, indexed LBF) and Step06 input.")
+    modes.add_argument("--worker-manifest", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--locus", default=None, help="With --index: only this locus (e.g. L001).")
+    parser.add_argument("--study", default=None, help="Planner: only this GCST accession.")
+    parser.add_argument("--reference-panel", default=DEFAULT_PANEL,
+                        help="LD panel of Steps 04-06: 1000G (default), 1000G30x or custom; reads "
+                             f"06_finemapping/<p>/<a>_<PANEL>/, writes {STEP['OUT_DIR']}/<p>/<a>_<PANEL>/.")
+    parser.add_argument("--config", default=STEP["CONFIG"], help=f"Parameter file (default {STEP['CONFIG']}).")
+    parser.add_argument("--qtl-types", default=None, help="Override QTL_TYPES, e.g. eQTL,sQTL.")
+    parser.add_argument("--study-regex", default=None, help="Override STUDY_REGEX (eQTL Catalogue study_label).")
+    parser.add_argument("--candidate-p", type=float, default=None, help="Override CANDIDATE_P.")
+    parser.add_argument("--strong-pp4", type=float, default=None, help="Override STRONG_PP4.")
+    parser.add_argument("--suggestive-pp4", type=float, default=None, help="Override SUGGESTIVE_PP4.")
+    parser.add_argument("--force", action="store_true", help="Redo loci that are already done.")
+    parser.add_argument("--keep-work", action="store_true", help="Keep the per-locus work/ files (LBF tables, R input).")
+    slurm = parser.add_argument_group("SLURM (default: #SBATCH header of HPC_CPU.sh, then SLURM in the config)")
+    slurm.add_argument("--template", default="HPC_CPU.sh")
+    slurm.add_argument("--partition", default=None)
+    slurm.add_argument("--qos", default=None)
+    slurm.add_argument("--account", default=None)
+    slurm.add_argument("--cpus", type=int, default=None)
+    slurm.add_argument("--mem", "--memory", dest="mem", default=None)
+    slurm.add_argument("--time", default=None)
+    slurm.add_argument("--max-parallel", type=int, default=0, help="Locus tasks running at once (0 = no limit).")
+    args = parser.parse_args()
+    if args.locus and args.index is None:
+        parser.error("--locus needs --index")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.reference_panel):
+        parser.error(f"--reference-panel {args.reference_panel!r}: use letters, digits, '_', '-' or '.'")
+    return args
 
 
 def main() -> None:
-    global REFERENCE_PANEL
     args = arguments()
-    REFERENCE_PANEL = args.reference_panel
-    root = PROJECT_ROOT
-    write_custom_registry_template(root)
+    cfg = apply_overrides(load_config(config_path(args)), args)
     if args.check_resources:
-        check_resources_mode(root, args)
+        check_resources_mode(args, cfg)
     elif args.status:
-        status_mode(root, args)
+        status_mode(args, cfg)
     elif args.stats:
-        stats_mode(root, args)
+        stats_mode(args, cfg)
     elif args.worker_manifest:
-        worker_mode(root, args)
+        worker_mode(args, cfg)
     elif args.index is not None:
-        index_mode(root, args)
+        index_mode(args, cfg)
     else:
-        planner_mode(root, args)
+        planner_mode(args, cfg)
 
 
 if __name__ == "__main__":

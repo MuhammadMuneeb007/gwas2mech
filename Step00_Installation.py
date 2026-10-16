@@ -377,7 +377,7 @@ PYTHON_PACKAGES = [
 # name, required, step, spec, used by
 R_PACKAGES = [
     ("susieR", True, 6, "r-susier", "Step06 SuSiE-RSS"),
-    ("coloc", True, 9, "r-coloc", "Step09 coloc.susie"),
+    ("coloc", True, 9, "r-coloc", "Step09 / Step10 coloc.bf_bf (coloc >= 5)"),
     ("data.table", True, 11, "r-data.table", "coloc dependency"),
     ("ggplot2", True, 7, "r-ggplot2", "Step07 figures"),
     ("patchwork", True, 7, "r-patchwork", "Step07 multi-panel locus figures"),

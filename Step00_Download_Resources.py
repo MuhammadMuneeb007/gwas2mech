@@ -83,8 +83,9 @@ Resource groups (--groups / --skip-groups); sizes are approximate downloads:
   qtl_catalogue       eQTL Catalogue dense .tsv.gz + .tbi for the Step09
                       contexts (GTEx v8 eQTL / exonQTL / isoQTL / sQTL
                       (leafcutter) + Sun_2018 pQTL)                           ~320 GB
-  qtl_celltype        Jerber_2021 cell-type eQTL,
-                      dense + .tbi + SuSiE lbf / credible sets                ~62 GB
+  qtl_celltype        cell-type eQTL for Step10 (default Jerber_2021;
+                      --celltype-study-regex for more), dense + .tbi + SuSiE
+                      credible sets + lbf (lbf sorted + tabix-indexed)        ~62 GB
   molecular_qtl       ADSP FunGen xQTL brain pQTL / sQTL / haQTL (NIAGADS
                       NG00184, GRCh38) + Kumasaka caQTL (GRCh38), MD5-checked ~230 GB
   meqtl               ADSP FunGen xQTL brain mQTL / meQTL (NG00184, GRCh38)   ~1.5 TB
@@ -93,7 +94,9 @@ Resource groups (--groups / --skip-groups); sizes are approximate downloads:
                       RegulomeDB v2.2 scores (dbSNP153 common SNVs)           ~12 GB
   cadd                CADD v1.7 GRCh38 SNVs + gnomAD4 indels (+ .tbi)         ~89 GB
   Only when named in --groups:
-  qtl_catalogue_susie eQTL Catalogue SuSiE lbf / cs for the Step09 contexts   ~316 GB
+  qtl_catalogue_susie eQTL Catalogue SuSiE credible sets + lbf for the Step09
+                      contexts; every lbf file is position-sorted + tabix-
+                      indexed after download (read per locus)                ~316 GB
   1000g30x            1000 Genomes 30x on GRCh38 (NYGC, 3202 samples): the
                       filtered phased SNV/INDEL/SV panel per chromosome + TBI
                       and the 3202-sample pedigree / population file, for
@@ -356,10 +359,21 @@ def local_file_valid(path: Path, expected_size: int | None = None) -> bool:
 #           | tabix (index a bgzip TSV: chrom col 1, position col 2, '#' header lines)
 #           | bed-tabix (plain BED-like TSV with one header line -> sorted <dest>.gz + .tbi;
 #             the plain file is removed afterwards)
+#           | lbf-tabix (eQTL Catalogue SuSiE lbf_variable file, ordered by molecular trait ->
+#             position-sorted bgzip <name>.sorted.tsv.gz + .tbi, read by locus in Step09 / Step10;
+#             the unsorted download is removed once the row counts match)
 #   check : - | gzip | tar | parquet       (integrity test after download)
 #   mutable: "latest"/"master" URLs whose size may change before download,
 #            so their size is reported but not enforced.
 # =============================================================================
+
+def lbf_index_path(dest) -> Path:
+    """<id>.lbf_variable.txt.gz -> <id>.lbf_variable.sorted.tsv.gz (same rule as Step09 / Step10)."""
+    dest = Path(dest)
+    name = dest.name
+    stem = name[:-7] if name.endswith(".txt.gz") else name[:-3] if name.endswith(".gz") else name
+    return dest.with_name(stem + ".sorted.tsv.gz")
+
 
 def item(resource, group, url, dest, *, check="-", post="-", post_dir="-", post_marker="-",
          mutable=False, size=None):
@@ -602,7 +616,8 @@ def eqtl_catalogue_items(notes: list[str]) -> list[dict]:
             url = record.get(column, "")
             if usable_url(url):
                 items.append(item("EQTL_CATALOGUE_SUSIE_PROVIDER", "eqtl_catalogue", https_url(url),
-                                  (provider / dataset / basename(url)).relative_to(ROOT), check="gzip"))
+                                  (provider / dataset / basename(url)).relative_to(ROOT), check="gzip",
+                                  post="lbf-tabix" if "lbf_variable" in basename(url) else "-"))
     if unresolved or unknown:
         notes.append(f"eqtl_catalogue: {unresolved + unknown} local datasets are not in the catalogue tables")
     return items
@@ -709,7 +724,8 @@ def provider_items(row: dict, group: str) -> list[dict]:
         url = row.get(column, "")
         if row["dataset_id"] and usable_url(url):
             out.append(item("EQTL_CATALOGUE_SUSIE_PROVIDER", group, https_url(url),
-                            EQTL_ROOT / "susie_provider" / row["dataset_id"] / basename(url), check="gzip"))
+                            EQTL_ROOT / "susie_provider" / row["dataset_id"] / basename(url), check="gzip",
+                            post="lbf-tabix" if "lbf_variable" in basename(url) else "-"))
     return out
 
 
@@ -838,6 +854,9 @@ def post_done(entry: dict) -> bool:
         return local_file_valid(ROOT / entry["dest"]) and local_file_valid(ROOT / (entry["dest"] + ".tbi"))
     if entry["post"] == "bed-tabix":
         return local_file_valid(ROOT / (entry["dest"] + ".gz")) and local_file_valid(ROOT / (entry["dest"] + ".gz.tbi"))
+    if entry["post"] == "lbf-tabix":
+        index = lbf_index_path(ROOT / entry["dest"])
+        return local_file_valid(index) and local_file_valid(Path(str(index) + ".tbi"))
     return True
 
 
@@ -1001,8 +1020,16 @@ post_done() {
         tar|tar-rm) [[ -e "$ROOT/$PDIR/$PMARKER" ]] ;;
         tabix) [[ -s "$OUT" && -s "$OUT.tbi" ]] ;;
         bed-tabix) [[ -s "$OUT.gz" && -s "$OUT.gz.tbi" ]] ;;
+        lbf-tabix) [[ -s "$(lbf_index "$OUT")" && -s "$(lbf_index "$OUT").tbi" ]] ;;
         *)     return 0 ;;
     esac
+}
+
+# <id>.lbf_variable.txt.gz -> <id>.lbf_variable.sorted.tsv.gz (same rule as Step09 / Step10)
+lbf_index() {
+    local stem="$1"
+    case "$stem" in *.txt.gz) stem="${stem%.txt.gz}" ;; *.gz) stem="${stem%.gz}" ;; esac
+    echo "$stem.sorted.tsv.gz"
 }
 
 md5_of() {
@@ -1189,6 +1216,28 @@ post_process() {
             "$TABIX" -f -0 -s 1 -b 2 -e 3 -S 1 "$OUT.gz" || return 1
             rm -f "$OUT"
             log "indexed: ${OUT#$ROOT/}.gz.tbi (removed the plain TSV)" ;;
+        lbf-tabix)
+            # Provider SuSiE LBFs are ordered by molecular trait; Step09 / Step10 read them by locus, so
+            # sort by chromosome + position once, bgzip and tabix-index (header line kept as '#...').
+            [[ -n "$TABIX" && -n "$BGZIP" ]] || { log "ERROR: tabix / bgzip not found (run Step00_Installation.py first)"; return 1; }
+            local idx header n_in n_out threads="${SLURM_CPUS_PER_TASK:-2}"
+            idx="$(lbf_index "$OUT")"
+            header="$(gzip -dc "$OUT" 2>/dev/null | head -n 1 || true)"
+            [[ "$header" == *molecular_trait_id*position* ]] || { log "ERROR: unexpected LBF header: ${header:0:120}"; return 1; }
+            log "sorting by chromosome + position + bgzip -> ${idx#$ROOT/}"
+            { printf '#%s\n' "$header"
+              gzip -dc "$OUT" | tail -n +2 | LC_ALL=C sort -t $'\t' -k4,4 -k5,5n -S 2G --parallel="$threads" -T "$(dirname "$OUT")"
+            } | "$BGZIP" -@ "$threads" -c > "$idx.part" || { rm -f "$idx.part"; return 1; }
+            mv "$idx.part" "$idx"
+            "$TABIX" -f -s 4 -b 5 -e 5 "$idx" || return 1
+            n_in="$(gzip -dc "$OUT" | tail -n +2 | wc -l)"
+            n_out="$(gzip -dc "$idx" | grep -vc '^#')"
+            if [[ "$n_in" != "$n_out" ]]; then
+                log "ERROR: sorted LBF has $n_out rows, download has $n_in - keeping the download"
+                rm -f "$idx" "$idx.tbi"; return 1
+            fi
+            rm -f "$OUT"
+            log "indexed: ${idx#$ROOT/}.tbi ($n_out rows; removed the unsorted download)" ;;
     esac
 }
 
