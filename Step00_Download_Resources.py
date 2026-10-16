@@ -149,6 +149,8 @@ VEP_RELEASE = "116"
 GTEX_RELEASE = "v11"
 OPEN_TARGETS_RELEASE = "26.09"
 LD_ANCESTRIES = ("EUR", "AFR", "EAS", "SAS", "AMR")
+# Groups planned as one set: if any file is missing, all of them get a task.
+COMPLETE_SET_GROUPS = {"1000g"}
 
 GENCODE_BASE = f"https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_{GENCODE_RELEASE}"
 ONE_K_BASE = ("https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/"
@@ -1363,22 +1365,37 @@ def main() -> int:
             return 1
         print("[OK] all URLs reachable")
 
-    pending = entries if args.force else [e for e in entries if not is_complete(e)]
+    group_of = lambda e: e["group"].split("/", 1)[0]  # noqa: E731  (opentargets/x -> opentargets)
+    complete = {id(e) for e in entries if is_complete(e)}
+    missing = [e for e in entries if id(e) not in complete]
+    pending = entries if args.force else missing
+
+    # Groups used as one set (1000g: Step04 needs every VCF + the sample panel):
+    # when any file of the set is missing, EVERY file of it gets a task, so the
+    # array always covers the whole set; a task whose file is valid only verifies it.
+    incomplete_sets = {group_of(e) for e in missing if group_of(e) in COMPLETE_SET_GROUPS}
+    if incomplete_sets:
+        tasks = {id(e) for e in pending}
+        pending = [e for e in entries if id(e) in tasks or group_of(e) in incomplete_sets]
 
     print(f"\n{'RESOURCE':<32}{'EXPECTED':>9}{'VALID':>8}{'TASKS':>8}")
     for resource in dict.fromkeys(e["resource"] for e in entries):
         n_all = sum(e["resource"] == resource for e in entries)
-        n_todo = sum(e["resource"] == resource for e in pending)
-        print(f"{resource:<32}{n_all:>9}{n_all - n_todo:>8}{n_todo:>8}")
+        n_valid = sum(e["resource"] == resource and id(e) in complete for e in entries)
+        n_tasks = sum(e["resource"] == resource for e in pending)
+        print(f"{resource:<32}{n_all:>9}{n_valid:>8}{n_tasks:>8}")
     for note in notes:
         print(f"NOTE: {note}")
+    for group in sorted(incomplete_sets):
+        print(f"NOTE: {group}: files are missing, so all {sum(group_of(e) == group for e in entries)} files of "
+              "the set get a task (valid ones are only verified)")
 
-    group_of = lambda e: e["group"].split("/", 1)[0]  # noqa: E731  (opentargets/x -> opentargets)
-    print(f"\n{'GROUP':<22}{'FILES':>7}{'TO DOWNLOAD':>13}{'SIZE':>12}")
+    print(f"\n{'GROUP':<22}{'FILES':>7}{'TO DOWNLOAD':>13}{'SIZE':>12}{'TASKS':>8}")
     for group in dict.fromkeys(group_of(e) for e in entries):
-        todo = [e for e in pending if group_of(e) == group]
+        todo = [e for e in missing if group_of(e) == group] if not args.force \
+            else [e for e in pending if group_of(e) == group]
         print(f"{group:<22}{sum(group_of(e) == group for e in entries):>7}{len(todo):>13}"
-              f"{human(sum(e['size'] or 0 for e in todo)):>12}")
+              f"{human(sum(e['size'] or 0 for e in todo)):>12}{sum(group_of(e) == group for e in pending):>8}")
 
     MANIFESTS.mkdir(parents=True, exist_ok=True)
     LOGS.mkdir(parents=True, exist_ok=True)
