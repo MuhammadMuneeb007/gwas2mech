@@ -314,6 +314,28 @@ def sbatch_header_block(args, job_name, output, error, n_tasks):
 # SAMPLE LIST
 # =============================================================================
 
+def ancestry_directory(code):
+    """resources/1000G/<code>/ as a usable directory (a symlink to a directory is
+    fine). A dangling symlink, e.g. left by an older setup, holds no data and is
+    replaced; anything else that is not a directory stops with instructions."""
+
+    path = REFERENCE_ROOT / code
+
+    if path.is_symlink() and not path.exists():
+        print(f"Replacing broken symlink {path} -> {os.readlink(path)} with a directory")
+        path.unlink()
+    elif path.exists() and not path.is_dir():
+        raise SystemExit(
+            f"{path} exists but is not a directory, so the {code} panels cannot be written there.\n"
+            f"Look at it with:  ls -la {path}\n"
+            f"then move it away, e.g.:  mv {path} {path}.old"
+        )
+
+    path.mkdir(parents=True, exist_ok=True)
+
+    return path
+
+
 def create_sample_list(code):
 
     panel = pd.read_csv(require_input(PANEL_FILE), sep="\t", dtype=str, low_memory=False)
@@ -327,8 +349,7 @@ def create_sample_list(code):
     if selected.empty:
         raise RuntimeError(f"No samples for populations {', '.join(POPULATIONS[code])}")
 
-    output = REFERENCE_ROOT / code / "samples.txt"
-    output.parent.mkdir(parents=True, exist_ok=True)
+    output = ancestry_directory(code) / "samples.txt"
     selected[["sample"]].to_csv(output, index=False, header=False)
 
     return output, selected

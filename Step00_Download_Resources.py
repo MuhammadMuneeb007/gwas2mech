@@ -332,13 +332,13 @@ def plan_preparation() -> dict:
     def panel_ok(prefix: Path) -> bool:
         return all(local_file_valid(Path(str(prefix) + ext)) for ext in (".pgen", ".pvar", ".psam"))
 
-    all_missing = [c for c in range(1, 23) if not panel_ok(g / "ALL" / f"chr{c}")]
     population_missing = [(anc, c) for anc in LD_ANCESTRIES for c in range(1, 23)
                           if not panel_ok(g / anc / f"chr{c}_{anc}_GRCh38")]
-    samples_needed = any(not local_file_valid(g / anc / "samples.txt") for anc in LD_ANCESTRIES)
     return {
-        "all_chromosomes": all_missing if population_missing else [],
-        "samples": bool(population_missing) and samples_needed,
+        # Step04 builds every population panel from the raw VCF of its chromosome.
+        "all_chromosomes": sorted({c for _, c in population_missing}),
+        # The small sample panel: Step04 writes samples.txt from it on every plan.
+        "samples": True,
         "panels_missing": len(population_missing),
     }
 
