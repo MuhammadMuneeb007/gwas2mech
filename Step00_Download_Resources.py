@@ -1338,8 +1338,15 @@ def slurm_jobs() -> str:
     return ", ".join(f"{state.lower()} {n}" for state, n in sorted(counts.items())) or "none in the queue"
 
 
+def plan_script(plan: Path) -> str:
+    """download_resources_<X>_plan.tsv was written with --output <X>.sh."""
+    stem = plan.name[len("download_resources"):-len("_plan.tsv")].lstrip("_")
+    return f"{stem or Path(DEFAULT_OUTPUT).stem}.sh"
+
+
 def status() -> int:
-    plans = sorted(MANIFESTS.glob("download_resources*_plan.tsv"))
+    # Oldest first: a file planned again by a newer plan takes that plan's row.
+    plans = sorted(MANIFESTS.glob("download_resources*_plan.tsv"), key=lambda p: p.stat().st_mtime)
     if not plans:
         print("No plan yet. Run: envs/pipeline/bin/python Step00_Download_Resources.py")
         return 1
@@ -1347,13 +1354,22 @@ def status() -> int:
     for plan in plans:
         with open(plan, encoding="utf-8") as handle:
             for row in csv.DictReader(handle, delimiter="\t"):
+                row["_PLAN"] = plan
                 rows[row["DEST"]] = row
 
     banner("GWAS2m STEP 00 - DOWNLOAD STATUS (read-only)")
-    print(f"Plans          : {', '.join(p.name for p in plans)}")
     jobs = slurm_jobs()
     if jobs:
         print(f"SLURM jobs     : {jobs}")
+
+    # One line per plan: when it was made, its script, and what of it is unfinished.
+    print(f"\n{'PLAN (setup_manifests/)':<56}{'MADE':<18}{'FILES':>7}{'NOT DONE':>10}  SCRIPT")
+    states = {dest: file_state(row)[0] for dest, row in rows.items()}
+    for plan in plans:
+        own = [d for d, r in rows.items() if r["_PLAN"] == plan]
+        made = datetime.fromtimestamp(plan.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        print(f"{plan.name:<56}{made:<18}{len(own):>7}{sum(states[d] != 'DONE' for d in own):>10}  "
+              f"{plan_script(plan)}")
 
     groups: dict = {}
     pending = []
@@ -1382,12 +1398,15 @@ def status() -> int:
           f"{100 * total['DONE'] / max(total['files'], 1):>6.0f}%")
 
     if pending:
-        print(f"\nNot finished ({len(pending)}; first 20):")
-        for state, size, row in sorted(pending, key=lambda x: (x[0] != "PARTIAL", x[2]["DEST"]))[:20]:
-            print(f"  {state:<8}{human(size) if size else '':>10}  {row['DEST']}")
-        print("\nPartial files resume automatically. To (re)download what is missing:")
-        print("  envs/pipeline/bin/python Step00_Download_Resources.py [same options as before]")
-        print("  sbatch Step00_Download_Resources.sh      (or the --output script you used)")
+        print(f"\nNot finished ({len(pending)}; first 40) - with the script of the plan that lists it:")
+        for state, size, row in sorted(pending, key=lambda x: (x[0] != "PARTIAL", x[2]["DEST"]))[:40]:
+            print(f"  {state:<8}{human(size) if size else '':>10}  {row['DEST']}   [{plan_script(row['_PLAN'])}]")
+        print("\nPartial files resume automatically. To (re)download what is missing, re-plan with the")
+        print("SAME --groups / --output as that plan, then sbatch its script, e.g.:")
+        print("  envs/pipeline/bin/python Step00_Download_Resources.py --groups 1000g30x --output Step00_Download_1000G30x.sh")
+        print("  sbatch Step00_Download_1000G30x.sh")
+        print("Re-planning replaces the plan's rows with what the current Step00 needs; files only an older")
+        print("Step00 version planned (e.g. other folder layouts) then drop out of this status.")
     else:
         print("\nEvery planned file is downloaded.")
         print("Readability check: envs/pipeline/bin/python Step01_Download_Resources_Checkheaders.py")
