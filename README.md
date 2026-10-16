@@ -700,7 +700,8 @@ sbatch Step00_Download_Step08.sh
 # 1. everything there? (must end with READY)
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
 
-# 2. plan + submit (one array task per fine-mapped study)
+# 2. plan + submit: one array task per fine-mapped study, ALL studies submitted, no limit
+#    (no throttle unless you add --max-parallel N; >1000 studies: the job submits the next arrays itself)
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
 sbatch Step08_Annotate_parkinson_s_disease_european_1000G30x.sh
 #    studies annotated before RegulomeDB was added: re-annotate them with --force
@@ -852,7 +853,7 @@ Files are stored under `resources/` (dense eQTL Catalogue files in
 SLURM settings come from the `#SBATCH` header of `HPC_CPU.sh` (account, partition, qos,
 nodes, ntasks, cpus-per-task, mem, time) and apply to every generated job. Edit that file
 for your cluster, or override a single plan with `--account`, `--partition`, `--qos`,
-`--cpus`, `--mem`, `--time` or `--max-parallel` (jobs running at once).
+`--cpus`, `--mem`, `--time` or `--max-parallel` (jobs running at once; default: no limit).
 
 Generated job scripts (`Step0*_<phenotype>_<ancestry>.sh`), logs (`logs/`), downloaded data
 (`resources/`) and results (`01_gwas_catalog/` … `09_coloc/`) are not tracked by git.

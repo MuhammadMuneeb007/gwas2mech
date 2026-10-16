@@ -6,7 +6,8 @@
 GWAS2Mech STEP 08 - Local annotation of fine-mapped variants
 ===============================================================================
 
-    # plan + SLURM array (one task per fine-mapped study; >1000 studies share tasks)
+    # plan + SLURM array: one task per fine-mapped study, all submitted at once, no limit
+    # (more than 1000 studies: the job submits the next arrays of 1000 itself)
     envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR
     sbatch Step08_Annotate_parkinson_s_disease_european.sh
 
@@ -125,7 +126,7 @@ VERSION = "6.0.0-local"
 ASSEMBLY = "GRCh38"
 SPECIES = "homo_sapiens"
 PROJECT_ROOT = Path.cwd().resolve()
-MAX_ARRAY_TASKS = 1000
+ARRAY_CHUNK = 1000   # SLURM array indices stop at MaxArraySize - 1; larger plans run as chained arrays
 
 # ---- web APIs (only with --online; the default local annotation calls none) --
 SCREEN_GRAPHQL = "https://screen.api.wenglab.org/graphql"       # needs SCREEN_API_KEY
@@ -2357,8 +2358,10 @@ def planner_mode(args) -> None:
         raise SystemExit("VEP cache / FASTA missing (see above), or add --no-vep to annotate without VEP.")
 
     P["out"].mkdir(parents=True, exist_ok=True)
-    n_tasks = min(len(ready), MAX_ARRAY_TASKS)
-    manifest = pd.DataFrame({"TASK_ID": [i % n_tasks + 1 for i in range(len(ready))], "STUDY_ACCESSION": ready})
+    # One array task per study, every study submitted (no cap, no throttle unless --max-parallel).
+    n_studies = len(ready)
+    n_tasks = min(n_studies, ARRAY_CHUNK)
+    manifest = pd.DataFrame({"TASK_ID": range(1, n_studies + 1), "STUDY_ACCESSION": ready})
     manifest_file = P["out"] / "annotation_manifest.tsv"
     manifest.to_csv(manifest_file, sep="\t", index=False)
 
@@ -2370,12 +2373,25 @@ def planner_mode(args) -> None:
     command = [str(python), str(Path(__file__).resolve()), "--phenotype", P["phenotype"], "--ancestry", P["code"],
                "--worker-manifest", str(manifest_file)] + passthrough_options(args)
     bash_file = PROJECT_ROOT / f"Step08_Annotate_{P['p_slug']}_{P['r_slug']}.sh"
+    throttle = f"%{int(args.max_parallel)}" if args.max_parallel and int(args.max_parallel) > 0 else ""
     bash_file.write_text(f"""#!/bin/bash --login
 {header}
 
 set -euo pipefail
 cd {shlex.quote(str(PROJECT_ROOT))}
 export PATH={shlex.quote(str(PROJECT_ROOT / 'envs' / 'pipeline' / 'bin'))}:"$PATH"
+
+# {n_studies} studies, one array task each. SLURM array indices stop at {ARRAY_CHUNK}, so task 1 of the
+# first array submits the remaining studies as further arrays (study = G2M_OFFSET + array task id).
+TOTAL={n_studies}
+CHUNK={ARRAY_CHUNK}
+export G2M_OFFSET="${{G2M_OFFSET:-0}}"
+if [[ "$G2M_OFFSET" == 0 && "${{SLURM_ARRAY_TASK_ID:-1}}" == 1 ]] && (( TOTAL > CHUNK )); then
+    for (( offset = CHUNK; offset < TOTAL; offset += CHUNK )); do
+        n=$(( TOTAL - offset < CHUNK ? TOTAL - offset : CHUNK ))
+        sbatch --array="1-$n{throttle}" --export=ALL,G2M_OFFSET="$offset" {shlex.quote(str(bash_file))}
+    done
+fi
 {'# SCREEN_API_KEY: exported in the environment or read from config/api_keys.env' if 'screen' in (args.online or '') else ''}
 
 {' '.join(shlex.quote(x) for x in command)}
@@ -2386,13 +2402,16 @@ export PATH={shlex.quote(str(PROJECT_ROOT / 'envs' / 'pipeline' / 'bin'))}:"$PAT
         print(f"READY    {accession}")
     base = (f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(P['phenotype'])} "
             f"--ancestry {P['code']}{panel_option(P['panel'])}")
-    print(f"\nStudies: {len(ready)}  (array 1-{n_tasks})\nManifest: {manifest_file}\n\nRUN:\n  sbatch {bash_file.name}")
+    extra = (f"; the first job submits the other {n_studies - n_tasks} as further arrays of {ARRAY_CHUNK}"
+             if n_studies > n_tasks else "")
+    print(f"\nStudies: {n_studies}  (one array task per study, all submitted: array 1-{n_tasks}{extra})"
+          f"\nManifest: {manifest_file}\n\nRUN:\n  sbatch {bash_file.name}")
     print(f"THEN:\n  {base} --status\n  {base} --stats")
 
 
 def worker_mode(args) -> None:
     P = project_paths(args)
-    task = int(os.environ.get("SLURM_ARRAY_TASK_ID", "1"))
+    task = int(os.environ.get("SLURM_ARRAY_TASK_ID", "1")) + int(os.environ.get("G2M_OFFSET", "0") or 0)
     manifest = pd.read_csv(args.worker_manifest, sep="\t", dtype=str)
     selected = manifest[pd.to_numeric(manifest["TASK_ID"]) == task]
     threads = int(os.environ.get("SLURM_CPUS_PER_TASK", args.cpus))
@@ -2551,7 +2570,9 @@ def arguments(argv=None):
     slurm.add_argument("--cpus", type=int, default=None)
     slurm.add_argument("--mem", "--memory", dest="mem", default=None)
     slurm.add_argument("--time", default=None)
-    slurm.add_argument("--max-parallel", type=int, default=0)
+    slurm.add_argument("--max-parallel", type=int, default=0,
+                       help="Jobs running at once (default 0 = no limit: every study is submitted and runs as "
+                            "soon as SLURM allows).")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.reference_panel):
         parser.error(f"--reference-panel {args.reference_panel!r}: use letters, digits, '_', '-' or '.'")
