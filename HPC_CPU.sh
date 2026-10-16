@@ -1,14 +1,14 @@
 
 #!/bin/bash --login
 #SBATCH --job-name=Step00_Check_Resources
-#SBATCH --account=a_ace
+#SBATCH --account=ascher
 #SBATCH --partition=general
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=Step00_%j.log
 #SBATCH --error=Step00_%j.err
 
