@@ -447,7 +447,14 @@ envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR       # o
 sbatch Step04_Prepare_1000G_EUR_GRCh38.sh
 envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --status
 envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --stats  # people per population, variants
+envs/pipeline/bin/python Step04_Prepare_LD_Reference.py --ancestry EUR --verify # PLINK2 --validate, all 22 (compute node)
 ```
+
+Every panel is checked when it is built: the sample count must match the ancestry sample list
+(missing sample IDs are an error, not skipped), it must contain variants, and PLINK2 `--validate`
+must pass. Exact duplicate variants are removed; duplicates with different genotypes stop that
+chromosome with an error (listed in `.rmdup.mismatch`). `--force` rebuilds panels that already
+exist. Each plan writes its own time-stamped manifest, so re-planning never changes a queued job.
 
 ## 6. LD clumping (Step05)
 

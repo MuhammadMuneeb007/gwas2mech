@@ -150,8 +150,20 @@ def panel_files(code, chromosome):
 
 
 def panel_complete(code, chromosome):
-
-    return all(p.is_file() and p.stat().st_size > 0 for p in panel_files(code, chromosome))
+    """Lightweight structural check; publication release also requires --verify."""
+    files = panel_files(code, chromosome)
+    if not all(p.is_file() and p.stat().st_size > 0 for p in files):
+        return False
+    sample_file = REFERENCE_ROOT / code / "samples.txt"
+    if sample_file.is_file():
+        try:
+            with sample_file.open(encoding="utf-8") as fh:
+                expected = sum(bool(line.strip()) for line in fh)
+            if expected == 0 or count_nonheader_lines(files[2]) != expected:
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def failure_file(code, chromosome):
@@ -356,9 +368,9 @@ def panel_label(codes):
 
 
 def manifest_file(codes):
-    """One manifest per ancestry set, so a queued job is never overwritten."""
-
-    return REFERENCE_ROOT / f"step04_manifest_{panel_label(codes)}.tsv"
+    """Unique snapshot per planning run: running jobs never read a rewritten manifest."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return REFERENCE_ROOT / f"step04_manifest_{panel_label(codes)}_{stamp}_{os.getpid()}.tsv"
 
 
 def planner_mode(args):
@@ -417,8 +429,9 @@ def planner_mode(args):
     task_ids, n_tasks = assign_task_ids(len(rows))
     manifest = pd.DataFrame(rows)
     manifest.insert(0, "TASK_ID", task_ids)
-    manifest_file(args.codes).parent.mkdir(parents=True, exist_ok=True)
-    manifest.to_csv(manifest_file(args.codes), sep="\t", index=False)
+    manifest_path = manifest_file(args.codes)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest.to_csv(manifest_path, sep="\t", index=False)
 
     log_dir = PROJECT_ROOT / "logs" / "step04_ld_reference"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -436,7 +449,8 @@ set -euo pipefail
 ROOT="{PROJECT_ROOT}"
 cd "$ROOT"
 export PATH="$ROOT/envs/pipeline/bin:$PATH"
-export LD_REFERENCE_MANIFEST="{manifest_file(args.codes)}"
+export LD_REFERENCE_MANIFEST="{manifest_path}"
+export LD_FORCE_REBUILD="{int(args.force)}"
 export OMP_NUM_THREADS="${{SLURM_CPUS_PER_TASK:-{args.cpus}}}"
 
 echo "STEP 04 - 1000G LD reference | job $SLURM_JOB_ID task $SLURM_ARRAY_TASK_ID on $(hostname)"
@@ -450,7 +464,7 @@ echo "STEP 04 - 1000G LD reference | job $SLURM_JOB_ID task $SLURM_ARRAY_TASK_ID
     print(f"Chromosome tasks    : {len(rows)} (array 1-{n_tasks})")
     print(f"Already complete    : {22 * len(args.codes) - len(rows)}")
     print(f"Panels              : {REFERENCE_ROOT}/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam")
-    print(f"Manifest            : {manifest_file(args.codes)}")
+    print(f"Manifest            : {manifest_path}")
     print()
     print("RUN:")
     print(f"  sbatch {bash_file.name}")
@@ -462,7 +476,7 @@ echo "STEP 04 - 1000G LD reference | job $SLURM_JOB_ID task $SLURM_ARRAY_TASK_ID
 # WORKER (one ancestry x chromosome per manifest row)
 # =============================================================================
 
-def process_chromosome(row, threads):
+def process_chromosome(row, threads, force=False):
 
     chromosome = int(row["CHR"])
     code = str(row["ANCESTRY_CODE"])
@@ -491,7 +505,7 @@ def process_chromosome(row, threads):
             "COMPLETED_UTC": datetime.now(timezone.utc).isoformat(),
         }]).to_csv(summary_file, sep="\t", index=False)
 
-    if panel_complete(code, chromosome):
+    if panel_complete(code, chromosome) and not force:
         banner(f"REFERENCE ALREADY COMPLETE: chr{chromosome} {code}")
         if not summary_file.exists():
             write_summary()
@@ -504,14 +518,16 @@ def process_chromosome(row, threads):
 
     banner(f"STEP 04 WORKER - chr{chromosome} {code} ({threads} threads)")
 
-    # 1. ancestry subset
+    # 1. ancestry subset. Do not silently ignore missing sample IDs.
     ancestry_vcf = temporary_directory / f"chr{chromosome}.{code}.GRCh38.vcf.gz"
 
+    if force:
+        ancestry_vcf.unlink(missing_ok=True)
     if not (ancestry_vcf.exists() and ancestry_vcf.stat().st_size > 0):
         temporary_vcf = Path(str(ancestry_vcf) + ".part")
         temporary_vcf.unlink(missing_ok=True)
         run_command([bcftools, "view", "--threads", threads, "-S", sample_file,
-                     "--force-samples", "-Oz", "-o", temporary_vcf, raw_vcf])
+                     "-Oz", "-o", temporary_vcf, raw_vcf])
         if not temporary_vcf.exists() or temporary_vcf.stat().st_size == 0:
             raise RuntimeError(f"Failed to create ancestry VCF for chr{chromosome}.")
         temporary_vcf.replace(ancestry_vcf)
@@ -523,13 +539,21 @@ def process_chromosome(row, threads):
     run_command([plink2, "--vcf", ancestry_vcf,
                  "--set-missing-var-ids", "@:#:$r:$a",
                  "--new-id-max-allele-len", "1000",
-                 "--rm-dup", "force-first",
+                 "--rm-dup", "error", "list",
                  "--make-pgen", "--threads", threads, "--out", output_prefix])
 
     for path in (pgen, pvar, psam):
         if not path.exists() or path.stat().st_size == 0:
             raise RuntimeError(f"PLINK2 output missing: {path}")
 
+    expected_samples = sum(bool(line.strip()) for line in sample_file.open(encoding="utf-8"))
+    observed_samples = count_nonheader_lines(psam)
+    if expected_samples != observed_samples:
+        raise RuntimeError(f"Sample mismatch: expected {expected_samples}, observed {observed_samples}")
+    if count_nonheader_lines(pvar) == 0:
+        raise RuntimeError("PLINK2 output has zero variants")
+    # Complete genotype file validation, not merely a nonempty-file check.
+    run_command([plink2, "--pfile", output_prefix, "--validate", "--out", str(output_prefix) + "_validation"])
     write_summary()
 
     ancestry_vcf.unlink(missing_ok=True)
@@ -555,7 +579,7 @@ def worker_mode():
 
     for _, row in selected.iterrows():
         try:
-            process_chromosome(row, threads)
+            process_chromosome(row, threads, force=os.environ.get("LD_FORCE_REBUILD") == "1")
         except Exception as error:
             code, chromosome = row["ANCESTRY_CODE"], int(row["CHR"])
             failure_file(code, chromosome).write_text(
@@ -590,7 +614,7 @@ def direct_index_mode(args):
             "RAW_TBI": str(RAW_DIR / (filename + ".tbi")),
             "OUTPUT_PREFIX": str(panel_prefix(code, args.index)),
             "TMP_DIR": str(REFERENCE_ROOT / "tmp" / code),
-        }, threads)
+        }, threads, force=args.force)
         collect_reference_summaries(code)
 
     print(f"\nchr{args.index} done for {', '.join(args.codes)}. Progress: "
@@ -619,6 +643,26 @@ def status_mode(args):
 
     print()
     print(f"Panels: {REFERENCE_ROOT}/<ANC>/   (Step05 / Step06 need all 22 chromosomes)")
+
+
+def verify_mode(args):
+    """Full read-only PLINK2 validation of all 22 filesets per ancestry."""
+    plink2 = require_program("plink2")
+    for code in args.codes:
+        sample_list = REFERENCE_ROOT / code / "samples.txt"
+        if not sample_list.exists():
+            raise SystemExit(f"Missing sample list: {sample_list}")
+        expected = sum(bool(line.strip()) for line in sample_list.open(encoding="utf-8"))
+        for chromosome in range(1, 23):
+            if not panel_complete(code, chromosome):
+                raise SystemExit(f"Missing or inconsistent panel chr{chromosome} {code}")
+            prefix = panel_prefix(code, chromosome)
+            observed = count_nonheader_lines(Path(str(prefix) + ".psam"))
+            if observed != expected:
+                raise SystemExit(f"Sample mismatch chr{chromosome}: {observed} vs {expected}")
+            run_command([plink2, "--pfile", prefix, "--validate", "--out", str(prefix) + "_validation"])
+            print(f"[VERIFIED] {code} chromosome {chromosome}: {observed} samples", flush=True)
+    print("All requested ancestry panels passed structural checks and PLINK2 validation.")
 
 
 def stats_mode(args):
@@ -675,6 +719,7 @@ def arguments(argv=None):
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--status", action="store_true", help="READ-ONLY: built / failed / pending panels.")
     modes.add_argument("--stats", action="store_true", help="Samples per population and variants per chromosome.")
+    modes.add_argument("--verify", action="store_true", help="Validate all 22 panels with PLINK2 (use a compute node).")
     modes.add_argument("--index", type=int, default=None,
                        help="Build chromosome N (1-22) on this machine; no planner needed.")
 
@@ -702,6 +747,8 @@ def main():
         status_mode(args)
     elif args.stats:
         stats_mode(args)
+    elif args.verify:
+        verify_mode(args)
     elif args.index is not None:
         direct_index_mode(args)
     else:
