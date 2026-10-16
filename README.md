@@ -590,6 +590,22 @@ envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's di
 envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --plots
 ```
 
+**Fine-map every GWAS, including the ones Step02 could not classify** (`PHENOTYPE_TYPE=Unknown` or
+`NEEDS_REVIEW`, which the planner otherwise lists as `EXCLUDED`): add `--include-unreviewed`.
+Those studies then use N_EFF when they have case/control counts, otherwise N_TOTAL; check them
+before interpreting (proxy cases make N_EFF approximate). The cleaner route is to fill
+`VERIFIED_PHENOTYPE_TYPE` in Step02's `phenotype_type_review.tsv` instead.
+```bash
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --include-unreviewed
+sbatch Step06_FineMap_GWAS_parkinson_s_disease_european.sh
+
+envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --include-unreviewed
+sbatch Step06_FineMap_GWAS_parkinson_s_disease_european_1000G30x.sh
+```
+Re-plan only after the previous Step06 array for that panel has finished (or `scancel` it): planning
+rewrites `finemapping_manifest.tsv`, and running tasks read their study from it. Studies already
+fine-mapped keep their finished loci.
+
 Every locus is checked and gets `LOCUS_QC = PASS / WARN` with the reasons (`LOCUS_QC_NOTES`):
 
 | Check | What it detects |
