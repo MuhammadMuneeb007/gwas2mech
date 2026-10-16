@@ -5026,6 +5026,9 @@ def worker_mode():
                 ].min()
             )
 
+        # lambda GC, chromosomes, median N, MAF < 1% (read by --stats).
+        distribution = qc_distribution_stats(data)
+
         summary = {
 
             "QC_TASK_ID":
@@ -5098,6 +5101,8 @@ def worker_mode():
 
             "MIN_P":
                 minimum_p,
+
+            **distribution,
 
             "HAS_CHR":
                 has_chr,
@@ -5764,8 +5769,111 @@ def join_unique(values):
     return ", ".join(seen)
 
 
-def raw_file_stats(path, cache):
-    """Columns + variant count of the downloaded file (counted once, then cached)."""
+def lambda_from_median_p(median_p):
+    """lambda GC = median chi2 (1 df) / 0.4549. chi2 decreases with P, so the median
+    chi2 is chi2.isf(median P): one scipy call instead of one per variant."""
+
+    from scipy.stats import chi2
+
+    if median_p is None or not np.isfinite(median_p) or median_p <= 0:
+        return None
+
+    return round(float(chi2.isf(min(float(median_p), 1.0), 1) / chi2.ppf(0.5, 1)), 4)
+
+
+def natural_chromosomes(values):
+
+    names = {str(x).strip().removesuffix(".0") for x in values if str(x).strip() not in ("", "nan", "None")}
+
+    return sorted(names, key=lambda c: (0, int(c)) if c.isdigit() else (1, c))
+
+
+def qc_distribution_stats(data):
+    """lambda GC, chromosomes, median N and MAF < 1% count of a QC table (pandas)."""
+
+    p = pd.to_numeric(data["P"], errors="coerce").to_numpy(dtype=float)
+    p = p[np.isfinite(p) & (p >= 0) & (p <= 1)]
+    chromosomes = natural_chromosomes(data["CHR"].dropna().unique()) if "CHR" in data else []
+    n = pd.to_numeric(data["N"], errors="coerce").dropna() if "N" in data else pd.Series(dtype=float)
+
+    if "MAF" in data:
+        maf = pd.to_numeric(data["MAF"], errors="coerce").dropna()
+    elif "EAF" in data:
+        eaf = pd.to_numeric(data["EAF"], errors="coerce").dropna()
+        maf = np.minimum(eaf, 1 - eaf)
+    else:
+        maf = None
+
+    return {
+        "LAMBDA_GC": lambda_from_median_p(float(np.median(p))) if len(p) else None,
+        "N_CHROMOSOMES": len(chromosomes),
+        "CHROMOSOMES": ",".join(chromosomes),
+        "N_MEDIAN_IN_FILE": int(n.median()) if len(n) else None,
+        "N_VARIANTS_MAF_BELOW_1PCT": int((maf < 0.01).sum()) if maf is not None and len(maf) else None,
+    }
+
+
+def file_header(path):
+
+    opener = gzip.open if str(path).endswith((".gz", ".bgz")) else open
+
+    with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+        return handle.readline().rstrip("\n").split("\t")
+
+
+def polars_module():
+    """polars (installed on first use), or None when it cannot be used."""
+
+    try:
+        ensure_packages({"polars": "polars[rtcompat]"})
+        import polars as pl
+        return pl
+    except Exception as error:
+        print(f"  (polars unavailable: {error}; using pandas)", flush=True)
+        return None
+
+
+def qc_distribution_stats_fast(path):
+    """qc_distribution_stats() of a QC'd file read with polars: only CHR / P / N /
+    EAF / MAF, decompressed and parsed multi-threaded, aggregated without pandas."""
+
+    header = file_header(path)
+    columns = [c for c in ("CHR", "P", "N", "EAF", "MAF") if c in header]
+    pl = polars_module()
+
+    if pl is None:
+        return qc_distribution_stats(pd.read_csv(path, sep="\t", usecols=columns, low_memory=False))
+
+    frame = pl.read_csv(
+        path, separator="\t", columns=columns, quote_char=None, ignore_errors=True,
+        null_values=["", "NA", "nan", "NaN"],
+        schema_overrides={c: (pl.Utf8 if c == "CHR" else pl.Float64) for c in columns},
+    )
+    p = frame["P"].filter(frame["P"].is_between(0, 1)) if "P" in frame.columns else None
+    maf = (frame["MAF"] if "MAF" in frame.columns
+           else pl.min_horizontal(frame["EAF"], 1 - frame["EAF"]) if "EAF" in frame.columns else None)
+    if maf is not None and not isinstance(maf, pl.Series):
+        maf = frame.select(maf).to_series()
+    chromosomes = natural_chromosomes(frame["CHR"].drop_nulls().unique().to_list()) if "CHR" in frame.columns else []
+    n_median = frame["N"].median() if "N" in frame.columns else None
+
+    return {
+        "LAMBDA_GC": lambda_from_median_p(p.median()) if p is not None and len(p) else None,
+        "N_CHROMOSOMES": len(chromosomes),
+        "CHROMOSOMES": ",".join(chromosomes),
+        "N_MEDIAN_IN_FILE": int(n_median) if n_median is not None else None,
+        "N_VARIANTS_MAF_BELOW_1PCT": int((maf.drop_nulls() < 0.01).sum()) if maf is not None else None,
+    }
+
+
+def raw_file_stats(path, cache, n_known=None):
+    """Columns of the downloaded file, and its variant count: from the QC summary
+    when known, otherwise counted once (decompress | wc -l) and cached."""
+
+    header = file_header(path)
+
+    if n_known not in (None, "") and pd.notna(n_known):
+        return {"columns": header, "n_variants": int(float(n_known))}
 
     key = str(path)
     signature = [path.stat().st_size, int(path.stat().st_mtime)]
@@ -5773,51 +5881,62 @@ def raw_file_stats(path, cache):
     if key in cache and cache[key].get("signature") == signature:
         return cache[key]
 
-    opener = gzip.open if path.name.endswith((".gz", ".bgz")) else open
+    print(f"  {path.name}: counting variants (once; cached) ...", flush=True)
+    pl = polars_module()
 
-    with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
-        header = handle.readline().rstrip("\n").split("\t")
-        rows = sum(1 for _ in handle)
+    if pl is not None:
+        rows = pl.read_csv(path, separator="\t", columns=[header[0]], quote_char=None,
+                           infer_schema_length=0, truncate_ragged_lines=True).height
+    else:
+        opener = gzip.open if path.name.endswith((".gz", ".bgz")) else open
+        with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+            rows = sum(1 for _ in handle) - 1
 
     cache[key] = {"signature": signature, "columns": header, "n_variants": rows}
 
     return cache[key]
 
 
-def qc_file_stats(path, cache):
-    """Genomic inflation (lambda GC), N and chromosomes from the QC'd file (cached)."""
+def qc_file_stats(path, cache, summary=None):
+    """lambda GC, chromosomes, median N, MAF < 1% count of a QC'd file: from its QC
+    summary (written by the QC since this version), otherwise read once with polars
+    (only CHR / P / N / EAF) and cached."""
+
+    if summary and pd.notna(summary.get("LAMBDA_GC", np.nan)) and "CHROMOSOMES" in summary:
+        return {key: summary.get(key) for key in
+                ("LAMBDA_GC", "N_CHROMOSOMES", "CHROMOSOMES", "N_MEDIAN_IN_FILE", "N_VARIANTS_MAF_BELOW_1PCT")}
 
     key = str(path)
     signature = [path.stat().st_size, int(path.stat().st_mtime)]
 
-    if key in cache and cache[key].get("signature") == signature and "chromosomes" in cache[key]:
+    if key in cache and cache[key].get("signature") == signature and "CHROMOSOMES" in cache[key]:
         return cache[key]
 
-    from scipy.stats import chi2
+    print(f"  {path.name}: lambda GC / chromosomes / N (once; cached) ...", flush=True)
+    cache[key] = {"signature": signature, **qc_distribution_stats_fast(path)}
 
-    header = pd.read_csv(path, sep="\t", nrows=0).columns
-    data = pd.read_csv(path, sep="\t", usecols=[c for c in ("CHR", "P", "N", "EAF") if c in header],
-                       low_memory=False)
-    p = pd.to_numeric(data["P"], errors="coerce").dropna().clip(lower=1e-300, upper=1)
+    return cache[key]
 
-    result = {
-        "signature": signature,
-        "lambda_gc": round(float(np.median(chi2.isf(p, 1)) / chi2.ppf(0.5, 1)), 4) if len(p) else None,
-        "n_chromosomes": int(data["CHR"].nunique()) if "CHR" in data else None,
-        "chromosomes": sorted(str(x) for x in data["CHR"].dropna().unique()) if "CHR" in data else [],
-    }
 
-    if "N" in data:
-        n = pd.to_numeric(data["N"], errors="coerce").dropna()
-        result["n_median"] = int(n.median()) if len(n) else None
+def read_catalog_subset(path, accessions, studies_table=False):
+    """Rows of a GWAS Catalog download table for these accessions (polars; pandas
+    fallback). Newer releases name the PubMed column "PUBMED ID"."""
 
-    if "EAF" in data:
-        eaf = pd.to_numeric(data["EAF"], errors="coerce").dropna()
-        result["n_maf_below_1pct"] = int((np.minimum(eaf, 1 - eaf) < 0.01).sum())
+    try:
+        pl = polars_module()
+        # Plain TSV: titles may start with a literal quote, so no CSV quoting.
+        frame = (pl.scan_csv(path, separator="\t", infer_schema_length=0, quote_char=None,
+                             truncate_ragged_lines=True)
+                 .filter(pl.col("STUDY ACCESSION").is_in(list(accessions))).collect())
+        table = pd.DataFrame({c: frame[c].to_list() for c in frame.columns}, dtype=object)
+    except Exception:
+        table = pd.read_csv(path, sep="\t", dtype=str, low_memory=False)
+        table = table[table["STUDY ACCESSION"].astype(str).isin(set(accessions))]
 
-    cache[key] = result
+    if studies_table and "PUBMEDID" not in table.columns and "PUBMED ID" in table.columns:
+        table = table.rename(columns={"PUBMED ID": "PUBMEDID"})
 
-    return result
+    return table
 
 
 def stats_mode(args):
@@ -5829,8 +5948,9 @@ def stats_mode(args):
     cache_dir = PROJECT_ROOT / "reference_metadata" / "gwas_catalog"
     download_metadata(session, STUDIES_URL, cache_dir / "gwas_catalog_studies.tsv", args.refresh)
     download_metadata(session, ANCESTRY_URL, cache_dir / "gwas_catalog_ancestry.tsv", args.refresh)
-    studies = read_catalog_studies(cache_dir / "gwas_catalog_studies.tsv")
-    ancestry = pd.read_csv(cache_dir / "gwas_catalog_ancestry.tsv", sep="\t", dtype=str, low_memory=False)
+    accessions = set(manifest["STUDY_ACCESSION"].astype(str).str.strip())
+    studies = read_catalog_subset(cache_dir / "gwas_catalog_studies.tsv", accessions, studies_table=True)
+    ancestry = read_catalog_subset(cache_dir / "gwas_catalog_ancestry.tsv", accessions)
 
     try:
         cache = json.loads(P["stats_cache"].read_text(encoding="utf-8")) if P["stats_cache"].is_file() else {}
@@ -5838,7 +5958,16 @@ def stats_mode(args):
         cache = {}
 
     banner(f"STEP 02 PUBLICATION STATISTICS - {P['phenotype']} / {P['label']} ({P['code']})")
-    print("Variant counts and lambda GC are computed once per file and cached.")
+    print("Variant counts and lambda GC come from the QC summaries (older QC outputs: read once with polars, cached).")
+
+    # GWAS Catalog API v2 for studies not cached yet, in parallel.
+    todo = sorted(a for a in accessions if f"api::{a}" not in cache)
+    if todo:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for accession, data in zip(todo, pool.map(
+                    lambda a: fetch_json(session, f"{GWAS_API_V2}/{a}") or {}, todo)):
+                cache[f"api::{accession}"] = data
 
     # PMID -> DOI for every study (manifests from older planner runs have none).
     in_manifest = studies[studies["STUDY ACCESSION"].astype(str).isin(manifest["STUDY_ACCESSION"].str.strip())]
@@ -5898,7 +6027,7 @@ def stats_mode(args):
         summary = pd.read_csv(out["summary"], sep="\t").iloc[0].to_dict() if s["qc"].startswith("DONE") else {}
 
         if s["raw"] is not None:
-            raw = raw_file_stats(s["raw"], cache)
+            raw = raw_file_stats(s["raw"], cache, n_known=summary.get("N_BEFORE_QC"))
             r.update({"N_COLUMNS": len(raw["columns"]), "COLUMNS": ", ".join(raw["columns"]),
                       "N_VARIANTS_RAW": summary.get("N_BEFORE_QC", raw["n_variants"])})
 
@@ -5915,11 +6044,10 @@ def stats_mode(args):
                 "AVAILABLE_FIELDS": ", ".join(k[4:] for k, v in summary.items()
                                               if k.startswith("HAS_") and str(v) == "True"),
             })
-            q = qc_file_stats(out["full"], cache)
-            r.update({"LAMBDA_GC": q.get("lambda_gc", ""), "N_CHROMOSOMES": q.get("n_chromosomes", ""),
-                      "CHROMOSOMES": ",".join(q.get("chromosomes") or []),
-                      "N_MEDIAN_IN_FILE": q.get("n_median", ""),
-                      "N_VARIANTS_MAF_BELOW_1PCT": q.get("n_maf_below_1pct", "")})
+            q = qc_file_stats(out["full"], cache, summary)
+            r.update({key: "" if q.get(key) is None else q.get(key) for key in
+                      ("LAMBDA_GC", "N_CHROMOSOMES", "CHROMOSOMES", "N_MEDIAN_IN_FILE", "N_VARIANTS_MAF_BELOW_1PCT")})
+            r["CHROMOSOMES"] = str(r["CHROMOSOMES"])
 
         r["_HAS_SUMMARY"] = bool(summary)
         r["_NEW_QC"] = "N_SOURCE" in summary

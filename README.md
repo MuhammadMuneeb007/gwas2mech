@@ -466,9 +466,26 @@ position **and both alleles**; a different variant at the same position is never
 envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR
 sbatch Step05_Clump_GWAS_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --status
-envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --stats   # leads, loci, mapping, lost GWS variants
+envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --stats   # audit (below)
 envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --plots   # Manhattan, QQ, chromosome locus map
 ```
+
+**Audit (`--stats`), per study, before moving on to fine-mapping:**
+
+| Line | What it shows |
+|---|---|
+| `Input` | GWAS variants, and those excluded before mapping: not chr1–22, missing position / P, duplicate records |
+| `P <= p2` | clumping candidates mapped to the 1000G panel, and those not mapped: not in panel, allele mismatch, ambiguous, no alleles, duplicate panel ID |
+| `Significant` | the same for P ≤ p1 (genome-wide significant) variants: **significant-variant mapping rate**, plus significant variants outside chr1–22 |
+| `Leads` | independent lead variants (r² < 0.1 within 1,000 kb) and loci (±1 Mb merged) |
+| `Missing match` | significant variants with no panel match, why, and the distance to the nearest lead; `SIGNAL LOST` = no lead within 1,000 kb, so that association is not represented at all |
+
+A study is marked `AUDIT CHECK` when the significant-variant mapping rate is below 80%, a significant
+region has no lead, significant variants lie outside chr1–22, more than 5% of significant variants have
+alleles different from the panel, or there are significant variants but no lead. Every significant
+variant without a match is listed in `05_ld_clumping/<phenotype>/<ancestry>/<GCST>/unmapped_significant_variants.tsv`
+and the per-study table in `clumping_stats.tsv` (`AUDIT`, `AUDIT_NOTES`). Studies clumped by an older
+version show the counts they have; `--force` re-clumps them for the full audit.
 
 ## 7. Fine-mapping (Step06, SuSiE-RSS)
 

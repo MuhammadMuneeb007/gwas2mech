@@ -10,7 +10,10 @@ GWAS2Mech STEP 05 - Ancestry-matched LD clumping / independent lead variants
     envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR
     sbatch Step05_Clump_GWAS_parkinson_s_disease_european.sh
 
-    # progress (read-only), per-study statistics, plots
+    # progress (read-only), per-study audit + statistics, plots
+    #   --stats: significant-variant (P <= p1) mapping rate, independent leads,
+    #   variants excluded per reason, significant variants without a 1000G match
+    #   and significant regions left with no lead at all
     envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --status
     envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --stats
     envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "Parkinson's disease" --ancestry EUR --plots
@@ -37,6 +40,8 @@ Outputs
         clumping_manifest.tsv, clumping_excluded_studies.tsv, clumping_stats.tsv
         plots/<GCST>_manhattan.png, <GCST>_qq.png, <GCST>_loci_map.png   (--plots)
         <GCST>/lead_variants.tsv, mapped_candidates.tsv.gz,
+               unmapped_significant_variants.tsv (P <= p1 with no 1000G match: REASON,
+                   NEAREST_LEAD_KB, SIGNAL_LOST),
                chromosome_clumping_summary.tsv, clumping_summary.tsv/.json,
                chr01..chr22/ (clump_input.tsv, plink.clumps, plink.log)
 
@@ -257,6 +262,8 @@ def arguments(argv=None):
     parser.add_argument("--r2", type=float, default=DEFAULT_R2)
     parser.add_argument("--kb", type=int, default=DEFAULT_KB)
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
+    parser.add_argument("--force", action="store_true",
+                        help="Clump again even studies that are already done (e.g. for the full --stats audit).")
     parser.add_argument(
         "--allow-partial",
         action="store_true",
@@ -386,6 +393,7 @@ def build_clump_row(
         "R2": args.r2,
         "KB": args.kb,
         "CHUNK_SIZE": args.chunk_size,
+        "FORCE": bool(getattr(args, "force", False)),
     }, None
 
 
@@ -645,6 +653,7 @@ def stream_candidate_variants(
     qc_file: Path,
     p2: float,
     chunk_size: int,
+    p1: float = DEFAULT_P1,
 ):
     mapping = inspect_gwas_columns(qc_file)
 
@@ -658,6 +667,11 @@ def stream_candidate_variants(
     n_total = 0
     n_valid_p = 0
     n_p2 = 0
+    n_p1 = 0
+    n_not_autosomal = 0
+    n_not_autosomal_p1 = 0
+    n_missing_pos_p = 0
+    n_duplicates = 0
 
     reader = pd.read_csv(
         qc_file,
@@ -691,13 +705,18 @@ def stream_candidate_variants(
         else:
             renamed["SOURCE_ID"] = ""
 
-        valid = (
-            renamed["CHR"].between(1, 22, inclusive="both")
-            & renamed["POS"].notna()
+        autosomal = renamed["CHR"].between(1, 22, inclusive="both").fillna(False).astype(bool)
+        usable = (
+            renamed["POS"].notna()
             & renamed["P"].notna()
             & renamed["P"].between(0, 1, inclusive="both")
-        )
+        ).astype(bool)
+        valid = autosomal & usable
         n_valid_p += int(valid.sum())
+        n_missing_pos_p += int((~usable).sum())
+        n_not_autosomal += int((usable & ~autosomal).sum())
+        n_not_autosomal_p1 += int((usable & ~autosomal & (renamed["P"] <= p1)).sum())
+        n_p1 += int((valid & (renamed["P"] <= p1)).sum())
 
         renamed = renamed.loc[valid]
         selected = renamed.loc[renamed["P"] <= p2].copy()
@@ -715,13 +734,20 @@ def stream_candidate_variants(
         df = df.sort_values("P", kind="stable")
         # Exact duplicate GWAS records are unnecessary for clumping.
         subset = ["POS", "P", "EA", "NEA"]
+        before = len(df)
         df = df.drop_duplicates(subset=subset, keep="first")
+        n_duplicates += before - len(df)
         combined[chrom] = df
 
     stats = {
         "N_GWAS_ROWS": n_total,
         "N_VALID_ROWS": n_valid_p,
         "N_P_LE_P2": n_p2,
+        "N_P_LE_P1": n_p1,
+        "N_EXCLUDED_NOT_CHR1_22": n_not_autosomal,
+        "N_EXCLUDED_NOT_CHR1_22_P_LE_P1": n_not_autosomal_p1,
+        "N_EXCLUDED_MISSING_POS_OR_P": n_missing_pos_p,
+        "N_EXCLUDED_DUPLICATE_RECORDS": n_duplicates,
     }
     return combined, stats
 
@@ -786,16 +812,23 @@ def load_reference_matches(pvar_path: Path, target_positions: set[int]):
     return result
 
 
-def map_gwas_to_reference(gwas: pd.DataFrame, pvar_path: Path) -> tuple[pd.DataFrame, dict]:
+UNMAPPED_COLUMNS = ["CHR", "POS", "SOURCE_ID", "EA", "NEA", "P", "REASON", "PANEL_ALLELES_AT_POS"]
+
+
+def map_gwas_to_reference(
+    gwas: pd.DataFrame, pvar_path: Path, p1: float = DEFAULT_P1
+) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
+    """(mapped variants, counts, significant variants (P <= p1) without a match + REASON)."""
+    empty_stats = {
+        "N_INPUT": 0, "N_MAPPED": 0, "N_UNMAPPED": 0, "N_AMBIGUOUS": 0,
+        "N_ALLELE_MISMATCH": 0, "N_NO_ALLELES": 0, "N_DUPLICATE_PANEL_ID": 0,
+        "N_SIG_INPUT": 0, "N_SIG_MAPPED": 0, "N_SIG_NOT_IN_REFERENCE": 0,
+        "N_SIG_ALLELE_MISMATCH": 0, "N_SIG_AMBIGUOUS": 0, "N_SIG_NO_ALLELES": 0,
+        "N_SIG_DUPLICATE_PANEL_ID": 0,
+    }
     if gwas.empty:
-        return pd.DataFrame(columns=["ID", "P", "CHR", "POS", "EA", "NEA", "SOURCE_ID"]), {
-            "N_INPUT": 0,
-            "N_MAPPED": 0,
-            "N_UNMAPPED": 0,
-            "N_AMBIGUOUS": 0,
-            "N_ALLELE_MISMATCH": 0,
-            "N_NO_ALLELES": 0,
-        }
+        return (pd.DataFrame(columns=["ID", "P", "CHR", "POS", "EA", "NEA", "SOURCE_ID"]), empty_stats,
+                pd.DataFrame(columns=UNMAPPED_COLUMNS))
 
     positions = set(int(x) for x in gwas["POS"].dropna().astype(int).unique())
     reference = load_reference_matches(pvar_path, positions)
@@ -805,6 +838,16 @@ def map_gwas_to_reference(gwas: pd.DataFrame, pvar_path: Path) -> tuple[pd.DataF
     n_ambiguous = 0
     n_allele_mismatch = 0
     n_no_alleles = 0
+    unmapped_sig = []
+
+    def lost(row, reason, options):
+        if float(row.P) <= p1:
+            unmapped_sig.append({
+                "CHR": int(row.CHR), "POS": int(row.POS), "SOURCE_ID": getattr(row, "SOURCE_ID", ""),
+                "EA": clean_allele(row.EA), "NEA": clean_allele(row.NEA), "P": float(row.P),
+                "REASON": reason,
+                "PANEL_ALLELES_AT_POS": ",".join(f"{o['REF']}/{o['ALT']}" for o in options),
+            })
 
     for row in gwas.itertuples(index=False):
         pos = int(row.POS)
@@ -812,6 +855,7 @@ def map_gwas_to_reference(gwas: pd.DataFrame, pvar_path: Path) -> tuple[pd.DataF
 
         if not options:
             n_unmapped += 1
+            lost(row, "NOT_IN_REFERENCE", options)
             continue
 
         ea = clean_allele(row.EA)
@@ -823,6 +867,7 @@ def map_gwas_to_reference(gwas: pd.DataFrame, pvar_path: Path) -> tuple[pd.DataF
         # flipping. A different variant at the same position is NOT a match.
         if not (ea and nea):
             n_no_alleles += 1
+            lost(row, "NO_ALLELES", options)
             continue
 
         allele_matches = [
@@ -835,9 +880,11 @@ def map_gwas_to_reference(gwas: pd.DataFrame, pvar_path: Path) -> tuple[pd.DataF
             chosen = allele_matches[0]
         elif len(allele_matches) > 1:
             n_ambiguous += 1
+            lost(row, "AMBIGUOUS", options)
             continue
         else:
             n_allele_mismatch += 1
+            lost(row, "ALLELE_MISMATCH", options)
             continue
 
         mapped_rows.append(
@@ -855,12 +902,17 @@ def map_gwas_to_reference(gwas: pd.DataFrame, pvar_path: Path) -> tuple[pd.DataF
         )
 
     mapped = pd.DataFrame(mapped_rows)
+    n_duplicate_id = n_sig_duplicate_id = 0
     if not mapped.empty:
-        mapped = (
-            mapped.sort_values("P", kind="stable")
-            .drop_duplicates(subset=["ID"], keep="first")
-            .reset_index(drop=True)
-        )
+        # Two GWAS records on one panel variant: the best P is kept.
+        ordered = mapped.sort_values("P", kind="stable")
+        duplicated = ordered.duplicated(subset=["ID"], keep="first")
+        n_duplicate_id = int(duplicated.sum())
+        n_sig_duplicate_id = int((duplicated & (ordered["P"] <= p1)).sum())
+        mapped = ordered.loc[~duplicated].reset_index(drop=True)
+
+    unmapped = pd.DataFrame(unmapped_sig, columns=UNMAPPED_COLUMNS)
+    reasons = unmapped["REASON"].value_counts()
 
     stats = {
         "N_INPUT": int(len(gwas)),
@@ -869,8 +921,16 @@ def map_gwas_to_reference(gwas: pd.DataFrame, pvar_path: Path) -> tuple[pd.DataF
         "N_AMBIGUOUS": int(n_ambiguous),
         "N_ALLELE_MISMATCH": int(n_allele_mismatch),
         "N_NO_ALLELES": int(n_no_alleles),
+        "N_DUPLICATE_PANEL_ID": n_duplicate_id,
+        "N_SIG_INPUT": int((gwas["P"] <= p1).sum()),
+        "N_SIG_MAPPED": int((mapped["P"] <= p1).sum()) if not mapped.empty else 0,
+        "N_SIG_NOT_IN_REFERENCE": int(reasons.get("NOT_IN_REFERENCE", 0)),
+        "N_SIG_ALLELE_MISMATCH": int(reasons.get("ALLELE_MISMATCH", 0)),
+        "N_SIG_AMBIGUOUS": int(reasons.get("AMBIGUOUS", 0)),
+        "N_SIG_NO_ALLELES": int(reasons.get("NO_ALLELES", 0)),
+        "N_SIG_DUPLICATE_PANEL_ID": n_sig_duplicate_id,
     }
-    return mapped, stats
+    return mapped, stats, unmapped
 
 
 # =============================================================================
@@ -1018,6 +1078,7 @@ def clump_one_study(row, task_id, root, plink2) -> None:
             qc_file=qc_file,
             p2=p2,
             chunk_size=chunk_size,
+            p1=p1,
         )
 
         print(f"GWAS rows      : {stream_stats['N_GWAS_ROWS']:,}")
@@ -1026,6 +1087,7 @@ def clump_one_study(row, task_id, root, plink2) -> None:
 
         all_mapped = []
         all_leads = []
+        all_unmapped = []
         chromosome_summaries = []
 
         for chrom in range(1, 23):
@@ -1040,10 +1102,12 @@ def clump_one_study(row, task_id, root, plink2) -> None:
             prefix = reference_prefix(root, ancestry_code, chrom)
             pvar = Path(str(prefix) + ".pvar")
 
-            mapped, map_stats = map_gwas_to_reference(gwas_chr, pvar)
+            mapped, map_stats, unmapped_sig = map_gwas_to_reference(gwas_chr, pvar, p1)
 
             if not mapped.empty:
                 all_mapped.append(mapped)
+            if not unmapped_sig.empty:
+                all_unmapped.append(unmapped_sig)
 
             clump_input = chrom_dir / "clump_input.tsv"
             clump_report_prefix = chrom_dir / "plink"
@@ -1114,7 +1178,15 @@ def clump_one_study(row, task_id, root, plink2) -> None:
                     "N_AMBIGUOUS": map_stats["N_AMBIGUOUS"],
                     "N_ALLELE_MISMATCH": map_stats["N_ALLELE_MISMATCH"],
                     "N_NO_ALLELES": map_stats["N_NO_ALLELES"],
+                    "N_DUPLICATE_PANEL_ID": map_stats["N_DUPLICATE_PANEL_ID"],
                     "N_P_LE_P1_MAPPED": n_p1,
+                    "N_SIG_INPUT": map_stats["N_SIG_INPUT"],
+                    "N_SIG_MAPPED": map_stats["N_SIG_MAPPED"],
+                    "N_SIG_NOT_IN_REFERENCE": map_stats["N_SIG_NOT_IN_REFERENCE"],
+                    "N_SIG_ALLELE_MISMATCH": map_stats["N_SIG_ALLELE_MISMATCH"],
+                    "N_SIG_AMBIGUOUS": map_stats["N_SIG_AMBIGUOUS"],
+                    "N_SIG_NO_ALLELES": map_stats["N_SIG_NO_ALLELES"],
+                    "N_SIG_DUPLICATE_PANEL_ID": map_stats["N_SIG_DUPLICATE_PANEL_ID"],
                     "N_LEAD_VARIANTS": n_leads,
                 }
             )
@@ -1156,6 +1228,14 @@ def clump_one_study(row, task_id, root, plink2) -> None:
 
         lead_all.to_csv(lead_output, sep="\t", index=False)
 
+        # Significant variants without a panel match; SIGNAL_LOST = no lead
+        # within --kb, i.e. the association is not represented by any lead.
+        unmapped_all = (pd.concat(all_unmapped, ignore_index=True) if all_unmapped
+                        else pd.DataFrame(columns=UNMAPPED_COLUMNS))
+        unmapped_all, n_lost_regions = mark_lost_signals(unmapped_all, lead_all, kb)
+        unmapped_all.sort_values("P", kind="stable").to_csv(
+            output_dir / "unmapped_significant_variants.tsv", sep="\t", index=False)
+
         chromosome_summary_file = output_dir / "chromosome_clumping_summary.tsv"
         chromosome_df = pd.DataFrame(chromosome_summaries)
         chromosome_df.to_csv(chromosome_summary_file, sep="\t", index=False)
@@ -1191,7 +1271,28 @@ def clump_one_study(row, task_id, root, plink2) -> None:
             "N_ALLELE_MISMATCH": int(chromosome_df["N_ALLELE_MISMATCH"].sum()),
             "N_AMBIGUOUS": int(chromosome_df["N_AMBIGUOUS"].sum()),
             "N_NO_ALLELES": int(chromosome_df["N_NO_ALLELES"].sum()),
+            "N_DUPLICATE_PANEL_ID": int(chromosome_df["N_DUPLICATE_PANEL_ID"].sum()),
             "MAPPING_RATE": mapping_rate,
+            # ---- audit: excluded before mapping ----
+            "N_EXCLUDED_NOT_CHR1_22": stream_stats["N_EXCLUDED_NOT_CHR1_22"],
+            "N_EXCLUDED_NOT_CHR1_22_P_LE_P1": stream_stats["N_EXCLUDED_NOT_CHR1_22_P_LE_P1"],
+            "N_EXCLUDED_MISSING_POS_OR_P": stream_stats["N_EXCLUDED_MISSING_POS_OR_P"],
+            "N_EXCLUDED_DUPLICATE_RECORDS": stream_stats["N_EXCLUDED_DUPLICATE_RECORDS"],
+            # ---- audit: significant variants (P <= p1) ----
+            "N_SIG_INPUT": int(chromosome_df["N_SIG_INPUT"].sum()),
+            "N_SIG_MAPPED": int(chromosome_df["N_SIG_MAPPED"].sum()),
+            "SIG_MAPPING_RATE": (int(chromosome_df["N_SIG_MAPPED"].sum()) / int(chromosome_df["N_SIG_INPUT"].sum())
+                                 if int(chromosome_df["N_SIG_INPUT"].sum()) else None),
+            "N_SIG_NOT_IN_REFERENCE": int(chromosome_df["N_SIG_NOT_IN_REFERENCE"].sum()),
+            "N_SIG_ALLELE_MISMATCH": int(chromosome_df["N_SIG_ALLELE_MISMATCH"].sum()),
+            "N_SIG_AMBIGUOUS": int(chromosome_df["N_SIG_AMBIGUOUS"].sum()),
+            "N_SIG_NO_ALLELES": int(chromosome_df["N_SIG_NO_ALLELES"].sum()),
+            "N_SIG_DUPLICATE_PANEL_ID": int(chromosome_df["N_SIG_DUPLICATE_PANEL_ID"].sum()),
+            "N_SIG_UNMAPPED_NO_LEAD_NEARBY": int(unmapped_all["SIGNAL_LOST"].sum()) if len(unmapped_all) else 0,
+            "N_SIG_REGIONS_LOST": n_lost_regions,
+            "N_CHROMOSOMES_SIG_NO_LEAD": int(((chromosome_df["N_SIG_INPUT"] > 0)
+                                              & (chromosome_df["N_LEAD_VARIANTS"] == 0)).sum()),
+            "UNMAPPED_SIGNIFICANT_FILE": str(output_dir / "unmapped_significant_variants.tsv"),
             "N_INDEX_CANDIDATES_P_LE_P1": int(chromosome_df["N_P_LE_P1_MAPPED"].sum()),
             "N_LEAD_VARIANTS": int(len(lead_all)),
             "LEAD_VARIANTS_FILE": str(lead_output),
@@ -1231,6 +1332,41 @@ def clump_one_study(row, task_id, root, plink2) -> None:
         failed_output.write_text(failure_text, encoding="utf-8")
         print(failure_text, file=sys.stderr)
         raise
+
+
+def mark_lost_signals(unmapped: pd.DataFrame, leads: pd.DataFrame, kb: int) -> tuple[pd.DataFrame, int]:
+    """NEAREST_LEAD_KB and SIGNAL_LOST (no lead within kb) per unmapped significant
+    variant, and the number of lost regions (lost variants within kb merged)."""
+    unmapped = unmapped.copy()
+    if unmapped.empty:
+        unmapped["NEAREST_LEAD_KB"] = pd.Series(dtype=float)
+        unmapped["SIGNAL_LOST"] = pd.Series(dtype=bool)
+        return unmapped, 0
+
+    chr_col = find_column(leads.columns, ["SOURCE_CHROMOSOME", "#CHROM", "CHROM"]) if not leads.empty else None
+    pos_col = find_column(leads.columns, ["POS"]) if not leads.empty else None
+    by_chr = defaultdict(list)
+    if chr_col and pos_col:
+        for c, pos in zip(pd.to_numeric(leads[chr_col], errors="coerce"), pd.to_numeric(leads[pos_col], errors="coerce")):
+            if pd.notna(c) and pd.notna(pos):
+                by_chr[int(c)].append(int(pos))
+
+    nearest = []
+    for c, pos in zip(unmapped["CHR"].astype(int), unmapped["POS"].astype(int)):
+        lead_positions = by_chr.get(c)
+        nearest.append(min(abs(pos - x) for x in lead_positions) / 1000 if lead_positions else np.nan)
+    unmapped["NEAREST_LEAD_KB"] = np.round(nearest, 1)
+    unmapped["SIGNAL_LOST"] = ~(unmapped["NEAREST_LEAD_KB"] <= kb)
+
+    regions = 0
+    lost = unmapped[unmapped["SIGNAL_LOST"]].sort_values(["CHR", "POS"])
+    for _, group in lost.groupby("CHR"):
+        end = -1
+        for pos in group["POS"]:
+            if pos - kb * 1000 > end:
+                regions += 1
+            end = max(end, pos + kb * 1000)
+    return unmapped, regions
 
 
 # =============================================================================
@@ -1415,10 +1551,59 @@ def count_loci(leads: pd.DataFrame, window_kb: int) -> int:
     return n
 
 
+AUDIT_SIG_RATE_MIN = 0.8
+
+
+def as_int(value):
+    try:
+        value = float(value)
+        return None if np.isnan(value) else int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def audit_study(s: dict, gws_qc, n_leads: int, n_loci: int) -> tuple[str, list[str]]:
+    """CHECK (+ reasons) or OK for one clumped study."""
+    notes = []
+    full = "N_SIG_INPUT" in s and pd.notna(s.get("N_SIG_INPUT"))
+    n_sig = as_int(s.get("N_SIG_INPUT")) if full else as_int(gws_qc)
+    n_sig_mapped = as_int(s.get("N_SIG_MAPPED")) if full else as_int(s.get("N_INDEX_CANDIDATES_P_LE_P1"))
+
+    if not full:
+        notes.append("older Step05 output: no exclusion reasons (re-run with --force for the full audit)")
+    if not n_sig:
+        notes.append("no significant variant (P <= p1): nothing to clump")
+    elif n_sig_mapped is not None and n_sig_mapped / n_sig < AUDIT_SIG_RATE_MIN:
+        notes.append(f"significant-variant mapping rate {n_sig_mapped / n_sig:.1%} < {AUDIT_SIG_RATE_MIN:.0%}")
+    if n_sig and not n_leads:
+        notes.append("significant variants but no independent lead")
+    if as_int(s.get("N_SIG_REGIONS_LOST")):
+        notes.append(f"{as_int(s.get('N_SIG_REGIONS_LOST'))} significant region(s) with no lead "
+                     "(none of their significant variants is in the panel): signal lost")
+    if as_int(s.get("N_EXCLUDED_NOT_CHR1_22_P_LE_P1")):
+        notes.append(f"{as_int(s.get('N_EXCLUDED_NOT_CHR1_22_P_LE_P1')):,} significant variants outside chr1-22 "
+                     "are not clumped (LD panels are autosomal)")
+    if as_int(s.get("N_SIG_ALLELE_MISMATCH")) and n_sig and as_int(s.get("N_SIG_ALLELE_MISMATCH")) / n_sig > 0.05:
+        notes.append(f"{as_int(s.get('N_SIG_ALLELE_MISMATCH')):,} significant variants with alleles that differ "
+                     "from the panel (>5%): check build / strand")
+    status = "CHECK" if any(not n.startswith("older") for n in notes) else "OK"
+    return status, notes
+
+
 def stats_mode(args) -> None:
     P = project_paths(args)
-    banner(f"STEP 05 STATISTICS - {P['phenotype']} / {P['label']} ({P['code']})")
+    banner(f"STEP 05 AUDIT + STATISTICS - {P['phenotype']} / {P['label']} ({P['code']})")
+    print("Significant = P <= p1 (default 5e-8). Mapping = same chromosome, position and both alleles in the "
+          f"1000G {P['code']} panel.")
     rows = []
+
+    def fmt(value):
+        value = as_int(value)
+        return "-" if value is None else f"{value:,}"
+
+    def pct(a, b):
+        a, b = as_int(a), as_int(b)
+        return f"{a / b:.1%}" if a is not None and b else "-"
 
     for accession, qc_file in study_list(P):
         if clump_state(P, accession) != "DONE":
@@ -1433,48 +1618,106 @@ def stats_mode(args) -> None:
             q = pd.read_csv(qc_summary, sep="\t").iloc[0]
             gws = q.get("N_GENOME_WIDE_SIGNIFICANT")
 
-        mapped_gws = int(s.get("N_INDEX_CANDIDATES_P_LE_P1", 0))
+        n_leads = int(s.get("N_LEAD_VARIANTS") or 0)
+        n_loci = count_loci(leads, 1000)
+        status, notes = audit_study(s, gws, n_leads, n_loci)
+        full = "N_SIG_INPUT" in s
+        n_sig = s.get("N_SIG_INPUT") if full else gws
+        n_sig_mapped = s.get("N_SIG_MAPPED") if full else s.get("N_INDEX_CANDIDATES_P_LE_P1")
+
         row = {
             "STUDY_ACCESSION": accession,
+            "AUDIT": status,
+            "AUDIT_NOTES": "; ".join(notes),
             "N_GWAS_VARIANTS": s.get("N_GWAS_ROWS"),
+            "N_EXCLUDED_NOT_CHR1_22": s.get("N_EXCLUDED_NOT_CHR1_22", ""),
+            "N_EXCLUDED_MISSING_POS_OR_P": s.get("N_EXCLUDED_MISSING_POS_OR_P", ""),
+            "N_EXCLUDED_DUPLICATE_RECORDS": s.get("N_EXCLUDED_DUPLICATE_RECORDS", ""),
             "N_P_LE_P2": s.get("N_P_LE_P2"),
             "N_MAPPED_TO_1000G": s.get("N_REFERENCE_MAPPED"),
             "MAPPING_RATE": round(float(s["MAPPING_RATE"]), 4) if pd.notna(s.get("MAPPING_RATE")) else "",
             "N_NOT_IN_1000G": s.get("N_NOT_IN_REFERENCE", ""),
             "N_ALLELE_MISMATCH": s.get("N_ALLELE_MISMATCH", ""),
-            "N_GENOME_WIDE_SIGNIFICANT": gws if gws is not None else "",
-            "N_GWS_MAPPED": mapped_gws,
-            "N_GWS_NOT_IN_PANEL": int(gws) - mapped_gws if gws is not None and pd.notna(gws) else "",
-            "N_LEAD_VARIANTS": s.get("N_LEAD_VARIANTS"),
-            "N_LOCI_1MB": count_loci(leads, 1000),
+            "N_AMBIGUOUS": s.get("N_AMBIGUOUS", ""),
+            "N_NO_ALLELES": s.get("N_NO_ALLELES", ""),
+            "N_DUPLICATE_PANEL_ID": s.get("N_DUPLICATE_PANEL_ID", ""),
+            "N_GENOME_WIDE_SIGNIFICANT": n_sig if n_sig is not None else "",
+            "N_GWS_MAPPED": n_sig_mapped,
+            "GWS_MAPPING_RATE": pct(n_sig_mapped, n_sig),
+            "N_GWS_NOT_IN_1000G": s.get("N_SIG_NOT_IN_REFERENCE", ""),
+            "N_GWS_ALLELE_MISMATCH": s.get("N_SIG_ALLELE_MISMATCH", ""),
+            "N_GWS_AMBIGUOUS": s.get("N_SIG_AMBIGUOUS", ""),
+            "N_GWS_NO_ALLELES": s.get("N_SIG_NO_ALLELES", ""),
+            "N_GWS_DUPLICATE_PANEL_ID": s.get("N_SIG_DUPLICATE_PANEL_ID", ""),
+            "N_GWS_NOT_CHR1_22": s.get("N_EXCLUDED_NOT_CHR1_22_P_LE_P1", ""),
+            "N_GWS_UNMAPPED_NO_LEAD_NEARBY": s.get("N_SIG_UNMAPPED_NO_LEAD_NEARBY", ""),
+            "N_GWS_REGIONS_LOST": s.get("N_SIG_REGIONS_LOST", ""),
+            "N_LEAD_VARIANTS": n_leads,
+            "N_LOCI_1MB": n_loci,
             "P1": s.get("P1"), "P2": s.get("P2"), "R2": s.get("R2"), "KB": s.get("KB"),
         }
         rows.append(row)
 
         print()
-        print(f"{accession}: {int(row['N_LEAD_VARIANTS']):,} independent leads in {row['N_LOCI_1MB']} loci "
-              f"(+-1 Mb merged)")
-        print(f"   P<=p2 variants {int(row['N_P_LE_P2']):,} | mapped to 1000G {int(row['N_MAPPED_TO_1000G']):,} "
-              f"({row['MAPPING_RATE']}) | not in panel {row['N_NOT_IN_1000G']} | allele mismatch "
-              f"{row['N_ALLELE_MISMATCH']}")
-        if row["N_GWS_NOT_IN_PANEL"] not in ("", 0):
-            print(f"   ! {row['N_GWS_NOT_IN_PANEL']} genome-wide significant variants are not in the "
-                  f"1000G {P['code']} panel (rare / absent / allele mismatch) and cannot lead a clump")
+        print(f"{accession}: {n_leads:,} independent leads in {n_loci} loci (+-1 Mb merged)   AUDIT {status}")
+        print(f"   Input        : {fmt(s.get('N_GWAS_ROWS'))} GWAS variants | excluded: not chr1-22 "
+              f"{fmt(row['N_EXCLUDED_NOT_CHR1_22'])} | missing POS/P {fmt(row['N_EXCLUDED_MISSING_POS_OR_P'])} | "
+              f"duplicate records {fmt(row['N_EXCLUDED_DUPLICATE_RECORDS'])}")
+        print(f"   P <= p2      : {fmt(row['N_P_LE_P2'])} -> mapped {fmt(row['N_MAPPED_TO_1000G'])} "
+              f"({pct(row['N_MAPPED_TO_1000G'], row['N_P_LE_P2'])}) | not in panel {fmt(row['N_NOT_IN_1000G'])} | "
+              f"allele mismatch {fmt(row['N_ALLELE_MISMATCH'])} | ambiguous {fmt(row['N_AMBIGUOUS'])} | "
+              f"no alleles {fmt(row['N_NO_ALLELES'])} | duplicate panel ID {fmt(row['N_DUPLICATE_PANEL_ID'])}")
+        print(f"   Significant  : {fmt(n_sig)} -> mapped {fmt(n_sig_mapped)} ({row['GWS_MAPPING_RATE']}) | "
+              f"not in panel {fmt(row['N_GWS_NOT_IN_1000G'])} | allele mismatch {fmt(row['N_GWS_ALLELE_MISMATCH'])} | "
+              f"ambiguous {fmt(row['N_GWS_AMBIGUOUS'])} | no alleles {fmt(row['N_GWS_NO_ALLELES'])} | "
+              f"duplicate panel ID {fmt(row['N_GWS_DUPLICATE_PANEL_ID'])} | outside chr1-22 {fmt(row['N_GWS_NOT_CHR1_22'])}")
+        print(f"   Leads        : {n_leads:,} independent (r2 < {s.get('R2')}, {s.get('KB')} kb) from "
+              f"{fmt(n_sig_mapped)} mapped significant variants; the others are in LD with a lead")
+
+        unmapped_file = out / "unmapped_significant_variants.tsv"
+        if unmapped_file.is_file():
+            unmapped = pd.read_csv(unmapped_file, sep="\t", low_memory=False)
+            n_lost = int(unmapped["SIGNAL_LOST"].astype(str).eq("True").sum()) if len(unmapped) else 0
+            print(f"   Missing match: {len(unmapped):,} significant variants have no 1000G match; {n_lost:,} of them "
+                  f"have no lead within {s.get('KB')} kb ({fmt(row['N_GWS_REGIONS_LOST'])} region(s) lost)")
+            if len(unmapped):
+                show = unmapped.sort_values(["SIGNAL_LOST", "P"], ascending=[False, True]).head(5)
+                for _, r in show.iterrows():
+                    where = ("SIGNAL LOST" if str(r["SIGNAL_LOST"]) == "True"
+                             else f"lead {r['NEAREST_LEAD_KB']} kb away")
+                    print(f"      {r['SOURCE_ID']} chr{r['CHR']}:{r['POS']} {r['EA']}/{r['NEA']} P={r['P']:.2g} "
+                          f"{r['REASON']} (panel: {r['PANEL_ALLELES_AT_POS'] if pd.notna(r['PANEL_ALLELES_AT_POS']) else '-'}) "
+                          f"- {where}")
+                print(f"      all: {unmapped_file}")
+        else:
+            print("   Missing match: not recorded (older Step05 output; re-run with --force)")
+
+        for note in notes:
+            print(f"   ! {note}")
+
         if not leads.empty:
             id_col = find_column(leads.columns, ["ID"])
             chr_col = find_column(leads.columns, ["#CHROM", "CHROM", "CHR"])
             pos_col = find_column(leads.columns, ["POS"])
             top = leads.sort_values("P").head(5)
-            print("   top leads: " + "; ".join(
+            print("   top leads    : " + "; ".join(
                 f"{r[id_col]} chr{r[chr_col]}:{r[pos_col]} P={r['P']:.2g}" for _, r in top.iterrows()))
 
     if not rows:
         print("No finished studies yet (see --status).")
         return
 
+    table = pd.DataFrame(rows)
     output = P["output_root"] / "clumping_stats.tsv"
-    pd.DataFrame(rows).to_csv(output, sep="\t", index=False)
-    print(f"\nTable: {output}")
+    table.to_csv(output, sep="\t", index=False)
+
+    banner("AUDIT SUMMARY")
+    show = table[["STUDY_ACCESSION", "AUDIT", "N_GENOME_WIDE_SIGNIFICANT", "N_GWS_MAPPED", "GWS_MAPPING_RATE",
+                  "N_GWS_REGIONS_LOST", "N_LEAD_VARIANTS", "N_LOCI_1MB"]].copy()
+    print(show.astype(object).where(show.notna(), "").to_string(index=False))
+    flagged = table[table["AUDIT"] == "CHECK"]
+    print(f"\n{len(flagged)} of {len(table)} studies need a look (AUDIT CHECK); reasons in AUDIT_NOTES.")
+    print(f"Table: {output}")
 
 
 def read_association(qc_file: Path) -> pd.DataFrame:
