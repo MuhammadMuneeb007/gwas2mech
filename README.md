@@ -326,8 +326,12 @@ installed automatically into the Python that runs the script, i.e. `envs/pipelin
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR
 sbatch Step02_Download_GWAS_parkinson_s_disease_european.sh
 
-# only to re-run QC as its own array (e.g. after a QC failure); not needed normally
+# QC ONLY, as its own array, on the files already downloaded (nothing is downloaded again):
+# finished studies are skipped, QC from an older pipeline version is redone,
+# --force-qc redoes every study
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --qc
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --qc --force-qc
+sbatch Step02_QC_parkinson_s_disease_european.sh
 
 # downloaded / partial / pending and QC done / failed / pending, per study (read-only)
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --status
@@ -341,9 +345,31 @@ envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --pmid-to-doi 34737426 33987465
 
 # study N of the download manifest end to end on this machine: download (if needed) + QC
-# (only the planner has to have run; on a login node wrap it in srun)
+# (only the planner has to have run; on a login node wrap it in srun; --force-qc redoes QC)
 envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
 ```
+
+**Choosing studies by hand.** `--exclude` leaves studies out and `--include` forces them in. Both
+take accessions or a file with one accession per line, and are applied by the planner before the
+study numbers are given, so the SLURM array and `--index` stay consistent:
+
+```bash
+envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR \
+    --exclude GCST90079817 drop.txt --include GCST90473307
+```
+
+An included study bypasses the phenotype, summary-statistics and strict-ancestry filters and
+`--max-studies` (a warning is printed when its trait or ancestry does not match); it still needs a
+harmonised file. The manifest column `SELECTION` is `RANKED` or `INCLUDED_BY_USER`, and
+`study_selection.tsv` records `EXCLUDED_BY_USER` / `INCLUDED_BY_USER` in `USER_OVERRIDE`.
+
+**Checks in `--stats`.** Every study is checked and flagged (per study, in a final CHECKS section
+and in the `FLAGS` column of `GWAS_publication_stats.tsv`): `OLD_QC`, `NO_EFFECT_SIZE` (QC
+`WARNING`: no BETA+SE or Z), `DOWNLOAD_INCOMPLETE`, `QC_FAILED`, `QC_PENDING`, `LAMBDA_LOW` (< 0.9),
+`LAMBDA_HIGH` (> 1.2), `NO_AUTOSOMES` (e.g. X-only studies; the LD panels are chr1–22),
+`FEW_CHROMOSOMES`, `NO_SIGNIFICANT`, `LOW_POWER` (N_eff < 2,000), `PROXY_PHENOTYPE` (family history,
+medication use, proxy cases), `TYPE_UNKNOWN`, `NEEDS_REVIEW`, `DUPLICATE_RESULTS` (identical
+results to another study), `NO_PMID`, `INCLUDED_BY_USER`.
 
 Options: `--alias "Parkinson disease"` (extra search term, repeatable), `--max-studies 5`,
 `--refresh` (re-download GWAS Catalog metadata), and `--partition --qos --account --cpus --mem
@@ -370,7 +396,22 @@ GWASLab columns (`SNPID`, `rsID`, `OR`, `STATUS`, ...):
 | `Z` | BETA / SE, otherwise signed from P and the effect direction |
 
 How many values were derived (`N_BETA_FROM_OR`, `N_SE_FROM_OR_CI`, `N_Z_FROM_P`, `N_SOURCE`,
-`N_MISSING_Z`, ...) is recorded in `<GCST>_QC_summary.tsv`.
+`N_MISSING_Z`, ...) is recorded in `<GCST>_QC_summary.tsv`, together with the variants QC removed,
+per reason (counted inside GWASLab's own steps, so they add up to `N_REMOVED`):
+
+| Column | Removed because |
+|---|---|
+| `N_REMOVED_BAD_CHR` | missing / invalid chromosome |
+| `N_REMOVED_BAD_POS` | missing / invalid position |
+| `N_REMOVED_BAD_ALLELES` | missing / invalid alleles |
+| `N_REMOVED_INVALID_STATS` | missing / out-of-range P, BETA, SE, Z, N, OR, ... |
+| `N_REMOVED_DUP_SNPID` `N_REMOVED_DUP_RSID` `N_REMOVED_DUP_CHR_POS_ALLELES` | duplicate variant (the one with the best P is kept) |
+| `N_REMOVED_MULTIALLELIC` | multiallelic site, same CHR:POS (best P kept) |
+| `N_REMOVED_OTHER_GWASLAB` | any other GWASLab step |
+| `N_MISSING_P_REMOVED` `N_INVALID_P_REMOVED` | P missing / outside 0–1 after GWASLab |
+
+The QC log prints the same breakdown, and `--stats` shows it per study (`Removed :` line) and in
+`GWAS_publication_stats.tsv`.
 
 The study metadata is in `qc/<GCST>/<GCST>_study_metadata.tsv` (and `.json`), and for all studies in
 `01_gwas_catalog/<phenotype>/<ancestry>/GWAS_study_metadata.tsv` (updated by every Step02 run):

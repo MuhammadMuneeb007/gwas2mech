@@ -22,10 +22,20 @@ Step03_QC_One_GWAS.py, logic unchanged) plus status / statistics:
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR
     sbatch Step02_Download_GWAS_parkinson_s_disease_european.sh
 
+    #    Choose studies by hand (accessions, or a file with one per line):
+    #    --exclude leaves them out; --include forces them in (bypasses the
+    #    phenotype / summary-statistics / ancestry filters and --max-studies)
+    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR \
+        --exclude GCST90079817 --include GCST90473307
+
     # 2. QC is automatic: each array task downloads ONE GWAS and then runs the
-    #    GWASLab QC on it. --qc is only needed to re-run QC as its own array
-    #    (e.g. after a QC failure):
+    #    GWASLab QC on it. --qc re-runs QC ONLY, as its own array, on the files
+    #    already downloaded (nothing is downloaded again). Finished studies are
+    #    skipped, QC from an older pipeline version is redone, and --force-qc
+    #    redoes every study:
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --qc
+    envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --qc --force-qc
+    sbatch Step02_QC_parkinson_s_disease_european.sh
 
     # Progress: downloaded / partial / pending, QC done / failed / pending
     envs/pipeline/bin/python Step02_Plan_QC_GWAS.py --phenotype "Parkinson's disease" --ancestry EUR --status
@@ -73,7 +83,10 @@ Outputs (read by Step04 / Step05):
                   <GCST>_GRCh38_significant.tsv.gz
                   <GCST>_study_metadata.tsv/.json
                   <GCST>_QC_summary.tsv/.json (QC_STATUS, CLUMPING_READY, SUSIE_READY,
-                      PHENOTYPE_TYPE, N_CASES, N_CONTROLS, N_EFF, EFFECT_TYPE, derivation counts)
+                      PHENOTYPE_TYPE, N_CASES, N_CONTROLS, N_EFF, EFFECT_TYPE, derivation counts,
+                      variants removed per reason: N_REMOVED_BAD_CHR / _BAD_POS / _BAD_ALLELES /
+                      _INVALID_STATS / _DUP_SNPID / _DUP_RSID / _DUP_CHR_POS_ALLELES /
+                      _MULTIALLELIC / _OTHER_GWASLAB, N_MISSING_P_REMOVED, N_INVALID_P_REMOVED)
 
 Binary vs Continuous is decided per STUDY (the same disease can be a diagnosis
 or a score); conflicting or insufficient evidence is never guessed.
@@ -189,11 +202,46 @@ GWASLAB_RANGE_CHECK = [
     "OR", "HR", "STATUS",
 ]
 
+# Variants removed by QC, per reason (QC summary; --stats).
+REMOVAL_REASONS = [
+    ("N_REMOVED_BAD_CHR", "missing / invalid chromosome"),
+    ("N_REMOVED_BAD_POS", "missing / invalid position"),
+    ("N_REMOVED_BAD_ALLELES", "missing / invalid alleles"),
+    ("N_REMOVED_INVALID_STATS", "missing / out-of-range statistics (P, BETA, SE, Z, N, OR ...)"),
+    ("N_REMOVED_DUP_SNPID", "duplicate variant ID (SNPID), best P kept"),
+    ("N_REMOVED_DUP_RSID", "duplicate rsID, best P kept"),
+    ("N_REMOVED_DUP_CHR_POS_ALLELES", "duplicate CHR:POS:EA:NEA, best P kept"),
+    ("N_REMOVED_MULTIALLELIC", "multiallelic site (same CHR:POS), best P kept"),
+    ("N_REMOVED_OTHER_GWASLAB", "other GWASLab steps"),
+    ("N_MISSING_P_REMOVED", "missing P (after GWASLab)"),
+    ("N_INVALID_P_REMOVED", "P outside 0-1 (after GWASLab)"),
+]
+
 # Per-study metadata for fine-mapping (<GCST>_study_metadata.tsv, GWAS_study_metadata.tsv).
 STUDY_METADATA_COLUMNS = [
     "GCST_ID", "PHENOTYPE_TYPE", "N_CASES", "N_CONTROLS", "N_TOTAL", "N_EFF",
     "ANCESTRY", "GENOME_BUILD", "EFFECT_TYPE",
 ]
+
+
+def accession_list(values):
+    """GCST accessions from --include / --exclude: accessions (space or comma
+    separated) or files with one accession per line."""
+
+    found = []
+
+    for value in values or []:
+
+        path = Path(value)
+        text = path.read_text(encoding="utf-8") if path.is_file() else str(value)
+        accessions = [x.upper() for x in re.findall(r"GCST\d+", text, flags=re.I)]
+
+        if not accessions:
+            raise SystemExit(f"No GCST accession in {value!r}")
+
+        found += [x for x in accessions if x not in found]
+
+    return found
 
 
 def effective_n(cases, controls):
@@ -1771,6 +1819,7 @@ def new_selection_table(
                 "ELIGIBLE": False,
                 "EXCLUSION_REASON": "",
                 "RANK": "",
+                "USER_OVERRIDE": "",
             }
         )
 
@@ -1780,6 +1829,7 @@ def new_selection_table(
         "ANCESTRY_CATEGORIES", "ANCESTRY_MATCH", "INITIAL_SAMPLE_SIZE",
         "SUMMARY_STATS_AVAILABLE", "HARMONISED_FILE_AVAILABLE",
         "DOWNLOAD_URL", "ELIGIBLE", "EXCLUSION_REASON", "RANK",
+        "USER_OVERRIDE",
     ]
 
     selection = pd.DataFrame(
@@ -1934,6 +1984,16 @@ def _plan(args, state):
             "--max-parallel must be >= 0 (0 = no throttle)."
         )
 
+    included = accession_list(args.include)
+    excluded = accession_list(args.exclude)
+    both = sorted(set(included) & set(excluded))
+
+    if both:
+
+        raise RuntimeError(
+            f"Both --include and --exclude: {', '.join(both)}"
+        )
+
     ancestry_name = canonical_ancestry(
         args.ancestry
     )
@@ -1997,6 +2057,8 @@ def _plan(args, state):
     state["ANCESTRY_CODE"] = ancestry_code_value
     state["SEARCH_TERMS"] = terms
     state["MAX_STUDIES"] = args.max_studies
+    state["USER_INCLUDED"] = included
+    state["USER_EXCLUDED"] = excluded
 
     studies_file = (
         cache
@@ -2306,53 +2368,31 @@ def _plan(args, state):
     )
 
     eligible = []
+    n_ranked = 0
+    seen = set()
 
-    for _, row in candidates.iterrows():
+    def check_study(row, accession, forced):
+        """Harmonised file + phenotype type of one study; eligible ones are kept."""
 
-        accession = str(
-            row[
-                "STUDY ACCESSION"
-            ]
-        )
+        selection = state["selection"]
+        print(f"{accession}: " + ("[--include] " if forced else ""), end="", flush=True)
 
-        print(
-            f"{accession}: ",
-            end="",
-            flush=True
-        )
-
-        result = find_harmonised_file(
-            session,
-            accession
-        )
+        result = find_harmonised_file(session, accession)
 
         if result is None:
+            print("no harmonised file")
+            selection.at[accession, "HARMONISED_FILE_AVAILABLE"] = False
+            selection.at[accession, "EXCLUSION_REASON"] = "NO_HARMONISED_FILE"
+            return False
 
-            print(
-                "no harmonised file"
-            )
+        print(result["FILENAME"])
 
-            state["selection"].at[accession, "HARMONISED_FILE_AVAILABLE"] = False
-            state["selection"].at[accession, "EXCLUSION_REASON"] = "NO_HARMONISED_FILE"
+        selection.at[accession, "HARMONISED_FILE_AVAILABLE"] = True
+        selection.at[accession, "DOWNLOAD_URL"] = result["URL"]
+        selection.at[accession, "ELIGIBLE"] = True
+        selection.at[accession, "EXCLUSION_REASON"] = ""
 
-            continue
-
-        print(
-            result[
-                "FILENAME"
-            ]
-        )
-
-        state["selection"].at[accession, "HARMONISED_FILE_AVAILABLE"] = True
-        state["selection"].at[accession, "DOWNLOAD_URL"] = result["URL"]
-        state["selection"].at[accession, "ELIGIBLE"] = True
-
-        trait = study_trait_information(
-            session,
-            accession,
-            result,
-            row
-        )
+        trait = study_trait_information(session, accession, result, row)
 
         print(
             f"    phenotype: {trait['PHENOTYPE_TYPE']} ({trait['CLASSIFICATION_CONFIDENCE']})"
@@ -2365,26 +2405,82 @@ def _plan(args, state):
         )
         print(f"      evidence: {trait['CLASSIFICATION_EVIDENCE'] or '-'}")
 
-        eligible.append(
-            {
-                "ROW":
-                    row,
+        eligible.append({
+            "ROW": row,
+            "DOWNLOAD": result,
+            "TRAIT": trait,
+            "SELECTION": "INCLUDED_BY_USER" if forced else "RANKED",
+        })
 
-                "DOWNLOAD":
-                    result,
+        return True
 
-                "TRAIT":
-                    trait,
-            }
+    # Ranked studies (--exclude ones left out; --include ones never cut by --max-studies).
+    for _, row in candidates.iterrows():
+
+        accession = str(row["STUDY ACCESSION"])
+
+        if accession in excluded:
+            print(f"{accession}: left out (--exclude)")
+            state["selection"].at[accession, "EXCLUSION_REASON"] = "EXCLUDED_BY_USER"
+            state["selection"].at[accession, "USER_OVERRIDE"] = "EXCLUDED_BY_USER"
+            continue
+
+        forced = accession in included
+
+        if args.max_studies > 0 and n_ranked >= args.max_studies and not forced:
+            continue
+
+        seen.add(accession)
+
+        if forced:
+            state["selection"].at[accession, "USER_OVERRIDE"] = "INCLUDED_BY_USER"
+
+        if check_study(row, accession, forced) and not forced:
+            n_ranked += 1
+
+    # --include studies that did not pass the phenotype / summary-statistics /
+    # ancestry filters: taken from the GWAS Catalog table as they are.
+    for accession in included:
+
+        if accession in seen:
+            continue
+
+        match = studies[studies["STUDY ACCESSION"].astype(str).str.upper() == accession]
+
+        if match.empty:
+            print(f"{accession}: --include, but not in the GWAS Catalog studies table - skipped")
+            continue
+
+        row = match.iloc[0].copy()
+        info = ancestry_info.get(str(row["STUDY ACCESSION"]), {})
+        accession = str(row["STUDY ACCESSION"])
+
+        row["MATCH_SCORE"] = (
+            int(state["selection"].at[accession, "MATCH_SCORE"])
+            if accession in state["selection"].index else 0
         )
+        row["ANCESTRY_N"] = int(info.get("ANCESTRY_N", 0))
+        row["ANCESTRY_CATEGORIES"] = info.get("ANCESTRY_CATEGORIES", "")
+        row["ESTIMATED_INITIAL_N"] = estimate_sample_size(row.get("INITIAL SAMPLE SIZE", ""))
+        row["RANKING_N"] = max(row["ANCESTRY_N"], row["ESTIMATED_INITIAL_N"])
 
-        if (
-            args.max_studies > 0
-            and len(eligible)
-            >= args.max_studies
-        ):
+        if accession not in state["selection"].index:
+            state["selection"] = pd.concat([
+                state["selection"],
+                new_selection_table(pd.DataFrame([row]), phenotype, ancestry_name, ancestry_info),
+            ])
 
-            break
+        state["selection"].at[accession, "USER_OVERRIDE"] = "INCLUDED_BY_USER"
+
+        if not info.get("STRICT_MATCH"):
+            print(f"{accession}: WARNING --include: ancestry "
+                  f"'{info.get('ANCESTRY_CATEGORIES') or 'not reported'}' is not only {ancestry_name}; "
+                  f"the LD reference stays {ancestry_code_value}")
+        if not row["MATCH_SCORE"]:
+            print(f"{accession}: WARNING --include: trait '{row.get('DISEASE/TRAIT', '')}' "
+                  f"does not match '{phenotype}'")
+
+        check_study(row, accession, True)
 
     if not eligible:
 
@@ -2467,6 +2563,12 @@ def _plan(args, state):
                             "MATCH_SCORE"
                         ]
                     ),
+
+                # RANKED, or INCLUDED_BY_USER (--include)
+                "SELECTION":
+                    item[
+                        "SELECTION"
+                    ],
 
                 "DISEASE_TRAIT":
                     row.get(
@@ -2977,6 +3079,89 @@ def standardize_finemap_columns(
     ]
 
     return pd.concat([out, data[extra]], axis=1), info
+
+
+# =============================================================================
+# GWASLAB BASIC CHECK WITH VARIANTS REMOVED PER REASON
+# =============================================================================
+
+# GWASLab step function -> what its removals mean (gwaslab.qc.qc_pipeline).
+GWASLAB_STEPS = {
+    "_fix_ID": "N_REMOVED_OTHER_GWASLAB",
+    "_fix_chr": "N_REMOVED_BAD_CHR",
+    "_fix_pos": "N_REMOVED_BAD_POS",
+    "_fix_allele": "N_REMOVED_BAD_ALLELES",
+    "_sanity_check_stats": "N_REMOVED_INVALID_STATS",
+    "_parallelize_normalize_allele": "N_REMOVED_OTHER_GWASLAB",
+    "_remove_dup": "REMOVE_DUP",
+}
+
+# remove_dup log lines ("-Removed variants <reason>: <count>").
+REMOVE_DUP_REASONS = {
+    "based on SNPID": "N_REMOVED_DUP_SNPID",
+    "based on rsID": "N_REMOVED_DUP_RSID",
+    "based on CHR,POS,EA and NEA": "N_REMOVED_DUP_CHR_POS_ALLELES",
+    "multiallelic variants": "N_REMOVED_MULTIALLELIC",
+}
+
+
+def basic_check_with_counts(ss, **kwargs):
+    """ss.basic_check(**kwargs) - the same GWASLab steps in the same order - while
+    counting the variants each step removes (the step functions are wrapped, not
+    replaced). Returns {N_REMOVED_<reason>: count} for the GWASLab part."""
+
+    counts = {key: 0 for key, _ in REMOVAL_REASONS[:9]}
+    counts["REMOVE_DUP"] = 0
+    originals = {}
+
+    try:
+        import gwaslab.qc.qc_pipeline as pipeline
+    except ImportError:
+        pipeline = None
+
+    def counted(name, function):
+
+        def wrapper(*args, **kw):
+
+            obj = args[0] if args else kw.get("sumstats_obj")
+            before = len(obj.data)
+            log_start = len(getattr(ss.log, "log_text", ""))
+            result = function(*args, **kw)
+            after = len(result) if isinstance(result, pd.DataFrame) else len(obj.data)
+            counts[GWASLAB_STEPS[name]] += before - after
+
+            if name == "_remove_dup":
+                text = getattr(ss.log, "log_text", "")[log_start:]
+                for reason, key in REMOVE_DUP_REASONS.items():
+                    counts[key] += sum(
+                        int(x) for x in re.findall(rf"-Removed variants {re.escape(reason)}: (\d+)", text)
+                    )
+
+            return result
+
+        return wrapper
+
+    for name in GWASLAB_STEPS:
+        if pipeline is not None and callable(getattr(pipeline, name, None)):
+            originals[name] = getattr(pipeline, name)
+            setattr(pipeline, name, counted(name, originals[name]))
+
+    n_before = len(ss.data)
+
+    try:
+        ss.basic_check(**kwargs)
+    finally:
+        for name, function in originals.items():
+            setattr(pipeline, name, function)
+
+    # remove_dup removals the log did not explain, and everything if the steps
+    # could not be wrapped, count as "other".
+    explained = sum(counts[key] for key in REMOVE_DUP_REASONS.values())
+    counts["N_REMOVED_OTHER_GWASLAB"] += max(counts.pop("REMOVE_DUP") - explained, 0)
+    total = n_before - len(ss.data)
+    counts["N_REMOVED_OTHER_GWASLAB"] += total - sum(counts.values())
+
+    return counts
 
 
 # =============================================================================
@@ -3841,6 +4026,9 @@ def planner_mode(args):
         max_parallel=qc_resources["max_parallel"],
     )
 
+    # --force-qc: QC again even where it is complete.
+    force_line = "export GWAS_QC_FORCE=1\n" if args.force_qc else ""
+
     bash_text = f"""#!/bin/bash
 {sbatch_header}
 
@@ -3849,7 +4037,7 @@ set -euo pipefail
 cd "{working_directory}"
 
 export GWAS_QC_MANIFEST="{qc_manifest_file}"
-
+{force_line}
 echo "=============================================================="
 echo "STEP 03 - GWASLAB QC"
 echo "=============================================================="
@@ -3978,6 +4166,19 @@ echo "=============================================================="
 
     print(
         f"  sbatch {bash_file.name}"
+    )
+
+    print()
+
+    print(
+        "QC only: the files already in raw/ are used, nothing is downloaded."
+    )
+
+    print(
+        "--force-qc: every study is QC'd again (outputs overwritten)."
+        if args.force_qc else
+        "Studies already QC'd are skipped (--force-qc redoes them); "
+        "QC from an older pipeline version is redone."
     )
 
     print()
@@ -4221,14 +4422,21 @@ def worker_mode():
     # do nothing.
     # -------------------------------------------------------------------------
 
-    if (
+    complete = (
         full_output.exists()
         and full_output.stat().st_size > 0
         and significant_output.exists()
         and significant_output.stat().st_size > 0
         and summary_tsv.exists()
         and summary_tsv.stat().st_size > 0
-    ):
+    )
+
+    # --force-qc redoes finished studies; QC from an older pipeline version
+    # (no standardised fine-mapping columns: no N_SOURCE) is always redone.
+    force = os.environ.get("GWAS_QC_FORCE", "") == "1"
+    current = complete and "N_SOURCE" in pd.read_csv(summary_tsv, sep="\t", nrows=0).columns
+
+    if complete and current and not force:
 
         banner(
             "GWAS ALREADY COMPLETE"
@@ -4239,10 +4447,17 @@ def worker_mode():
         )
 
         print(
-            "Skipping QC."
+            "Skipping QC (--force-qc redoes it)."
         )
 
         return
+
+    if complete:
+
+        print(
+            f"{accession}: re-running QC "
+            + ("(--force-qc)" if force else "(outputs from an older pipeline version)")
+        )
 
     # -------------------------------------------------------------------------
     # Verify raw GWAS
@@ -4371,7 +4586,8 @@ def worker_mode():
             "GWASLAB BASIC CHECK"
         )
 
-        ss.basic_check(
+        removal = basic_check_with_counts(
+            ss,
             remove=True,
             remove_dup=True,
             normalize=True,
@@ -4871,6 +5087,9 @@ def worker_mode():
             "N_INVALID_P_REMOVED":
                 n_invalid_p,
 
+            # Variants removed per reason (GWASLab steps).
+            **removal,
+
             "N_GENOME_WIDE_SIGNIFICANT":
                 n_significant,
 
@@ -5031,6 +5250,12 @@ def worker_mode():
             f"{n_before - n_after:,}"
         )
 
+        removed_by_reason = {**removal, "N_MISSING_P_REMOVED": n_missing_p, "N_INVALID_P_REMOVED": n_invalid_p}
+
+        for key, label in REMOVAL_REASONS:
+            if removed_by_reason.get(key):
+                print(f"    {removed_by_reason[key]:>12,}  {label}")
+
         print(
             f"Genome-wide significant : "
             f"{n_significant:,}"
@@ -5183,9 +5408,13 @@ def direct_index_mode(args):
     single = P["analysis"] / f".index_{args.index}_qc_manifest.tsv"
     pd.DataFrame([qc_row]).to_csv(single, sep="\t", index=False)
 
-    saved = {k: os.environ.get(k) for k in ("SLURM_ARRAY_TASK_ID", "GWAS_QC_MANIFEST")}
+    saved = {k: os.environ.get(k) for k in ("SLURM_ARRAY_TASK_ID", "GWAS_QC_MANIFEST", "GWAS_QC_FORCE")}
     os.environ["SLURM_ARRAY_TASK_ID"] = "1"
     os.environ["GWAS_QC_MANIFEST"] = str(single)
+    if args.force_qc:
+        os.environ["GWAS_QC_FORCE"] = "1"
+    else:
+        os.environ.pop("GWAS_QC_FORCE", None)
 
     try:
         worker_mode()
@@ -5511,6 +5740,8 @@ def status_mode(args):
         print("QC for the downloaded GWAS (finished studies are skipped):")
         print(f"  {base} --qc")
         print(f"  sbatch Step02_QC_{P['p_slug']}_{P['a_slug']}.sh")
+    if downloads.get("DOWNLOADED", 0):
+        print(f"Redo QC for every downloaded GWAS (no new download): {base} --qc --force-qc")
     if not (downloads.get("PENDING", 0) or downloads.get("PARTIAL", 0) or qcs.get("PENDING", 0) or qcs.get("FAILED", 0)):
         print("Every study is downloaded and QC'd.")
         print(f"Publication table: {base} --stats")
@@ -5656,6 +5887,7 @@ def stats_mode(args):
         # Binary / continuous from the planner (API + sumstats metadata).
         r.update(normalise_trait(manifest_trait(m), accession))
         r["PUBMEDID"] = clean_pmid(r.get("PUBMEDID") or m.get("PUBMEDID", ""))
+        r["SELECTION"] = m.get("SELECTION", "")
         r["DOI"] = m.get("DOI", "") or dois.get(r["PUBMEDID"], "")
 
         s = study_state(P, m)
@@ -5679,6 +5911,7 @@ def stats_mode(args):
                 "EFFECT_TYPE": summary.get("EFFECT_TYPE", r["EFFECT_TYPE"]),
                 "N_SOURCE": summary.get("N_SOURCE", ""),
                 "N_MISSING_Z": summary.get("N_MISSING_Z", ""),
+                **{key: summary.get(key, "") for key, _ in REMOVAL_REASONS},
                 "AVAILABLE_FIELDS": ", ".join(k[4:] for k, v in summary.items()
                                               if k.startswith("HAS_") and str(v) == "True"),
             })
@@ -5727,8 +5960,9 @@ def stats_mode(args):
     print()
     print("Codes are in the FLAGS column of the full table.")
     if any(code == "OLD_QC" for r in rows for code, _ in r["_CHECKS"]):
-        print(f"OLD_QC: delete {P['qc']}/<GCST>/ for those studies, then re-run the download + QC "
-              "(sbatch the Step02 download script, or --index N) - finished QC is otherwise skipped.")
+        base = f"envs/pipeline/bin/python {Path(__file__).name} --phenotype \"{P['phenotype']}\" --ancestry {P['code']}"
+        print(f"OLD_QC: {base} --qc  then  sbatch Step02_QC_{P['p_slug']}_{P['a_slug']}.sh "
+              "(QC only, no new download; older outputs are redone automatically)")
 
 
 # Trait wording of PROXY phenotypes (family history, medication use, ...).
@@ -5775,7 +6009,8 @@ def add_study_checks(rows):
             checks.append(("QC_PENDING", "downloaded but not QC'd yet"))
 
         if r["_HAS_SUMMARY"] and not r["_NEW_QC"]:
-            checks.append(("OLD_QC", "QC made by an older version (no N_SOURCE / Z): delete its QC folder and re-run"))
+            checks.append(("OLD_QC", "QC made by an older version (no N_SOURCE / Z): re-run QC with --qc "
+                                     "(older outputs are redone automatically)"))
         if r.get("QC_STATUS") == "WARNING":
             checks.append(("NO_EFFECT_SIZE", "no BETA+SE and no Z: clumping only, cannot be fine-mapped"))
 
@@ -5817,6 +6052,9 @@ def add_study_checks(rows):
 
         if not r.get("PUBMEDID"):
             checks.append(("NO_PMID", "no PubMed ID in the GWAS Catalog"))
+
+        if r.get("SELECTION") == "INCLUDED_BY_USER":
+            checks.append(("INCLUDED_BY_USER", "forced in with --include (phenotype / ancestry filters bypassed)"))
 
         r["_CHECKS"] = checks
         r["FLAGS"] = ",".join(code for code, _ in checks)
@@ -5860,6 +6098,14 @@ def print_study(r):
         print(f"   QC           : {r.get('QC_STATUS', '')} | lambda GC {r.get('LAMBDA_GC')} | "
               f"chromosomes {fmt(r.get('N_CHROMOSOMES'))} | fields: {r.get('AVAILABLE_FIELDS', '')}")
         print(f"   Fine-mapping : N from {r.get('N_SOURCE') or '-'} | variants without Z {fmt(r.get('N_MISSING_Z'))}")
+        if r.get("N_REMOVED_BAD_CHR") not in (None, ""):
+            short = {"N_REMOVED_BAD_CHR": "chr", "N_REMOVED_BAD_POS": "pos", "N_REMOVED_BAD_ALLELES": "alleles",
+                     "N_REMOVED_INVALID_STATS": "stats", "N_REMOVED_DUP_SNPID": "dup ID",
+                     "N_REMOVED_DUP_RSID": "dup rsID", "N_REMOVED_DUP_CHR_POS_ALLELES": "dup CHR:POS:alleles",
+                     "N_REMOVED_MULTIALLELIC": "multiallelic", "N_REMOVED_OTHER_GWASLAB": "other",
+                     "N_MISSING_P_REMOVED": "missing P", "N_INVALID_P_REMOVED": "invalid P"}
+            print("   Removed      : " + " | ".join(f"{label} {fmt(r.get(key)) if r.get(key) not in (None, '') else '0'}"
+                                                   for key, label in short.items()))
     else:
         print(f"   QC           : {r.get('QC_STATE', '')}")
     for code, message in r.get("_CHECKS") or []:
@@ -5895,13 +6141,21 @@ def arguments(argv=None):
                         help="Maximum eligible GWAS in the download manifest (0 = all).")
     parser.add_argument("--refresh", action="store_true",
                         help="Re-download the GWAS Catalog metadata.")
+    parser.add_argument("--include", nargs="+", action="extend", default=[], metavar="GCST",
+                        help="Force studies in (accessions, or a file with one per line): bypasses the phenotype, "
+                             "summary-statistics and ancestry filters and --max-studies; a harmonised file is "
+                             "still required.")
+    parser.add_argument("--exclude", nargs="+", action="extend", default=[], metavar="GCST",
+                        help="Leave studies out (accessions, or a file with one per line).")
+    parser.add_argument("--force-qc", action="store_true",
+                        help="With --qc or --index: QC again even studies that are already QC'd.")
     parser.add_argument("--phenotype-type", choices=["auto", "binary", "continuous"], default="auto",
                         help="Binary (cases/controls) or Continuous. auto = decide per study from the "
                              "GWAS Catalog API / sumstats metadata (default).")
 
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--qc", action="store_true",
-                       help="QC planner: QC manifest + SLURM array for the GWAS downloaded so far.")
+                       help="QC only (no download): QC manifest + SLURM array for the GWAS already downloaded.")
     modes.add_argument("--index", type=int, default=None,
                        help="Study N of the download manifest (ARRAY_ID): download it if needed, then QC it, "
                             "on this machine.")
@@ -5927,6 +6181,12 @@ def arguments(argv=None):
 
     if not args.pmid_to_doi and not (args.phenotype and args.ancestry):
         parser.error("--phenotype and --ancestry are required (except with --pmid-to-doi)")
+
+    if args.force_qc and not (args.qc or args.index is not None):
+        parser.error("--force-qc needs --qc or --index")
+
+    if (args.include or args.exclude) and (args.qc or args.status or args.stats or args.index is not None):
+        parser.error("--include / --exclude apply to the planner (run it without --qc / --status / --stats / --index)")
 
     return resolve_slurm(args)
 
