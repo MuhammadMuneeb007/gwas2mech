@@ -14,11 +14,24 @@ GWAS2Mech STEP 07 - Publication figures for GWAS loci and fine-mapping
     envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --slurm
     sbatch Step07_Plots_parkinson_s_disease_european.sh
 
+    # study 2 only (the number the Step02 planner prints)
+    envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
+
+    # ---- 1000 Genomes 30x LD panel (Steps 04-06 with --reference-panel 1000G30x) ----
+    # reads 05_ld_clumping/ + 06_finemapping/<p>/<a>_1000G30x/, writes 07_plots/<p>/<a>_1000G30x/
+    envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+    envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+    envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+    envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm
+    sbatch Step07_Plots_parkinson_s_disease_european_1000G30x.sh
+
 Inputs (nothing is recomputed):
     Step02  02_summary_stats/<p>/<a>/qc/<GCST>/<GCST>_GRCh38_QC.tsv.gz, GWAS_study_metadata.tsv
     Step05  05_ld_clumping/<p>/<a>/<GCST>/lead_variants.tsv
     Step06  06_finemapping/<p>/<a>/<GCST>/ (loci, regional GWAS, SuSiE PIPs / credible
             sets, LD matrices, locus QC)
+            (--reference-panel <PANEL> other than 1000G: <a>_<PANEL>/ for Step05 / Step06
+            and for these figures)
     genes   resources/gencode/*/gencode.v*.annotation.gtf.gz (Step00 download), canonical
             transcripts (Ensembl_canonical) for the gene tracks
 
@@ -29,7 +42,7 @@ Figures (07_plots/<p>/<a>/):
     <GCST>/loci/<L>_region       per locus, stacked panels on one genomic axis:
                                    association (-log10 P, coloured by r2 with the index
                                    variant), SuSiE PIP (95% credible sets), gene models,
-                                   LD triangle (r2, 1000G panel)
+                                   LD triangle (r2, the Step04 LD panel)
     <GCST>/all_loci_multipage.pdf
     combined/ideogram_all_gwas   every locus of every GWAS, one band per GWAS
     combined/locus_by_gwas       loci x GWAS matrix: min P and max PIP (ComplexHeatmap)
@@ -121,17 +134,33 @@ def read_tsv(path, **kwargs):
         return pd.DataFrame()
 
 
+DEFAULT_PANEL = "1000G"
+
+
+def results_slug(ancestry_slug, panel=DEFAULT_PANEL):
+    """Results folder per LD reference panel: <ancestry> (1000G) or <ancestry>_<panel>."""
+    return ancestry_slug if panel == DEFAULT_PANEL else f"{ancestry_slug}_{panel}"
+
+
+def panel_option(panel):
+    return "" if panel == DEFAULT_PANEL else f" --reference-panel {panel}"
+
+
 def project_paths(args):
     code, label = resolve_ancestry(args.ancestry)
     p_slug, a_slug = slugify(args.phenotype), slugify(label)
-    out = PROJECT_ROOT / "07_plots" / p_slug / a_slug
+    panel = args.reference_panel
+    r_slug = results_slug(a_slug, panel)
+    out = PROJECT_ROOT / "07_plots" / p_slug / r_slug
     return {
         "phenotype": args.phenotype.strip(), "code": code, "label": label,
-        "p_slug": p_slug, "a_slug": a_slug,
+        # a_slug: Step02 inputs and study numbers (shared by every panel);
+        # r_slug: the results of this LD reference panel.
+        "p_slug": p_slug, "a_slug": a_slug, "r_slug": r_slug, "panel": panel,
         "qc": PROJECT_ROOT / "02_summary_stats" / p_slug / a_slug / "qc",
         "metadata": PROJECT_ROOT / "01_gwas_catalog" / p_slug / a_slug / "GWAS_study_metadata.tsv",
-        "clump": PROJECT_ROOT / "05_ld_clumping" / p_slug / a_slug,
-        "finemap": PROJECT_ROOT / "06_finemapping" / p_slug / a_slug,
+        "clump": PROJECT_ROOT / "05_ld_clumping" / p_slug / r_slug,
+        "finemap": PROJECT_ROOT / "06_finemapping" / p_slug / r_slug,
         "out": out,
         "data": out / "data",
     }
@@ -359,10 +388,12 @@ def prepare(P, args):
         if wanted not in studies:
             raise SystemExit(f"Study {args.index} ({wanted}) has no Step05 result yet. Run:\n"
                              f"  envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py --phenotype "
-                             f"{shlex.quote(P['phenotype'])} --ancestry {P['code']} --index {args.index}")
+                             f"{shlex.quote(P['phenotype'])} --ancestry {P['code']} --index {args.index}"
+                             f"{panel_option(P['panel'])}")
         studies = [wanted]
     if not studies:
-        raise SystemExit(f"No Step05 results under {P['clump']} - run Step05 (and Step06) first.")
+        raise SystemExit(f"No Step05 results under {P['clump']} - run Step05 (and Step06) first"
+                         f"{' with' + panel_option(P['panel']) if P['panel'] != DEFAULT_PANEL else ''}.")
 
     genes = gene_models()
     if genes.empty:
@@ -960,7 +991,7 @@ def write_slurm(P, args):
                        ("cpus-per-task", args.cpus), ("mem", args.mem), ("time", args.time)):
         if value not in (None, ""):
             values[key] = str(value)
-    log_dir = PROJECT_ROOT / "logs" / "step07_plots" / P["p_slug"] / P["a_slug"]
+    log_dir = PROJECT_ROOT / "logs" / "step07_plots" / P["p_slug"] / P["r_slug"]
     log_dir.mkdir(parents=True, exist_ok=True)
     values.update({"job-name": f"PLOTS_{P['p_slug']}_{P['code'].lower()}"[:100],
                    "output": f"{log_dir}/plots.%j.out", "error": f"{log_dir}/plots.%j.err"})
@@ -973,8 +1004,9 @@ def write_slurm(P, args):
                "--phenotype", P["phenotype"], "--ancestry", P["code"], "--formats", args.formats,
                "--dpi", str(args.dpi), "--max-loci", str(args.max_loci), "--ld-max", str(args.ld_max),
                *(["--index", str(args.index)] if args.index is not None else []),
+               *(["--reference-panel", P["panel"]] if P["panel"] != DEFAULT_PANEL else []),
                "--ld-window-kb", str(args.ld_window_kb)]
-    bash_file = PROJECT_ROOT / f"Step07_Plots_{P['p_slug']}_{P['a_slug']}.sh"
+    bash_file = PROJECT_ROOT / f"Step07_Plots_{P['p_slug']}_{P['r_slug']}.sh"
     bash_file.write_text(f"""#!/bin/bash --login
 {header}
 
@@ -998,6 +1030,9 @@ def arguments(argv=None):
     parser.add_argument("--ancestry", required=True)
     parser.add_argument("--index", type=int, default=None,
                         help="Only study N of the Step02 download manifest (the number Step02 prints).")
+    parser.add_argument("--reference-panel", default=DEFAULT_PANEL,
+                        help="LD reference panel of Steps 04-06: 1000G (default), 1000G30x or a custom name. "
+                             "Other panels read and write <ancestry>_<PANEL>/ folders.")
     parser.add_argument("--formats", default="pdf,png",
                         help="Comma-separated: pdf, svg, png (default pdf,png).")
     parser.add_argument("--dpi", type=int, default=300, help="PNG resolution (default 300).")
@@ -1019,6 +1054,8 @@ def arguments(argv=None):
     slurm.add_argument("--mem", default=None)
     slurm.add_argument("--time", default=None)
     args = parser.parse_args(argv)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.reference_panel):
+        parser.error(f"--reference-panel {args.reference_panel!r}: use letters, digits, '_', '-' or '.'")
     bad = set(args.formats.split(",")) - {"pdf", "svg", "png"}
     if bad:
         parser.error(f"unknown format(s): {', '.join(sorted(bad))}")

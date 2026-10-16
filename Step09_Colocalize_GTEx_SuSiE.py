@@ -19,13 +19,23 @@ GWAS2Mech STEP 09 - Formal molecular-QTL colocalisation (coloc.susie), per locus
     envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --status
     envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 
+    # ---- 1000 Genomes 30x LD panel (Steps 04-06 with --reference-panel 1000G30x) ----
+    # reads 06_finemapping/<p>/<a>_1000G30x/ and the 1000G30x LD panel (resources/LD_panels/1000G30x/),
+    # writes 09_coloc/<p>/<a>_1000G30x/
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+    sbatch Step09_Coloc_parkinson_s_disease_european_1000G30x.sh
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2 --locus L001
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+    envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+
 For every fine-mapped GWAS locus, test whether the GWAS signal and a molecular
 trait (eQTL, sQTL, pQTL, isoQTL, exonQTL, ... ) share a causal variant:
 
   1. GWAS side   = the Step06 SuSiE-RSS fit of that locus (reused, not refitted)
   2. QTL side    = dense regional summary statistics (eQTL Catalogue), every
                    molecular trait with P <= --candidate-p in the locus window
-  3. LD          = signed r from the Step04 ancestry-matched 1000G panel
+  3. LD          = signed r from the Step04 ancestry-matched LD panel (--reference-panel)
                    (ref-based, same REF orientation as Step06 Z and the QTL beta)
   4. coloc::runsusie (QTL) + coloc::coloc.susie (GWAS x QTL), PP.H4 per signal
      pair, with prior sensitivity p12 = 1e-6 / 5e-6 / 1e-5
@@ -35,7 +45,9 @@ trait (eQTL, sQTL, pQTL, isoQTL, exonQTL, ... ) share a causal variant:
 Inputs (nothing is downloaded here)
     Step06   06_finemapping/<p>/<a>/<GCST>/loci/<L>/ (matched variants, SuSiE fit, LD ids)
              <GCST>/finemapping_summary.json (PHENOTYPE_TYPE, N, N_EFF)
-    Step04   resources/1000G/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam
+    Step04   resources/1000G/<ANC>/chr<N>_<ANC>_GRCh38.pgen/.pvar/.psam   (--reference-panel 1000G)
+             resources/LD_panels/<PANEL>/<ANC>/chr<N>_<ANC>_GRCh38.*      (any other panel; Step06 and
+             Step09 results then in <a>_<PANEL>/)
     Step00   Step00_Download_Resources.py --groups eqtl_catalogue qtl_catalogue
              resources/coloc/eqtl_catalogue/tabix_ftp_paths*.tsv  (dataset list)
              resources/coloc/eqtl_catalogue/dense/<dataset_id>/*.tsv.gz + .tbi
@@ -547,6 +559,9 @@ def arguments():
     parser.add_argument("--locus", default=None, help="With --index: only this locus (e.g. L001).")
     parser.add_argument("--study", default=None, help="Planner: only this GCST accession.")
 
+    parser.add_argument("--reference-panel", default=DEFAULT_PANEL,
+                        help="LD reference panel of Steps 04-06: 1000G (default), 1000G30x or a custom name. "
+                             "Other panels read 06_finemapping/<p>/<a>_<PANEL>/ and write 09_coloc/<p>/<a>_<PANEL>/.")
     parser.add_argument("--registry", default="resources/coloc/custom_qtl_registry.tsv")
     parser.add_argument("--qtl-types", default=",".join(SUPPORTED_QTL_TYPES))
     parser.add_argument("--catalog-all-studies", action="store_true",
@@ -596,17 +611,36 @@ def arguments():
         parser.error("--max-common-snps must be >= --min-common-snps")
     if args.locus and args.index is None:
         parser.error("--locus needs --index")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.reference_panel):
+        parser.error(f"--reference-panel {args.reference_panel!r}: use letters, digits, '_', '-' or '.'")
     return args
+
+
+DEFAULT_PANEL = "1000G"
+# LD reference panel of Steps 04-06 (set from --reference-panel in main()).
+REFERENCE_PANEL = DEFAULT_PANEL
+
+
+def results_slug(ancestry_slug: str, panel: str | None = None) -> str:
+    """Results folder per LD reference panel: <ancestry> (1000G) or <ancestry>_<panel>."""
+    panel = panel or REFERENCE_PANEL
+    return ancestry_slug if panel == DEFAULT_PANEL else f"{ancestry_slug}_{panel}"
+
+
+def panel_option(panel: str | None = None) -> str:
+    panel = panel or REFERENCE_PANEL
+    return "" if panel == DEFAULT_PANEL else f" --reference-panel {panel}"
 
 
 def project_paths(root: Path, phenotype: str, ancestry_label: str) -> dict[str, Path]:
     p = slugify(phenotype)
     a = slugify(ancestry_label)
+    r = results_slug(a)
     return {
-        "S02": root / "01_gwas_catalog" / p / a,
-        "S06": root / "06_finemapping" / p / a,
-        "OUT": root / "09_coloc" / p / a,
-        "LOG": root / "logs" / "step09_coloc" / p / a,
+        "S02": root / "01_gwas_catalog" / p / a,      # study numbers: shared by every panel
+        "S06": root / "06_finemapping" / p / r,
+        "OUT": root / "09_coloc" / p / r,
+        "LOG": root / "logs" / "step09_coloc" / p / r,
     }
 
 
@@ -1619,10 +1653,9 @@ def dense_qtl_for_candidate(
 
 
 def reference_prefix(root: Path, ancestry_code: str, chrom: int) -> Path:
-    return (
-        root / "resources" / "1000G" / ancestry_code
-        / f"chr{chrom}_{ancestry_code}_GRCh38"
-    )
+    base = (root / "resources" / "1000G" if REFERENCE_PANEL == DEFAULT_PANEL
+            else root / "resources" / "LD_panels" / REFERENCE_PANEL)
+    return base / ancestry_code / f"chr{chrom}_{ancestry_code}_GRCh38"
 
 
 def build_external_ld(
@@ -1648,7 +1681,7 @@ def build_external_ld(
     for ext in [".pgen", ".pvar", ".psam"]:
         path = Path(str(prefix) + ext)
         if not path.exists() or path.stat().st_size == 0:
-            raise FileNotFoundError(f"Missing 1000G reference file: {path}")
+            raise FileNotFoundError(f"Missing {REFERENCE_PANEL} LD reference file: {path}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     ids_file = out_dir / "common_reference_ids.txt"
@@ -2864,6 +2897,8 @@ def passthrough_options(args) -> list[str]:
         options += ["--catalog-study-regex", args.catalog_study_regex]
     if args.force:
         options.append("--force")
+    if REFERENCE_PANEL != DEFAULT_PANEL:
+        options += ["--reference-panel", REFERENCE_PANEL]
     return options
 
 
@@ -2921,7 +2956,7 @@ def planner_mode(root: Path, args) -> None:
         python = Path(sys.executable).resolve()
     command = [str(python), str(Path(__file__).resolve()), "--phenotype", phenotype, "--ancestry", ancestry_code,
                "--worker-manifest", str(manifest_file)] + passthrough_options(args)
-    bash_file = root / f"Step09_Coloc_{slugify(phenotype)}_{slugify(ancestry_label)}.sh"
+    bash_file = root / f"Step09_Coloc_{slugify(phenotype)}_{results_slug(slugify(ancestry_label))}.sh"
     bash_file.write_text(f"""#!/bin/bash --login
 {header}
 
@@ -2937,6 +2972,7 @@ export OMP_NUM_THREADS="${{SLURM_CPUS_PER_TASK:-{args.cpus}}}"
     banner("STEP 09 COLOCALISATION PLANNER - ONE ARRAY TASK PER LOCUS")
     print(f"Phenotype       : {phenotype}")
     print(f"Ancestry        : {ancestry_label} ({ancestry_code})")
+    print(f"LD panel        : {REFERENCE_PANEL}  (Step06 results: {paths['S06']})")
     print(f"Studies         : {len(studies)}  ({len(excluded)} excluded, see coloc_excluded_studies.tsv)")
     print(f"Locus tasks     : {len(manifest)}  -> array {array}"
           + (f"  ({len(manifest) / n_tasks:.1f} loci per task)" if len(manifest) > n_tasks else ""))
@@ -2949,7 +2985,8 @@ export OMP_NUM_THREADS="${{SLURM_CPUS_PER_TASK:-{args.cpus}}}"
     if len(manifest) <= n_tasks and len(per_study) > 1:
         accession, r = next(iter(per_study.iterrows()))
         print(f"ONLY {accession}:\n  sbatch --array={int(r['min'])}-{int(r['max'])} {bash_file.name}")
-    base = f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(phenotype)} --ancestry {ancestry_code}"
+    base = (f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(phenotype)} "
+            f"--ancestry {ancestry_code}{panel_option()}")
     print(f"THEN:\n  {base} --status\n  {base} --stats")
 
 
@@ -2989,7 +3026,7 @@ def index_mode(root: Path, args) -> None:
         raise SystemExit(
             f"Study {args.index} ({accession}) has no fine-mapped locus with a SuSiE fit. Run:\n"
             f"  envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype {shlex.quote(phenotype)} "
-            f"--ancestry {ancestry_code} --index {args.index}")
+            f"--ancestry {ancestry_code} --index {args.index}{panel_option()}")
     if args.locus:
         if args.locus not in loci:
             raise SystemExit(f"{args.locus} is not a fine-mapped locus of {accession}: {', '.join(loci)}")
@@ -3016,7 +3053,8 @@ def check_resources_mode(root: Path, args) -> None:
     _, ancestry_label = canonical_ancestry(args.ancestry)
     code = canonical_ancestry(args.ancestry)[0]
     panels = all(Path(str(reference_prefix(root, code, c)) + ".pgen").exists() for c in range(1, 23))
-    print(f"1000G {code} LD panels (Step04): {'OK' if panels else 'MISSING - run Step04'}")
+    print(f"{REFERENCE_PANEL} {code} LD panels (Step04): "
+          f"{'OK' if panels else 'MISSING - run Step04' + panel_option()}")
     try:
         rscript = find_executable(root, args.rscript, "RSCRIPT", "Rscript")
         print("R coloc / susieR: " + ", ".join(f"{k} {v}" for k, v in verify_r_packages(rscript).items()))
@@ -3029,7 +3067,7 @@ def status_mode(root: Path, args) -> None:
     _, ancestry_label = canonical_ancestry(args.ancestry)
     paths = project_paths(root, phenotype, ancestry_label)
     studies, _ = discover_step06_studies(paths["S06"])
-    banner(f"STEP 09 STATUS - {phenotype} / {ancestry_label}")
+    banner(f"STEP 09 STATUS - {phenotype} / {ancestry_label} - LD panel {REFERENCE_PANEL}")
     print(f"{'STUDY':<15}{'LOCI':>6}{'DONE':>6}{'FAILED':>8}{'PENDING':>9}{'TESTS':>7}{'STRONG':>8}")
     totals = {"DONE": 0, "FAILED": 0, "PENDING": 0}
     for accession in studies:
@@ -3055,7 +3093,7 @@ def stats_mode(root: Path, args) -> None:
     phenotype = args.phenotype.strip()
     _, ancestry_label = canonical_ancestry(args.ancestry)
     paths = project_paths(root, phenotype, ancestry_label)
-    banner(f"STEP 09 COLOCALISATION RESULTS - {phenotype} / {ancestry_label}")
+    banner(f"STEP 09 COLOCALISATION RESULTS - {phenotype} / {ancestry_label} - LD panel {REFERENCE_PANEL}")
     rows = []
     for d in sorted(p for p in paths["OUT"].iterdir() if p.is_dir()) if paths["OUT"].exists() else []:
         summary = read_table(d / f"{d.name}_formal_coloc_summary.tsv")
@@ -3086,7 +3124,9 @@ def stats_mode(root: Path, args) -> None:
 
 
 def main() -> None:
+    global REFERENCE_PANEL
     args = arguments()
+    REFERENCE_PANEL = args.reference_panel
     root = PROJECT_ROOT
     write_custom_registry_template(root)
     if args.check_resources:

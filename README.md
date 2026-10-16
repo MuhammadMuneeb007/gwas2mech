@@ -502,7 +502,8 @@ sbatch Step05_Clump_GWAS_parkinson_s_disease_european_1000G30x.sh
 envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py "${PD[@]}" --reference-panel 1000G30x
 sbatch Step06_FineMap_GWAS_parkinson_s_disease_european_1000G30x.sh
 ```
-(the full 1000G30x commands, with `--status` / `--stats`, are in the Step05 and Step06 sections)
+(the full 1000G30x commands, with `--status` / `--stats` / `--index`, are in the Step05-Step09 sections;
+Steps 07, 08 and 09 take the same `--reference-panel` and keep their results in `<ancestry>_<PANEL>/` too)
 
 The default panel commands (no `--reference-panel`):
 
@@ -634,6 +635,17 @@ envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --anc
 envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --formats pdf,svg,png
 envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --slurm            # then sbatch the .sh
+envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --index 2            # study 2 only
+```
+
+**With the 1000 Genomes 30x panel** (reads `05_ld_clumping/` and `06_finemapping/<phenotype>/<ancestry>_1000G30x/`,
+writes `07_plots/<phenotype>/<ancestry>_1000G30x/`):
+```bash
+envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step07_Plots.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm
+sbatch Step07_Plots_parkinson_s_disease_european_1000G30x.sh
 ```
 
 | Figure (`07_plots/<phenotype>/<ancestry>/`) | Content | Package |
@@ -666,6 +678,16 @@ envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Par
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --index 2
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --test-variant 12:40340400:G:A
+```
+
+**With the 1000 Genomes 30x panel** (reads `06_finemapping/<phenotype>/<ancestry>_1000G30x/`, writes
+`08_annotation/<phenotype>/<ancestry>_1000G30x/`):
+```bash
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+sbatch Step08_Annotate_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
 ```
 
 | Source (local file) | Annotation |
@@ -707,6 +729,17 @@ sbatch Step09_Coloc_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --index 2 --locus L001
+```
+
+**With the 1000 Genomes 30x panel** (reads `06_finemapping/<phenotype>/<ancestry>_1000G30x/` and the 1000G30x LD
+panel, writes `09_coloc/<phenotype>/<ancestry>_1000G30x/`):
+```bash
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+sbatch Step09_Coloc_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2 --locus L001
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
 ```
 
 `STRONG_SHARED_SIGNAL` = PP.H4 ≥ 0.8 and H4 > H3; `PRIOR_ROBUST_STRONG` when it also holds at the

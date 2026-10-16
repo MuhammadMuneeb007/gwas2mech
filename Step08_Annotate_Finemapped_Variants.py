@@ -21,6 +21,14 @@ GWAS2Mech STEP 08 - Local annotation of fine-mapped variants
     # one variant (GRCh38, CHR:POS:REF:ALT)
     envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --test-variant 4:89822321:G:A
 
+    # ---- 1000 Genomes 30x LD panel (Steps 04-06 with --reference-panel 1000G30x) ----
+    # reads 06_finemapping/<p>/<a>_1000G30x/, writes 08_annotation/<p>/<a>_1000G30x/
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+    sbatch Step08_Annotate_parkinson_s_disease_european_1000G30x.sh
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+
 LOCAL FIRST. Every annotation comes from versioned files downloaded by
 Step00_Download_Resources.py (--groups vep genome annotation cadd); no web
 service is needed, so the step runs on compute nodes without internet, has no
@@ -2021,12 +2029,28 @@ def annotate_study(P: dict, accession: str, args, threads: int) -> None:
 # PATHS / STUDIES / SLURM
 # =============================================================================
 
+DEFAULT_PANEL = "1000G"
+
+
+def results_slug(ancestry_slug: str, panel: str = DEFAULT_PANEL) -> str:
+    """Results folder per LD reference panel: <ancestry> (1000G) or <ancestry>_<panel>."""
+    return ancestry_slug if panel == DEFAULT_PANEL else f"{ancestry_slug}_{panel}"
+
+
+def panel_option(panel: str) -> str:
+    return "" if panel == DEFAULT_PANEL else f" --reference-panel {panel}"
+
+
 def project_paths(args) -> dict:
     code, label = canonical_ancestry(args.ancestry)
     p_slug, a_slug = slugify(args.phenotype), slugify(label)
+    panel = args.reference_panel
+    r_slug = results_slug(a_slug, panel)
+    # a_slug: Step02 study numbers (shared by every panel); r_slug: this panel's results.
     return {"phenotype": args.phenotype.strip(), "code": code, "label": label, "p_slug": p_slug,
-            "a_slug": a_slug, "finemap": PROJECT_ROOT / "06_finemapping" / p_slug / a_slug,
-            "out": PROJECT_ROOT / "08_annotation" / p_slug / a_slug}
+            "a_slug": a_slug, "r_slug": r_slug, "panel": panel,
+            "finemap": PROJECT_ROOT / "06_finemapping" / p_slug / r_slug,
+            "out": PROJECT_ROOT / "08_annotation" / p_slug / r_slug}
 
 
 def study_for_index(phenotype_slug: str, ancestry_slug: str, index: int) -> str:
@@ -2110,6 +2134,8 @@ def passthrough_options(args) -> list[str]:
         options.append("--no-vep")
     if args.force:
         options.append("--force")
+    if args.reference_panel != DEFAULT_PANEL:
+        options += ["--reference-panel", args.reference_panel]
     return options
 
 
@@ -2121,11 +2147,12 @@ def planner_mode(args) -> None:
     P = project_paths(args)
     print_resources()
     ready, skipped = finemapped_studies(P)
-    banner(f"STEP 08 PLANNER - {P['phenotype']} / {P['label']} ({P['code']})")
+    banner(f"STEP 08 PLANNER - {P['phenotype']} / {P['label']} ({P['code']}) - LD panel {P['panel']}")
     for accession, reason in skipped:
         print(f"SKIPPED  {accession}: {reason}")
     if not ready:
-        raise SystemExit(f"No fine-mapped studies under {P['finemap']} - run Step06 first.")
+        raise SystemExit(f"No fine-mapped studies under {P['finemap']} - run Step06 first"
+                         f"{' with' + panel_option(P['panel']) if P['panel'] != DEFAULT_PANEL else ''}.")
     if not args.no_vep and not args.vep_gtf and not all(
             r["PRESENT"] for r in resource_table() if r["REQUIRED_FOR_VEP"]):
         raise SystemExit("VEP cache / FASTA missing (see above), or add --no-vep to annotate without VEP.")
@@ -2136,14 +2163,14 @@ def planner_mode(args) -> None:
     manifest_file = P["out"] / "annotation_manifest.tsv"
     manifest.to_csv(manifest_file, sep="\t", index=False)
 
-    log_dir = PROJECT_ROOT / "logs" / "step08_annotation" / P["p_slug"] / P["a_slug"]
+    log_dir = PROJECT_ROOT / "logs" / "step08_annotation" / P["p_slug"] / P["r_slug"]
     log_dir.mkdir(parents=True, exist_ok=True)
     header = sbatch_header_block(args, f"ANNOT_{P['p_slug']}_{P['code'].lower()}",
                                  f"{log_dir}/annot.%A_%a.out", f"{log_dir}/annot.%A_%a.err", n_tasks)
     python = PROJECT_ROOT / "envs" / "pipeline" / "bin" / "python"
     command = [str(python), str(Path(__file__).resolve()), "--phenotype", P["phenotype"], "--ancestry", P["code"],
                "--worker-manifest", str(manifest_file)] + passthrough_options(args)
-    bash_file = PROJECT_ROOT / f"Step08_Annotate_{P['p_slug']}_{P['a_slug']}.sh"
+    bash_file = PROJECT_ROOT / f"Step08_Annotate_{P['p_slug']}_{P['r_slug']}.sh"
     bash_file.write_text(f"""#!/bin/bash --login
 {header}
 
@@ -2158,7 +2185,8 @@ export PATH={shlex.quote(str(PROJECT_ROOT / 'envs' / 'pipeline' / 'bin'))}:"$PAT
 
     for accession in ready:
         print(f"READY    {accession}")
-    base = f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(P['phenotype'])} --ancestry {P['code']}"
+    base = (f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(P['phenotype'])} "
+            f"--ancestry {P['code']}{panel_option(P['panel'])}")
     print(f"\nStudies: {len(ready)}  (array 1-{n_tasks})\nManifest: {manifest_file}\n\nRUN:\n  sbatch {bash_file.name}")
     print(f"THEN:\n  {base} --status\n  {base} --stats")
 
@@ -2191,7 +2219,8 @@ def index_mode(args) -> None:
         reason = dict(skipped).get(accession, "Step06 not run for this study")
         raise SystemExit(f"Study {args.index} ({accession}) cannot be annotated: {reason}. Run:\n"
                          f"  envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py --phenotype "
-                         f"{shlex.quote(P['phenotype'])} --ancestry {P['code']} --index {args.index}")
+                         f"{shlex.quote(P['phenotype'])} --ancestry {P['code']} --index {args.index}"
+                         f"{panel_option(P['panel'])}")
     try:
         annotate_study(P, accession, args, int(os.environ.get("SLURM_CPUS_PER_TASK", args.cpus)))
     except Exception as error:
@@ -2204,7 +2233,7 @@ def index_mode(args) -> None:
 def status_mode(args) -> None:
     P = project_paths(args)
     ready, skipped = finemapped_studies(P)
-    banner(f"STEP 08 STATUS - {P['phenotype']} / {P['label']} ({P['code']})")
+    banner(f"STEP 08 STATUS - {P['phenotype']} / {P['label']} ({P['code']}) - LD panel {P['panel']}")
     counts: dict[str, int] = {}
     print(f"{'STUDY':<15}{'STATE':<10}{'VARIANTS':>10}{'LOCI':>6}  DETAIL")
     for accession in ready + [a for a, _ in skipped]:
@@ -2229,7 +2258,7 @@ def status_mode(args) -> None:
 
 def stats_mode(args) -> None:
     P = project_paths(args)
-    banner(f"STEP 08 STATISTICS - {P['phenotype']} / {P['label']} ({P['code']})")
+    banner(f"STEP 08 STATISTICS - {P['phenotype']} / {P['label']} ({P['code']}) - LD panel {P['panel']}")
     rows = []
     for d in sorted(p for p in P["out"].iterdir() if p.is_dir()) if P["out"].exists() else []:
         final = d / f"{d.name}_annotated_variants.tsv.gz"
@@ -2296,6 +2325,9 @@ def arguments(argv=None):
     modes.add_argument("--check-resources", action="store_true", help="Which local resources are present.")
     modes.add_argument("--test-variant", default=None, help="Annotate one GRCh38 variant, e.g. 4:89822321:G:A.")
     modes.add_argument("--worker-manifest", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--reference-panel", default=DEFAULT_PANEL,
+                        help="LD reference panel of Steps 04-06: 1000G (default), 1000G30x or a custom name. "
+                             "Other panels read 06_finemapping/<p>/<a>_<PANEL>/ and write 08_annotation/<p>/<a>_<PANEL>/.")
     parser.add_argument("--scope", choices=["all", "cs", "pip"], default="all",
                         help="all fine-mapped variants (default), 95%% credible sets only, or PIP >= --min-pip.")
     parser.add_argument("--min-pip", type=float, default=0.01)
@@ -2316,7 +2348,10 @@ def arguments(argv=None):
     slurm.add_argument("--mem", "--memory", dest="mem", default=None)
     slurm.add_argument("--time", default=None)
     slurm.add_argument("--max-parallel", type=int, default=0)
-    return resolve_slurm(parser.parse_args(argv))
+    args = parser.parse_args(argv)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.reference_panel):
+        parser.error(f"--reference-panel {args.reference_panel!r}: use letters, digits, '_', '-' or '.'")
+    return resolve_slurm(args)
 
 
 def main() -> None:
