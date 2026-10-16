@@ -53,6 +53,10 @@ is reproducible:
     ENCODE SCREEN cCRE V4           overlapping candidate cis-regulatory element + class
     phyloP 100-way (UCSC)           base-wise conservation
     gnomAD v4.1 constraint          LOEUF, pLI, missense Z of the affected gene
+    RegulomeDB v2.2 (ENCODE)        regulatory rank (1a strongest ... 7) + probability
+                                    and evidence (ChIP, accessibility, motif, footprint,
+                                    QTL); dbSNP153 common SNVs (MAF >= 1%) - rarer
+                                    variants: REGULOMEDB_V22_STATUS = NO_HIT
 
 OPTIONAL ONLINE (--online screen,regulomedb), credible-set variants only:
     SCREEN GraphQL  cell-type-specific cCRE activity, cCRE -> gene links
@@ -168,6 +172,7 @@ CLINVAR = RES / "annotation" / "clinvar" / "clinvar.vcf.gz"
 CCRE_BED = RES / "annotation" / "encode_screen" / "GRCh38-cCREs.V4.bed"
 CONSTRAINT = RES / "annotation" / "gnomad" / "gnomad.v4.1.constraint_metrics.tsv"
 PHYLOP = RES / "annotation" / "conservation" / "hg38.phyloP100way.bw"
+REGULOMEDB_LOCAL = RES / "annotation" / "regulomedb" / "RegulomeDB_v2.2_dbSNP153_common_GRCh38.tsv.gz"
 
 ANCESTRY_ALIASES = {
     "eur": ("EUR", "European"),
@@ -1501,6 +1506,7 @@ def resource_table() -> list[dict[str, Any]]:
         ("ENCODE cCRE V4", CCRE_BED, "annotation", False),
         ("phyloP 100-way bigWig", PHYLOP, "annotation", False),
         ("gnomAD v4.1 constraint", CONSTRAINT, "annotation", False),
+        ("RegulomeDB v2.2 (+.tbi)", REGULOMEDB_LOCAL, "annotation", False),
     ]
     out = []
     for name, path, group, needed in rows:
@@ -1785,8 +1791,10 @@ def annotate_vep(universe: pd.DataFrame, work: Path, threads: int, args) -> tupl
 # 2-4. TABIX LOOKUPS: CADD, ALPHAMISSENSE, CLINVAR
 # =============================================================================
 
-def tabix_lookup(universe: pd.DataFrame, path: Path, parse, label: str) -> tuple[pd.DataFrame, dict]:
-    """parse(fields, ref, alt) -> dict or None for every record at the variant position."""
+def tabix_lookup(universe: pd.DataFrame, path: Path, parse, label: str,
+                 zero_based: bool = False) -> tuple[pd.DataFrame, dict]:
+    """parse(fields, ref, alt) -> dict or None for every record at the variant position
+    (column 2 = 1-based position, or the 0-based start of a BED-like file with zero_based)."""
     import pysam
 
     if not path.exists() or not Path(str(path) + ".tbi").exists():
@@ -1806,7 +1814,7 @@ def tabix_lookup(universe: pd.DataFrame, path: Path, parse, label: str) -> tuple
                 for line in lines:
                     fields = line.split("\t")
                     try:
-                        if int(fields[1]) != int(r.REFERENCE_POS):
+                        if int(fields[1]) + zero_based != int(r.REFERENCE_POS):
                             continue
                     except (ValueError, IndexError):
                         continue
@@ -1854,6 +1862,33 @@ def parse_clinvar(fields, ref, alt):
             "CLINVAR_REVIEW_STATUS": info.get("CLNREVSTAT", "").replace("_", " "),
             "CLINVAR_CONDITIONS": info.get("CLNDN", "").replace("_", " "),
             "CLINVAR_ALLELE_ID": info.get("ALLELEID", "")}
+
+
+REGULOMEDB_FEATURES = ("ChIP", "Chromatin_accessibility", "PWM", "Footprint", "QTL", "PWM_matched",
+                       "Footprint_matched")
+
+
+def parse_regulomedb(fields, ref, alt):
+    # chrom start end rsid ranking probability_score ChIP Chromatin_accessibility PWM Footprint QTL
+    # PWM_matched Footprint_matched IC_max IC_matched_max   (position-level score, SNVs)
+    if len(fields) < 13:
+        return None
+    try:
+        probability = float(fields[5])
+    except ValueError:
+        probability = np.nan
+    return {"REGULOMEDB_V22_RANKING": fields[4], "REGULOMEDB_V22_PROBABILITY": probability,
+            "REGULOMEDB_V22_RSID": fields[3],
+            "REGULOMEDB_V22_EVIDENCE": ";".join(n for n, v in zip(REGULOMEDB_FEATURES, fields[6:13])
+                                                if v.strip() == "True")}
+
+
+def annotate_regulomedb_local(universe: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    snv = (universe["REFERENCE_REF"].str.len() == 1) & (universe["REFERENCE_ALT"].str.len() == 1)
+    table, info = tabix_lookup(universe[snv], REGULOMEDB_LOCAL, parse_regulomedb, "REGULOMEDB_V22",
+                               zero_based=True)
+    info["version"] = "RegulomeDB v2.2, dbSNP153 common SNVs (ENCODE ENCFF250UJY)"
+    return table, info
 
 
 def clinvar_release() -> str:
@@ -1992,7 +2027,8 @@ ANNOTATION_COLUMNS = {
     "VEP_GENE_ID": "", "VEP_HGVSC": "", "VEP_HGVSP": "", "CADD_PHRED": np.nan, "CADD_RAW": np.nan,
     "AM_PATHOGENICITY": np.nan, "AM_CLASS": "", "CLINVAR_SIGNIFICANCE": "", "CCRE_ACCESSION": "",
     "CCRE_CLASS": "", "IN_CCRE": False, "PHYLOP_100WAY": np.nan, "GNOMADG_AF": np.nan,
-    "GNOMADG_NFE_AF": np.nan, "GNOMAD_LOEUF": np.nan,
+    "GNOMADG_NFE_AF": np.nan, "GNOMAD_LOEUF": np.nan, "REGULOMEDB_V22_RANKING": "",
+    "REGULOMEDB_V22_PROBABILITY": np.nan,
 }
 
 
@@ -2020,6 +2056,9 @@ def derive_flags(m: pd.DataFrame) -> pd.DataFrame:
     sig = m.get("CLINVAR_SIGNIFICANCE", pd.Series("", index=m.index)).fillna("").str.lower()
     m["CLINVAR_PATHOGENIC"] = sig.str.contains("pathogenic") & ~sig.str.contains("conflicting")
     m["PHYLOP_CONSERVED"] = pd.to_numeric(m.get("PHYLOP_100WAY"), errors="coerce") >= 2.0
+    # RegulomeDB rank 1* (QTL + TF binding) or 2* (TF binding + motif / footprint): strong regulatory evidence
+    rank = m.get("REGULOMEDB_V22_RANKING", pd.Series("", index=m.index)).fillna("").astype(str)
+    m["REGULOMEDB_STRONG"] = rank.str.match(r"^[12][a-f]$")
     evidence = []
     for _, r in m.iterrows():
         e = []
@@ -2039,6 +2078,8 @@ def derive_flags(m: pd.DataFrame) -> pd.DataFrame:
             e.append(f"cCRE {r.get('CCRE_CLASS', '')}")
         if r["PHYLOP_CONSERVED"]:
             e.append("conserved")
+        if r["REGULOMEDB_STRONG"]:
+            e.append(f"RegulomeDB {r['REGULOMEDB_V22_RANKING']}")
         evidence.append("; ".join(e))
     m["FUNCTIONAL_EVIDENCE"] = evidence
     return m
@@ -2071,6 +2112,7 @@ def locus_table(m: pd.DataFrame) -> pd.DataFrame:
             "CS_MAX_CADD_PHRED": pd.to_numeric(cs.get("CADD_PHRED"), errors="coerce").max() if len(cs) else np.nan,
             "CS_N_IN_CCRE": int((cs.get("IN_CCRE", pd.Series(dtype=object)).astype(str) == "True").sum()),
             "CS_CCRE_CLASSES": join_unique(cs.get("CCRE_CLASS", [])),
+            "CS_REGULOMEDB_STRONG": join_unique(cs.loc[cs["REGULOMEDB_STRONG"], "VARIANT_KEY"]) if len(cs) else "",
             **{f"PIP_FRACTION_{k}": round(float(v), 4) for k, v in weights.items()},
         })
     return pd.DataFrame(rows)
@@ -2089,7 +2131,8 @@ def annotate_universe(universe: pd.DataFrame, work: Path, threads: int, args, P=
                   ALPHAMISSENSE, parse_alphamissense, "AM")),
               ("clinvar", lambda: tabix_lookup(universe, CLINVAR, parse_clinvar, "CLINVAR")),
               ("ccre", lambda: annotate_ccre(universe)),
-              ("phylop", lambda: annotate_phylop(universe))]
+              ("phylop", lambda: annotate_phylop(universe)),
+              ("regulomedb", lambda: annotate_regulomedb_local(universe))]
     for name, run in steps:
         started = time.time()
         table, info = run()
@@ -2154,8 +2197,8 @@ def annotate_study(P: dict, accession: str, args, threads: int) -> None:
              "REFERENCE_REF", "REFERENCE_ALT", "PIP", "IN_95_CREDIBLE_SET", "CREDIBLE_SET", "P", "Z_ALT",
              "BETA_ALT", "VEP_GENE_SYMBOL", "VEP_BEST_CONSEQUENCE", "VEP_FUNCTIONAL_CATEGORY",
              "VEP_HGVSC", "VEP_HGVSP", "CADD_PHRED", "AM_PATHOGENICITY", "AM_CLASS", "CLINVAR_SIGNIFICANCE",
-             "CCRE_CLASS", "PHYLOP_100WAY", "GNOMADG_AF", "GNOMADG_NFE_AF", "GNOMAD_LOEUF",
-             "FUNCTIONAL_EVIDENCE"]
+             "CCRE_CLASS", "PHYLOP_100WAY", "REGULOMEDB_V22_RANKING", "REGULOMEDB_V22_PROBABILITY",
+             "GNOMADG_AF", "GNOMADG_NFE_AF", "GNOMAD_LOEUF", "FUNCTIONAL_EVIDENCE"]
     front = [c for c in front if c in master.columns]
     master = master[front + [c for c in master.columns if c not in front]]
     master = master.sort_values(["LOCUS_ID", "PIP"], ascending=[True, False], kind="stable")
@@ -2431,13 +2474,15 @@ def stats_mode(args) -> None:
                "CS_SPLICE": b(cs, "IS_SPLICE"), "CS_AM_LIKELY_PATHOGENIC": b(cs, "AM_LIKELY_PATHOGENIC"),
                "CS_CADD_GE_20": b(cs, "CADD_GE_20"), "CS_CLINVAR_PATHOGENIC": b(cs, "CLINVAR_PATHOGENIC"),
                "CS_IN_CCRE": b(cs, "IN_CCRE"), "CS_CONSERVED": b(cs, "PHYLOP_CONSERVED"),
+               "CS_REGULOMEDB_STRONG": b(cs, "REGULOMEDB_STRONG"),
                **{f"CS_PIP_FRACTION_{k}": v for k, v in pip_by_class.items()}}
         rows.append(row)
         print(f"\n{d.name}: {len(m):,} variants in {len(loci)} loci; {len(cs):,} in 95% credible sets")
         print(f"   credible-set variants: coding {row['CS_CODING']} (LoF {row['CS_LOF']}, missense "
               f"{row['CS_MISSENSE']}), splice {row['CS_SPLICE']}, AlphaMissense likely pathogenic "
               f"{row['CS_AM_LIKELY_PATHOGENIC']}, CADD>=20 {row['CS_CADD_GE_20']}, ClinVar P/LP "
-              f"{row['CS_CLINVAR_PATHOGENIC']}, in cCRE {row['CS_IN_CCRE']}, conserved {row['CS_CONSERVED']}")
+              f"{row['CS_CLINVAR_PATHOGENIC']}, in cCRE {row['CS_IN_CCRE']}, conserved {row['CS_CONSERVED']}, "
+              f"RegulomeDB 1-2 {row['CS_REGULOMEDB_STRONG']}")
         print("   PIP mass in credible sets by class: "
               + ", ".join(f"{k} {v:.0%}" for k, v in pip_by_class.sort_values(ascending=False).items()))
         top = loci.sort_values("TOP_PIP", ascending=False).head(8)

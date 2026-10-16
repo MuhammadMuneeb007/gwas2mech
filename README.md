@@ -20,7 +20,7 @@ Run every command from the repository directory.
 | 5 | `Step05_Clump_GWAS_Loci.py` | LD clumping → independent lead variants | GWAS | `05_ld_clumping/` |
 | 6 | `Step06_FineMap_GWAS_Loci.py` | SuSiE-RSS fine-mapping with locus QC | GWAS | `06_finemapping/` |
 | 7 | `Step07_Plots.py` | Manhattan, ideograms, regional / LD / PIP / gene figures | – (one job) | `07_plots/` |
-| 8 | `Step08_Annotate_Finemapped_Variants.py` | local VEP, CADD, AlphaMissense, ClinVar, cCRE, phyloP, LOEUF | GWAS | `08_annotation/` |
+| 8 | `Step08_Annotate_Finemapped_Variants.py` | local VEP, CADD, AlphaMissense, ClinVar, cCRE, phyloP, LOEUF, RegulomeDB | GWAS | `08_annotation/` |
 | 9 | `Step09_Colocalize_GTEx_SuSiE.py` | coloc.susie with eQTL / sQTL / pQTL | **locus** | `09_coloc/` |
 
 Every step plans its own SLURM array from the `#SBATCH` header of `HPC_CPU.sh` (never more than
@@ -243,7 +243,7 @@ envs/pipeline/bin/python Step00_Download_Resources.py --groups opentargets --out
 sbatch Step00_Download_OpenTargets.sh
 ```
 
-**Variant annotation** (AlphaMissense, ClinVar, ENCODE SCREEN cCREs v4, gnomAD v4.1 constraint, UCSC liftover chains, phyloP100way) — 11 GB
+**Variant annotation** (AlphaMissense, ClinVar, ENCODE SCREEN cCREs v4, gnomAD v4.1 constraint, UCSC liftover chains, phyloP100way, RegulomeDB v2.2 scores) — 12 GB
 ```bash
 envs/pipeline/bin/python Step00_Download_Resources.py --groups annotation --output Step00_Download_Annotation.sh
 sbatch Step00_Download_Annotation.sh
@@ -710,6 +710,14 @@ envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Par
 | ENCODE SCREEN cCRE V4 (`annotation`) | overlapping cCRE and its class (PLS, pELS, dELS, CA-CTCF, ...) |
 | phyloP 100-way (`annotation`) | conservation |
 | gnomAD v4.1 constraint (`annotation`) | LOEUF, pLI, missense Z of the gene |
+| RegulomeDB v2.2 precalculated scores, dbSNP153 common SNVs, MAF >= 1% (`annotation`, ENCODE ENCFF250UJY, MD5-checked, sorted + tabix-indexed by the downloader) | `REGULOMEDB_V22_RANKING` (1a strongest ... 7), `REGULOMEDB_V22_PROBABILITY`, `REGULOMEDB_V22_EVIDENCE` (ChIP, accessibility, motif, footprint, QTL); rank 1-2 is listed in `FUNCTIONAL_EVIDENCE` and counted in `--stats`. Rarer SNVs and indels get `REGULOMEDB_V22_STATUS = NO_HIT` |
+
+Already downloaded the `annotation` group before RegulomeDB was added? Re-plan it; only the missing file
+gets a task (1.5 GB):
+```bash
+envs/pipeline/bin/python Step00_Download_Resources.py --groups annotation --output Step00_Download_annotation.sh
+sbatch Step00_Download_annotation.sh
+```
 
 `--scope cs` or `--scope pip --min-pip 0.01` limits the annotation to credible sets / PIP.
 
@@ -719,7 +727,7 @@ no web service. APIs are used only by the optional `--online` lookups for 95% cr
 | `--online` provider | Adds | Key |
 |---|---|---|
 | `screen` | ENCODE SCREEN cell-type cCRE activity and cCRE-gene links | `SCREEN_API_KEY` |
-| `regulomedb` | RegulomeDB probability / rank | none (public) |
+| `regulomedb` | RegulomeDB live: allele-level detail, tissue scores, and variants not in the local common-SNV file | none (public) |
 
 Set the key once, either in the shell or in the git-ignored `config/api_keys.env` (copy
 `config/api_keys.example.env`); the environment wins if both are set. Never paste a key into a script.
@@ -732,6 +740,22 @@ sbatch Step08_Annotate_parkinson_s_disease_european.sh
 ```
 Without a key, `--online screen` writes `SCREEN_STATUS = SCREEN_API_KEY_NOT_SET`; network failures are
 recorded as `API_ERROR`, never as "no hit".
+
+**Offline, online or both?** Run offline (the default) for every study and panel: it is complete,
+reproducible and runs on compute nodes without internet. Add `--online screen,regulomedb` only as an
+extra pass when you want cell-type cCRE activity (SCREEN) or live RegulomeDB detail for credible-set
+variants, and only if the compute nodes can reach the internet (test with `--check-resources --online
+...` from a compute node). Online columns are added next to the local ones, never replace them.
+
+The reference panel is chosen when the job script is made: `--reference-panel` is written into the
+`.sh`, so `sbatch` needs no extra option. One script per panel; planning again (e.g. with `--online`)
+rewrites that panel's script:
+```bash
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+sbatch Step08_Annotate_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --online screen,regulomedb --force
+sbatch Step08_Annotate_parkinson_s_disease_european_1000G30x.sh
+```
 
 Outputs in `08_annotation/<phenotype>/<ancestry>/<GCST>/`: `<GCST>_annotated_variants.tsv.gz` (all
 variants, fine-mapping + annotation, `Z_ALT`/`BETA_ALT` = GWAS effect of the ALT allele),
@@ -797,7 +821,7 @@ tested trait: PP.H0–H4, signal pair, prior sensitivity, LD diagnostics), `<GCS
 | `qtl_celltype` | Jerber_2021 cell-type eQTL, dense + `.tbi` + SuSiE | 62 GB |
 | `molecular_qtl` | ADSP FunGen brain pQTL / sQTL / haQTL + Kumasaka caQTL, MD5-verified | 230 GB |
 | `meqtl` | ADSP FunGen brain mQTL, MD5-verified | 1.5 TB |
-| `annotation` | AlphaMissense (+ tabix index), ClinVar, ENCODE SCREEN cCREs v4, gnomAD v4.1 constraint, UCSC liftover chains, phyloP100way | 11 GB |
+| `annotation` | AlphaMissense (+ tabix index), ClinVar, ENCODE SCREEN cCREs v4, gnomAD v4.1 constraint, UCSC liftover chains, phyloP100way, RegulomeDB v2.2 (sorted + tabix-indexed) | 12 GB |
 | `cadd` | CADD v1.7 GRCh38 SNVs + gnomAD4 indels (+ `.tbi`) | 89 GB |
 | `qtl_catalogue_susie` *(only when named)* | eQTL Catalogue SuSiE lbf / cs for the Step09 contexts | 316 GB |
 | `adsp_eqtl` *(only when named)* | ADSP FunGen brain bulk + single-nucleus eQTL | 720 GB |

@@ -89,7 +89,8 @@ Resource groups (--groups / --skip-groups); sizes are approximate downloads:
                       NG00184, GRCh38) + Kumasaka caQTL (GRCh38), MD5-checked ~230 GB
   meqtl               ADSP FunGen xQTL brain mQTL / meQTL (NG00184, GRCh38)   ~1.5 TB
   annotation          AlphaMissense, ClinVar, ENCODE SCREEN cCREs v4,
-                      gnomAD v4.1 constraint, UCSC liftover chains, phyloP    ~11 GB
+                      gnomAD v4.1 constraint, UCSC liftover chains, phyloP,
+                      RegulomeDB v2.2 scores (dbSNP153 common SNVs)           ~12 GB
   cadd                CADD v1.7 GRCh38 SNVs + gnomAD4 indels (+ .tbi)         ~89 GB
   Only when named in --groups:
   qtl_catalogue_susie eQTL Catalogue SuSiE lbf / cs for the Step09 contexts   ~316 GB
@@ -108,8 +109,8 @@ annotation under resources/annotation/<source>/.
 
 Step08 (local variant annotation) uses: vep (VEP 116 cache), genome (GRCh38
 FASTA + GENCODE GTF), annotation (AlphaMissense - tabix-indexed here -, ClinVar,
-ENCODE cCRE V4, gnomAD v4.1 constraint / LOEUF, phyloP 100-way) and cadd
-(CADD v1.7 SNVs + indels):
+ENCODE cCRE V4, gnomAD v4.1 constraint / LOEUF, phyloP 100-way, RegulomeDB v2.2
+- sorted, bgzipped and tabix-indexed here -) and cadd (CADD v1.7 SNVs + indels):
     envs/pipeline/bin/python Step00_Download_Resources.py --groups vep genome annotation cadd --output Step00_Download_Step08.sh
 
 NOT done here: derived resources (1000G PGEN panels, sample lists, Pangolin
@@ -221,6 +222,10 @@ KUMASAKA = "https://zenodo.org/records/13848268/files"   # caQTL, GRCh38 re-anal
 ALPHAMISSENSE = "https://storage.googleapis.com/dm_alphamissense"
 CLINVAR = "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38"
 SCREEN_CCRES = "https://downloads.wenglab.org/Registry-V4/GRCh38-cCREs.bed"
+# RegulomeDB v2.2 precalculated rank / probability for dbSNP v153 common SNVs (MAF >= 0.01),
+# GRCh38, ENCODE annotation ENCSR938LSO (Boyle lab). Plain TSV, 0-based BED-like coordinates.
+REGULOMEDB = "https://www.encodeproject.org/files/ENCFF250UJY/@@download/ENCFF250UJY.tsv"
+REGULOMEDB_MD5 = "a00d7cecb907dc60007d7b021e714f38"
 GNOMAD_CONSTRAINT = ("https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/constraint/"
                      "gnomad.v4.1.constraint_metrics.tsv")
 UCSC = "https://hgdownload.soe.ucsc.edu/goldenPath"
@@ -349,6 +354,8 @@ def local_file_valid(path: Path, expected_size: int | None = None) -> bool:
 # FILE ITEMS  (one item = one file = one SLURM array task)
 #   post  : - | fasta (decompress + faidx) | tar (extract into post_dir)
 #           | tabix (index a bgzip TSV: chrom col 1, position col 2, '#' header lines)
+#           | bed-tabix (plain BED-like TSV with one header line -> sorted <dest>.gz + .tbi;
+#             the plain file is removed afterwards)
 #   check : - | gzip | tar | parquet       (integrity test after download)
 #   mutable: "latest"/"master" URLs whose size may change before download,
 #            so their size is reported but not enforced.
@@ -804,6 +811,9 @@ def annotation_items() -> list[dict]:
                  base / "liftover/hg38ToHg19.over.chain.gz", check="gzip"),
             item("PHYLOP_100WAY", "annotation", f"{UCSC}/hg38/phyloP100way/hg38.phyloP100way.bw",
                  base / "conservation/hg38.phyloP100way.bw"),
+            item("REGULOMEDB_V2_2", "annotation", REGULOMEDB,
+                 base / "regulomedb/RegulomeDB_v2.2_dbSNP153_common_GRCh38.tsv",
+                 check=f"md5:{REGULOMEDB_MD5}", post="bed-tabix"),
         ]
     if "cadd" in SELECTED_GROUPS:
         for name in ("whole_genome_SNVs.tsv.gz", "gnomad.genomes.r4.0.indel.tsv.gz"):
@@ -826,6 +836,8 @@ def post_done(entry: dict) -> bool:
         return (ROOT / entry["post_dir"] / entry["post_marker"]).is_file()
     if entry["post"] == "tabix":
         return local_file_valid(ROOT / entry["dest"]) and local_file_valid(ROOT / (entry["dest"] + ".tbi"))
+    if entry["post"] == "bed-tabix":
+        return local_file_valid(ROOT / (entry["dest"] + ".gz")) and local_file_valid(ROOT / (entry["dest"] + ".gz.tbi"))
     return True
 
 
@@ -963,6 +975,7 @@ WGET="$(tool wget)"
 PIGZ="$(tool pigz)"
 SAMTOOLS="$(tool samtools)"
 TABIX="$(tool tabix)"
+BGZIP="$(tool bgzip)"
 # The final check runs with the project's interpreter, envs/pipeline/bin/python.
 PYTHON="$ROOT/envs/pipeline/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
@@ -987,6 +1000,7 @@ post_done() {
         fasta) [[ -s "${OUT%.gz}" && -s "${OUT%.gz}.fai" ]] ;;
         tar|tar-rm) [[ -e "$ROOT/$PDIR/$PMARKER" ]] ;;
         tabix) [[ -s "$OUT" && -s "$OUT.tbi" ]] ;;
+        bed-tabix) [[ -s "$OUT.gz" && -s "$OUT.gz.tbi" ]] ;;
         *)     return 0 ;;
     esac
 }
@@ -1166,6 +1180,15 @@ post_process() {
             [[ -n "$TABIX" ]] || { log "ERROR: tabix not found (run Step00_Installation.py first)"; return 1; }
             "$TABIX" -f -s 1 -b 2 -e 2 "$OUT" || return 1
             log "indexed: ${OUT#$ROOT/}.tbi" ;;
+        bed-tabix)
+            [[ -n "$TABIX" && -n "$BGZIP" ]] || { log "ERROR: tabix / bgzip not found (run Step00_Installation.py first)"; return 1; }
+            log "sorting + bgzip -> ${OUT#$ROOT/}.gz"
+            { head -n 1 "$OUT"
+              tail -n +2 "$OUT" | LC_ALL=C sort -t $'\t' -k1,1 -k2,2n -S 1G -T "$(dirname "$OUT")"
+            } | "$BGZIP" -c > "$OUT.gz.part" && mv "$OUT.gz.part" "$OUT.gz" || return 1
+            "$TABIX" -f -0 -s 1 -b 2 -e 3 -S 1 "$OUT.gz" || return 1
+            rm -f "$OUT"
+            log "indexed: ${OUT#$ROOT/}.gz.tbi (removed the plain TSV)" ;;
     esac
 }
 
