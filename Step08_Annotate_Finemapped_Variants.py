@@ -22,6 +22,18 @@ GWAS2Mech STEP 08 - Local annotation of fine-mapped variants
     # one variant (GRCh38, CHR:POS:REF:ALT)
     envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --test-variant 4:89822321:G:A
 
+    # FORCE: redo studies that are already annotated (done studies are skipped otherwise)
+    #   all studies: plan again with --force (written into the .sh), then sbatch
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --force
+    sbatch Step08_Annotate_parkinson_s_disease_european.sh
+    #   one study on this machine
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --index 2 --force
+    #   the same for the 1000G30x panel
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --force
+    sbatch Step08_Annotate_parkinson_s_disease_european_1000G30x.sh
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2 --force
+    #   plan again WITHOUT --force afterwards, or the next sbatch redoes everything again
+
     # verify everything annotation needs (files + indexes, VEP cache, tools, Python modules,
     # Step06 input for this panel, API keys); exits 1 if anything is missing
     envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
@@ -2549,7 +2561,9 @@ def print_table(frame: pd.DataFrame, columns: dict[str, str]) -> None:
         values = pd.to_numeric(show[c], errors="coerce")
         if c == "S05_MAPPING_RATE":
             show[c] = values.map(lambda x: "" if pd.isna(x) else f"{x:.1%}")
-        elif values.notna().any() and values.notna().sum() == show[c].replace("", np.nan).notna().sum()                 and (values.dropna() % 1 == 0).all():
+        elif (values.notna().any()
+              and values.notna().sum() == show[c].replace("", np.nan).notna().sum()
+              and (values.dropna() % 1 == 0).all()):
             show[c] = values.astype("Int64")      # counts: 3, not 3.0
     show = show.astype(object).where(show.notna(), "").rename(columns=columns)
     with pd.option_context("display.width", 250, "display.max_columns", None, "display.max_rows", None,

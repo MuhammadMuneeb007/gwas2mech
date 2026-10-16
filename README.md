@@ -718,6 +718,30 @@ envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Par
 For the default 1000G panel, use the same commands without `--reference-panel 1000G30x` (script
 `Step08_Annotate_parkinson_s_disease_european.sh`).
 
+**Force re-annotation.** A study that is already annotated (`annotation_provenance.json` exists) is
+skipped. `--force` redoes it, e.g. after new resources were downloaded (RegulomeDB) or a study was
+fine-mapped again. With the planner, `--force` is written into the `.sh`, so every study is redone;
+with `--index N` only that study is redone, on this machine:
+```bash
+# all studies, 1000G (default panel)
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --force
+sbatch Step08_Annotate_parkinson_s_disease_european.sh
+
+# all studies, 1000G30x panel
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --force
+sbatch Step08_Annotate_parkinson_s_disease_european_1000G30x.sh
+
+# one study (number 2 of the Step02 list), no SLURM
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --index 2 --force
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2 --force
+
+# then plan again WITHOUT --force, so a later sbatch does not redo finished studies
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+```
+Only failed or new studies, no `--force` needed: plan and `sbatch` again (finished studies are skipped,
+failed ones are retried). To redo one study by hand you can also delete its folder,
+`08_annotation/parkinson_s_disease/european_1000G30x/<GCST>/`, and run the planner again.
+
 `--stats` prints two tables on screen and writes all columns to
 `08_annotation/<phenotype>/<ancestry>_<PANEL>/annotation_stats.tsv`:
 
