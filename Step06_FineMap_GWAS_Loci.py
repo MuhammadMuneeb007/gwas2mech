@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -1052,8 +1053,9 @@ def create_regional_pvar(
 ) -> Path:
     prefix = locus_dir / "reference_region"
     pvar = Path(str(prefix) + ".pvar")
-    if pvar.exists() and pvar.stat().st_size > 0:
-        return pvar
+    # This function is called only for pending/recomputed loci.  Never reuse an
+    # older regional PVAR after its source panel or analysis parameters change.
+    pvar.unlink(missing_ok=True)
     run_command(
         [
             plink2,
@@ -1120,10 +1122,14 @@ def match_gwas_to_reference(regional: pd.DataFrame, reference: pd.DataFrame) -> 
         method = None
 
         if rsid and rsid in by_id:
-            candidates = [c for c in by_id[rsid] if allele_key(c["REFERENCE_REF"], c["REFERENCE_ALT"]) == key]
+            candidates = [
+                c for c in by_id[rsid]
+                if int(c["REFERENCE_POS"]) == pos
+                and allele_key(c["REFERENCE_REF"], c["REFERENCE_ALT"]) == key
+            ]
             if len(candidates) == 1:
                 selected = candidates[0]
-                method = "rsID+alleles"
+                method = "rsID+POS+alleles"
         if selected is None:
             candidates = [c for c in by_position.get(pos, []) if allele_key(c["REFERENCE_REF"], c["REFERENCE_ALT"]) == key]
             if len(candidates) == 1:
@@ -1496,19 +1502,33 @@ if (any(!is.finite(z))) stop("Non-finite Z scores")
 
 # ---- LD / z consistency -------------------------------------------------------
 s_est <- NA_real_; s_status <- "NOT_RUN"; s_error <- NA_character_; n_flips <- NA_integer_
+kriging_status <- "NOT_RUN"; kriging_error <- NA_character_
 if (p <= estimate_s_max_p) {
   r <- tryCatch(list(ok=TRUE, v=susieR::estimate_s_rss(z=z, R=R, n=n_gwas)),
                 error=function(e) list(ok=FALSE, v=conditionMessage(e)))
   if (r$ok) { s_est <- r$v; s_status <- "SUCCESS" } else { s_status <- "FAILED"; s_error <- r$v }
   if (r$ok) {
-    k <- tryCatch(susieR::kriging_rss(z=z, R=R, n=n_gwas, s=s_est)$conditional_dist,
-                  error=function(e) NULL)
-    if (!is.null(k)) {
-      k <- cbind(REFERENCE_ID=stats$REFERENCE_ID, POS=stats$POS, k)
-      flagged <- k$logLR > 2 & abs(k$z) > 2
-      n_flips <- sum(flagged, na.rm=TRUE)
-      k$POSSIBLE_ALLELE_FLIP <- flagged
-      write.table(k, file.path(outdir, "kriging.tsv"), sep="\t", quote=FALSE, row.names=FALSE)
+    kr <- tryCatch(list(ok=TRUE, v=susieR::kriging_rss(z=z, R=R, n=n_gwas, s=s_est)),
+                   error=function(e) list(ok=FALSE, v=conditionMessage(e)))
+    if (!kr$ok) {
+      kriging_status <- "FAILED"; kriging_error <- kr$v
+    } else {
+      # susieR::kriging_rss returns list(plot = p, conditional_dist = res)
+      # (susie_rss_utils.R); $table is accepted too, in case a version renames it.
+      k <- if (!is.null(kr$v$conditional_dist)) kr$v$conditional_dist else kr$v$table
+      if (!is.data.frame(k)) k <- as.data.frame(k)
+      if (nrow(k) != p || !all(c("z", "logLR") %in% names(k))) {
+        kriging_status <- "INVALID_TABLE"
+        kriging_error <- paste("Unexpected kriging table shape/columns:", nrow(k),
+                               paste(names(k), collapse=","))
+      } else {
+        k <- cbind(REFERENCE_ID=stats$REFERENCE_ID, POS=stats$POS, k)
+        flagged <- is.finite(k$logLR) & is.finite(k$z) & k$logLR > 2 & abs(k$z) > 2
+        n_flips <- sum(flagged, na.rm=TRUE)
+        k$POSSIBLE_ALLELE_FLIP <- flagged
+        write.table(k, file.path(outdir, "kriging.tsv"), sep="\t", quote=FALSE, row.names=FALSE)
+        kriging_status <- "SUCCESS"
+      }
     }
   }
 } else {
@@ -1580,6 +1600,8 @@ top_l1 <- if (all(is.na(variant$PIP_L1))) NA_character_ else variant$REFERENCE_I
 notes <- c()
 if (!converged) notes <- c(notes, paste0("not converged in ", max_iter, " iterations"))
 if (s_status != "SUCCESS") notes <- c(notes, paste0("LD consistency not checked (", s_status, ")"))
+if (s_status == "SUCCESS" && kriging_status != "SUCCESS")
+  notes <- c(notes, paste0("kriging allele-flip check not completed (", kriging_status, ")"))
 if (!is.na(s_est) && s_est > s_high) notes <- c(notes, sprintf("strong LD/z mismatch (s=%.2f)", s_est))
 if (!is.na(s_est) && s_est > s_warn && s_est <= s_high) notes <- c(notes, sprintf("LD/z mismatch (s=%.2f)", s_est))
 if (!is.na(n_flips) && n_flips > 0) notes <- c(notes, paste0(n_flips, " possible allele flips (kriging_rss)"))
@@ -1592,7 +1614,8 @@ summary <- data.frame(
   TOP_AGREES_L1=ifelse(is.na(top_l1), NA, top == top_l1),
   CONVERGED=converged, N_ITER=ifelse(is.null(fit$niter), NA, fit$niter),
   MIN_CS_PURITY=ifelse(length(purity_min) > 0, min(purity_min, na.rm=TRUE), NA),
-  ESTIMATE_S_RSS=s_est, ESTIMATE_S_STATUS=s_status, N_POSSIBLE_ALLELE_FLIPS=n_flips,
+  ESTIMATE_S_RSS=s_est, ESTIMATE_S_STATUS=s_status, KRIGING_STATUS=kriging_status,
+  KRIGING_ERROR=kriging_error, N_POSSIBLE_ALLELE_FLIPS=n_flips,
   MAX_ABS_Z=max(abs(z)), SUSIE_L=min(L,p), GWAS_N=n_gwas, REFERENCE_N=n_ref,
   COVERAGE=coverage, LD_RIDGE=ld_ridge, SUSIE_VERSION=as.character(packageVersion("susieR")),
   LOCUS_QC=ifelse(length(notes) == 0, "PASS", "WARN"),
@@ -1601,7 +1624,8 @@ summary <- data.frame(
 write.table(summary, file.path(outdir,"susie_summary.tsv"), sep="\t", quote=FALSE, row.names=FALSE)
 
 diagnostics <- data.frame(LOCUS_ID=locus_id, ESTIMATE_S_RSS=s_est, ESTIMATE_S_STATUS=s_status,
-                          ESTIMATE_S_ERROR=s_error, N_POSSIBLE_ALLELE_FLIPS=n_flips,
+                          ESTIMATE_S_ERROR=s_error, KRIGING_STATUS=kriging_status,
+                          KRIGING_ERROR=kriging_error, N_POSSIBLE_ALLELE_FLIPS=n_flips,
                           CONVERGED=converged, MAX_ABS_Z=max(abs(z)), stringsAsFactors=FALSE)
 write.table(diagnostics, file.path(outdir,"susie_diagnostics.tsv"), sep="\t", quote=FALSE, row.names=FALSE)
 '''
@@ -1673,6 +1697,8 @@ LOCUS_COMPLETE_MARKER = "LOCUS_COMPLETE.json"
 LOCUS_REQUIRED_OUTPUTS = (
     "susie_variants.tsv",
     "susie_summary.tsv",
+    "credible_sets.tsv",
+    "susie_diagnostics.tsv",
     "susie_fit.rds",
 )
 
@@ -1848,10 +1874,8 @@ def finemap_one_study(row, task_id: int) -> None:
     summary_json = output_dir / "finemapping_summary.json"
     hard_failure = output_dir / "FINEMAPPING_FAILED.txt"
 
-    if not force and final_variants.exists() and final_summary.exists() and summary_json.exists() and not hard_failure.exists():
-        banner("FINEMAPPING ALREADY COMPLETE")
-        print(accession)
-        return
+    # Do not skip a study based only on aggregate files existing.  The per-locus
+    # markers below validate current GWAS/lead/reference/code signatures.
 
     banner("STEP 06 - SUSIE-RSS FINEMAPPING WORKER")
     print(f"Study          : {accession}")
@@ -1959,6 +1983,14 @@ def finemap_one_study(row, task_id: int) -> None:
             "MAX_ITER": max_iter,
             "REFINE": refine,
             "R_HELPER_VERSION": R_HELPER_VERSION,
+            "R_HELPER_SHA256": hashlib.sha256(SUSIE_R_CODE.encode("utf-8")).hexdigest(),
+            "PYTHON_SCRIPT_SHA256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            # Protect against silent reuse when any chromosome reference changes.
+            "REFERENCE_FILES": [
+                file_signature(Path(str(reference_prefix(root, ancestry_code, chrom, reference_panel)) + ext))
+                for chrom in range(1, 23)
+                for ext in (".pgen", ".pvar", ".psam")
+            ],
             # (absent for the default panel, so finished 1000G loci stay valid)
             **({"REFERENCE_PANEL": reference_panel} if reference_panel != DEFAULT_PANEL else {}),
         }
@@ -1967,7 +1999,7 @@ def finemap_one_study(row, task_id: int) -> None:
             marker = read_valid_locus_marker(
                 locus_root / str(locus["LOCUS_ID"]), locus, run_signature
             )
-            if marker is not None:
+            if marker is not None and not force:   # FORCE: re-run every locus
                 completed_loci[str(locus["LOCUS_ID"])] = marker
         pending_loci = loci[~loci["LOCUS_ID"].astype(str).isin(completed_loci)]
         print(f"Loci validated  : {len(completed_loci)} (skipped)")
