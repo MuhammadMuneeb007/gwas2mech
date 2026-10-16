@@ -690,16 +690,32 @@ envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Par
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --test-variant 12:40340400:G:A
 ```
 
-**With the 1000 Genomes 30x panel** (reads `06_finemapping/<phenotype>/<ancestry>_1000G30x/`, writes
-`08_annotation/<phenotype>/<ancestry>_1000G30x/`):
+**With the 1000 Genomes 30x panel, local annotation only** (no `--online`: no API key, no internet;
+reads `06_finemapping/<phenotype>/<ancestry>_1000G30x/`, writes `08_annotation/<phenotype>/<ancestry>_1000G30x/`):
 ```bash
+# 0. local annotation files (once; only missing files get a task, e.g. RegulomeDB)
+envs/pipeline/bin/python Step00_Download_Resources.py --groups vep genome annotation cadd --output Step00_Download_Step08.sh
+sbatch Step00_Download_Step08.sh
+
+# 1. everything there? (must end with READY)
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
+
+# 2. plan + submit (one array task per fine-mapped study)
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
 sbatch Step08_Annotate_parkinson_s_disease_european_1000G30x.sh
+#    studies annotated before RegulomeDB was added: re-annotate them with --force
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --force
+sbatch Step08_Annotate_parkinson_s_disease_european_1000G30x.sh
+
+# 3. one study on the login / an interactive node instead of SLURM
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+
+# 4. progress and results
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
 ```
+For the default 1000G panel, use the same commands without `--reference-panel 1000G30x` (script
+`Step08_Annotate_parkinson_s_disease_european.sh`).
 
 | Source (local file) | Annotation |
 |---|---|
