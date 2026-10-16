@@ -718,6 +718,30 @@ envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Par
 For the default 1000G panel, use the same commands without `--reference-panel 1000G30x` (script
 `Step08_Annotate_parkinson_s_disease_european.sh`).
 
+`--stats` prints two tables on screen and writes all columns to
+`08_annotation/<phenotype>/<ancestry>_<PANEL>/annotation_stats.tsv`:
+
+```
+PIPELINE SUMMARY (one row per study; INDEX = --index number of Steps 02-09)
+IDX      STUDY QC_VARIANTS LAMBDA GWS_P<5e-8 LEADS MAP_RATE FM_LOCI FM_FAIL CRED_SETS ANNOTATION ANNOT_VARIANTS TOP_GENE (PIP)
+  1 GCST000001     7500000  1.081        900    30    97.1%      12       0         2       DONE           4210     SNCA (0.8)
+  2 GCST000002     7500001  1.081        500    20    97.1%      12       0         2    PENDING
+  3 GCST000003     7500002  1.081        100    10    97.1%       0       0              SKIPPED
+
+FUNCTIONAL EVIDENCE IN 95% CREDIBLE SETS (number of credible-set variants)
+IDX      STUDY LOCI CS_VARIANTS CODING LOF MISSENSE SPLICE AM_PATH CADD>=20 CLINVAR_PLP IN_CCRE CONSERVED REGULOMEDB_1-2
+  1 GCST000001   12         150      3   0        2      1       1        4           0      61        12             18
+```
+(illustrative numbers)
+
+| Column | Step | Meaning |
+|---|---|---|
+| `QC_VARIANTS`, `LAMBDA`, `GWS_P<5e-8` | Step02 | variants after QC, genomic inflation λGC, genome-wide significant variants |
+| `LEADS`, `MAP_RATE` | Step05 | independent lead variants, share of GWAS variants found in the LD panel |
+| `FM_LOCI`, `FM_FAIL`, `CRED_SETS` | Step06 | loci fine-mapped / failed, 95% credible sets |
+| `ANNOTATION`, `ANNOT_VARIANTS`, `TOP_GENE (PIP)` | Step08 | DONE / PENDING / FAILED / SKIPPED, annotated variants, gene of the highest-PIP variant |
+| `CODING` ... `REGULOMEDB_1-2` | Step08 | credible-set variants with each kind of functional evidence |
+
 | Source (local file) | Annotation |
 |---|---|
 | Ensembl VEP 116 offline cache + GRCh38 FASTA (`vep`, `genome`) | consequence on every transcript, most severe / MANE / canonical, gene, biotype, exon / intron, HGVS c./p., amino acids, protein domains, UniProt, SIFT, PolyPhen, regulatory features, rsIDs, gnomAD v4 and 1000G allele frequencies |

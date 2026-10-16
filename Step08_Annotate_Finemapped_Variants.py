@@ -83,7 +83,9 @@ Outputs (08_annotation/<p>/<a>/):
                                                    LoF / missense / ClinVar / cCRE evidence,
                                                    PIP-weighted functional composition
     <GCST>/annotation_provenance.json              resources, versions, counts per source
-    annotation_stats.tsv                           (--stats)
+    annotation_stats.tsv                           (--stats: one row per study with the Step02 QC,
+                                                   Step05 clumping, Step06 fine-mapping and Step08
+                                                   annotation numbers; also printed as tables)
 
 Alleles: annotation is for the 1000G REF/ALT pair matched in Step06. Z_ALT /
 BETA_ALT give the GWAS effect of the ALT allele (Step06 orients Z to REF).
@@ -2474,46 +2476,170 @@ def status_mode(args) -> None:
     print("\nStudies : " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
 
 
+def read_first_row(path: Path) -> dict:
+    try:
+        frame = pd.read_csv(path, sep="\t", low_memory=False)
+        return frame.iloc[0].to_dict() if len(frame) else {}
+    except Exception:
+        return {}
+
+
+def number(value, digits: int | None = None):
+    x = pd.to_numeric(value, errors="coerce")
+    if pd.isna(x):
+        return ""
+    return round(float(x), digits) if digits is not None else int(x)
+
+
+def previous_steps(P: dict, accession: str) -> dict:
+    """Per-study results of Step02 (QC), Step05 (clumping) and Step06 (fine-mapping)."""
+    qc = read_first_row(PROJECT_ROOT / "02_summary_stats" / P["p_slug"] / P["a_slug"] / "qc" / accession
+                        / f"{accession}_QC_summary.tsv")
+    clump = read_first_row(PROJECT_ROOT / "05_ld_clumping" / P["p_slug"] / P["r_slug"] / accession
+                           / "clumping_summary.tsv")
+    fm_json = P["finemap"] / accession / "finemapping_summary.json"
+    fm = json.loads(fm_json.read_text(encoding="utf-8")) if fm_json.exists() else {}
+    cs_file = P["finemap"] / accession / f"{accession}_95pct_credible_sets.tsv"
+    n_cs = ""
+    if cs_file.exists() and cs_file.stat().st_size > 2:
+        cs = pd.read_csv(cs_file, sep="\t", low_memory=False)
+        keys = [c for c in ("LOCUS_ID", "CREDIBLE_SET") if c in cs.columns]
+        n_cs = int(len(cs.drop_duplicates(keys))) if keys else ""
+    mapping = number(clump.get("MAPPING_RATE"), 4)
+    return {
+        "S02_QC_VARIANTS": number(qc.get("N_AFTER_QC")),
+        "S02_REMOVED": number(qc.get("N_REMOVED")),
+        "S02_LAMBDA_GC": number(qc.get("LAMBDA_GC"), 3),
+        "S02_GWS": number(qc.get("N_GENOME_WIDE_SIGNIFICANT")),
+        "S05_LEADS": number(clump.get("N_LEAD_VARIANTS")),
+        "S05_MAPPING_RATE": mapping,
+        "S06_GWAS_N": number(fm.get("GWAS_N")),
+        "S06_LOCI": number(fm.get("N_LOCI")),
+        "S06_LOCI_OK": number(fm.get("N_LOCI_SUCCESS")),
+        "S06_LOCI_FAILED": number(fm.get("N_LOCI_FAILED")),
+        "S06_CREDIBLE_SETS": n_cs,
+        "S06_STATUS": fm.get("STATUS", "DONE" if fm else ""),
+    }
+
+
+def step02_order(P: dict) -> dict[str, int]:
+    """accession -> study number of the Step02 download manifest (the --index number)."""
+    path = PROJECT_ROOT / "01_gwas_catalog" / P["p_slug"] / P["a_slug"] / "GWAS_download_manifest.tsv"
+    if not path.is_file():
+        return {}
+    m = pd.read_csv(path, sep="\t", dtype=str)
+    ids = pd.to_numeric(m.get("ARRAY_ID"), errors="coerce")
+    return {str(a).strip(): int(i) for a, i in zip(m["STUDY_ACCESSION"], ids) if pd.notna(i)}
+
+
+def annotation_state(P: dict, accession: str, ready: list[str], skipped: dict) -> str:
+    d = P["out"] / accession
+    if (d / "annotation_provenance.json").exists():
+        return "DONE"
+    if (d / "ANNOTATION_FAILED.txt").exists():
+        return "FAILED"
+    if accession in skipped:
+        return "SKIPPED"
+    return "PENDING" if accession in ready else "-"
+
+
+def print_table(frame: pd.DataFrame, columns: dict[str, str]) -> None:
+    show = frame[[c for c in columns if c in frame.columns]].copy()
+    for c in show.columns:
+        values = pd.to_numeric(show[c], errors="coerce")
+        if c == "S05_MAPPING_RATE":
+            show[c] = values.map(lambda x: "" if pd.isna(x) else f"{x:.1%}")
+        elif values.notna().any() and values.notna().sum() == show[c].replace("", np.nan).notna().sum()                 and (values.dropna() % 1 == 0).all():
+            show[c] = values.astype("Int64")      # counts: 3, not 3.0
+    show = show.astype(object).where(show.notna(), "").rename(columns=columns)
+    with pd.option_context("display.width", 250, "display.max_columns", None, "display.max_rows", None,
+                           "display.max_colwidth", 40):
+        print(show.to_string(index=False))
+
+
 def stats_mode(args) -> None:
     P = project_paths(args)
     banner(f"STEP 08 STATISTICS - {P['phenotype']} / {P['label']} ({P['code']}) - LD panel {P['panel']}")
-    rows = []
-    for d in sorted(p for p in P["out"].iterdir() if p.is_dir()) if P["out"].exists() else []:
-        final = d / f"{d.name}_annotated_variants.tsv.gz"
-        if not final.exists():
-            continue
-        m = pd.read_csv(final, sep="\t", low_memory=False)
-        cs = m[m["IN_95_CREDIBLE_SET"].astype(str) == "True"]
-        loci = pd.read_csv(d / f"{d.name}_locus_annotation_summary.tsv", sep="\t").fillna("")
-        b = lambda frame, col: int((frame.get(col, pd.Series(dtype=str)).astype(str) == "True").sum())  # noqa: E731
-        category = cs.get("VEP_FUNCTIONAL_CATEGORY", pd.Series(dtype=str)).fillna("NOT_ANNOTATED")
-        pip_by_class = (cs["PIP"].groupby(category).sum() / max(cs["PIP"].sum(), 1e-12)).round(3)
-        row = {"STUDY_ACCESSION": d.name, "N_VARIANTS": len(m), "N_LOCI": len(loci), "N_CS_VARIANTS": len(cs),
-               "CS_CODING": b(cs, "IS_CODING"), "CS_LOF": b(cs, "IS_LOF"), "CS_MISSENSE": b(cs, "IS_MISSENSE"),
-               "CS_SPLICE": b(cs, "IS_SPLICE"), "CS_AM_LIKELY_PATHOGENIC": b(cs, "AM_LIKELY_PATHOGENIC"),
-               "CS_CADD_GE_20": b(cs, "CADD_GE_20"), "CS_CLINVAR_PATHOGENIC": b(cs, "CLINVAR_PATHOGENIC"),
-               "CS_IN_CCRE": b(cs, "IN_CCRE"), "CS_CONSERVED": b(cs, "PHYLOP_CONSERVED"),
-               "CS_REGULOMEDB_STRONG": b(cs, "REGULOMEDB_STRONG"),
-               **{f"CS_PIP_FRACTION_{k}": v for k, v in pip_by_class.items()}}
+    order = step02_order(P)
+    ready, skipped_list = finemapped_studies(P)
+    skipped = dict(skipped_list)
+    done_dirs = [d.name for d in P["out"].iterdir() if d.is_dir() and not d.name.startswith("_")] \
+        if P["out"].exists() else []
+    accessions = sorted(set(order) | set(ready) | set(skipped) | set(done_dirs),
+                        key=lambda a: (order.get(a, 10 ** 9), a))
+    accessions = [a for a in accessions if a not in ("cache",)]
+
+    rows, details = [], []
+    for accession in accessions:
+        state = annotation_state(P, accession, ready, skipped)
+        row = {"INDEX": order.get(accession, ""), "STUDY_ACCESSION": accession,
+               **previous_steps(P, accession), "S08_STATUS": state}
+        d = P["out"] / accession
+        final = d / f"{accession}_annotated_variants.tsv.gz"
+        if state == "DONE" and final.exists():
+            m = pd.read_csv(final, sep="\t", low_memory=False)
+            cs = m[m["IN_95_CREDIBLE_SET"].astype(str) == "True"]
+            loci_file = d / f"{accession}_locus_annotation_summary.tsv"
+            loci = pd.read_csv(loci_file, sep="\t").fillna("") if loci_file.exists() else pd.DataFrame()
+            b = lambda frame, col: int((frame.get(col, pd.Series(dtype=str)).astype(str) == "True").sum())  # noqa: E731
+            category = cs.get("VEP_FUNCTIONAL_CATEGORY", pd.Series(dtype=str)).fillna("NOT_ANNOTATED")
+            pip_by_class = (cs["PIP"].groupby(category).sum() / max(cs["PIP"].sum(), 1e-12)).round(3)
+            top_gene = ""
+            if len(loci):
+                best = loci.sort_values("TOP_PIP", ascending=False).iloc[0]
+                top_gene = f"{best.get('TOP_GENE', '') or '-'} ({best['TOP_PIP']})"
+            row.update({
+                "S08_VARIANTS": len(m), "S08_LOCI": len(loci), "S08_CS_VARIANTS": len(cs),
+                "CS_CODING": b(cs, "IS_CODING"), "CS_LOF": b(cs, "IS_LOF"), "CS_MISSENSE": b(cs, "IS_MISSENSE"),
+                "CS_SPLICE": b(cs, "IS_SPLICE"), "CS_AM_LIKELY_PATHOGENIC": b(cs, "AM_LIKELY_PATHOGENIC"),
+                "CS_CADD_GE_20": b(cs, "CADD_GE_20"), "CS_CLINVAR_PATHOGENIC": b(cs, "CLINVAR_PATHOGENIC"),
+                "CS_IN_CCRE": b(cs, "IN_CCRE"), "CS_CONSERVED": b(cs, "PHYLOP_CONSERVED"),
+                "CS_REGULOMEDB_STRONG": b(cs, "REGULOMEDB_STRONG"), "TOP_GENE_PIP": top_gene,
+                **{f"CS_PIP_FRACTION_{k}": v for k, v in pip_by_class.items()}})
+            details.append((accession, m, cs, loci, pip_by_class))
         rows.append(row)
-        print(f"\n{d.name}: {len(m):,} variants in {len(loci)} loci; {len(cs):,} in 95% credible sets")
-        print(f"   credible-set variants: coding {row['CS_CODING']} (LoF {row['CS_LOF']}, missense "
-              f"{row['CS_MISSENSE']}), splice {row['CS_SPLICE']}, AlphaMissense likely pathogenic "
-              f"{row['CS_AM_LIKELY_PATHOGENIC']}, CADD>=20 {row['CS_CADD_GE_20']}, ClinVar P/LP "
-              f"{row['CS_CLINVAR_PATHOGENIC']}, in cCRE {row['CS_IN_CCRE']}, conserved {row['CS_CONSERVED']}, "
-              f"RegulomeDB 1-2 {row['CS_REGULOMEDB_STRONG']}")
+
+    if not rows:
+        print("No studies found (run Step02-Step06 first, see --status).")
+        return
+    table = pd.DataFrame(rows)
+
+    print("\nPIPELINE SUMMARY (one row per study; INDEX = --index number of Steps 02-09)")
+    print_table(table, {
+        "INDEX": "IDX", "STUDY_ACCESSION": "STUDY", "S02_QC_VARIANTS": "QC_VARIANTS", "S02_LAMBDA_GC": "LAMBDA",
+        "S02_GWS": "GWS_P<5e-8", "S05_LEADS": "LEADS", "S05_MAPPING_RATE": "MAP_RATE", "S06_LOCI_OK": "FM_LOCI",
+        "S06_LOCI_FAILED": "FM_FAIL", "S06_CREDIBLE_SETS": "CRED_SETS", "S08_STATUS": "ANNOTATION",
+        "S08_VARIANTS": "ANNOT_VARIANTS", "TOP_GENE_PIP": "TOP_GENE (PIP)"})
+
+    done = table[table["S08_STATUS"] == "DONE"]
+    if len(done):
+        print("\nFUNCTIONAL EVIDENCE IN 95% CREDIBLE SETS (number of credible-set variants)")
+        print_table(done, {
+            "INDEX": "IDX", "STUDY_ACCESSION": "STUDY", "S08_LOCI": "LOCI", "S08_CS_VARIANTS": "CS_VARIANTS",
+            "CS_CODING": "CODING", "CS_LOF": "LOF", "CS_MISSENSE": "MISSENSE", "CS_SPLICE": "SPLICE",
+            "CS_AM_LIKELY_PATHOGENIC": "AM_PATH", "CS_CADD_GE_20": "CADD>=20", "CS_CLINVAR_PATHOGENIC": "CLINVAR_PLP",
+            "CS_IN_CCRE": "IN_CCRE", "CS_CONSERVED": "CONSERVED", "CS_REGULOMEDB_STRONG": "REGULOMEDB_1-2"})
+        totals = done.select_dtypes("number").drop(columns=["INDEX"], errors="ignore").sum()
+        print(f"\nTOTAL over {len(done)} annotated studies: {int(totals.get('S08_CS_VARIANTS', 0)):,} credible-set "
+              f"variants; coding {int(totals.get('CS_CODING', 0))}, LoF {int(totals.get('CS_LOF', 0))}, missense "
+              f"{int(totals.get('CS_MISSENSE', 0))}, ClinVar P/LP {int(totals.get('CS_CLINVAR_PATHOGENIC', 0))}, "
+              f"in cCRE {int(totals.get('CS_IN_CCRE', 0))}, RegulomeDB 1-2 {int(totals.get('CS_REGULOMEDB_STRONG', 0))}")
+    counts = table["S08_STATUS"].value_counts()
+    print("Annotation status: " + "  ".join(f"{k}={v}" for k, v in counts.items()))
+
+    for accession, m, cs, loci, pip_by_class in details:
+        print(f"\n{accession}: {len(m):,} variants in {len(loci)} loci; {len(cs):,} in 95% credible sets")
         print("   PIP mass in credible sets by class: "
               + ", ".join(f"{k} {v:.0%}" for k, v in pip_by_class.sort_values(ascending=False).items()))
-        top = loci.sort_values("TOP_PIP", ascending=False).head(8)
+        top = loci.sort_values("TOP_PIP", ascending=False).head(8) if len(loci) else loci
         for _, r in top.iterrows():
             print(f"   {r['LOCUS_ID']}: {r['TOP_VARIANT']} {r.get('TOP_RSID', '') or ''} PIP {r['TOP_PIP']} "
                   f"{r.get('TOP_GENE', '') or ''} {r.get('TOP_CONSEQUENCE', '') or ''} | {r.get('TOP_EVIDENCE', '') or ''}")
-    if not rows:
-        print("No annotated studies yet (see --status).")
-        return
+
     output = P["out"] / "annotation_stats.tsv"
-    pd.DataFrame(rows).to_csv(output, sep="\t", index=False)
-    print(f"\nTable: {output}")
+    P["out"].mkdir(parents=True, exist_ok=True)
+    table.to_csv(output, sep="\t", index=False)
+    print(f"\nTable (all columns, Steps 02-08): {output}")
 
 
 def test_variant_mode(args) -> None:
