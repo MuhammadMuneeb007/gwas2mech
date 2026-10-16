@@ -21,6 +21,13 @@ GWAS2Mech STEP 08 - Local annotation of fine-mapped variants
     # one variant (GRCh38, CHR:POS:REF:ALT)
     envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --test-variant 4:89822321:G:A
 
+    # verify everything annotation needs (files + indexes, VEP cache, tools, Python modules,
+    # Step06 input for this panel, API keys); exits 1 if anything is missing
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
+    # ... and also test the web APIs (login node with internet)
+    envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources --online screen,regulomedb
+
     # ---- 1000 Genomes 30x LD panel (Steps 04-06 with --reference-panel 1000G30x) ----
     # reads 06_finemapping/<p>/<a>_1000G30x/, writes 08_annotation/<p>/<a>_1000G30x/
     envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
@@ -49,9 +56,16 @@ is reproducible:
 
 OPTIONAL ONLINE (--online screen,regulomedb), credible-set variants only:
     SCREEN GraphQL  cell-type-specific cCRE activity, cCRE -> gene links
-                    (export SCREEN_API_KEY=...)
-    RegulomeDB      regulatory probability / rank
+                    (needs SCREEN_API_KEY, see "API keys" below)
+    RegulomeDB      regulatory probability / rank (no key)
 Network failures are recorded as API_ERROR, never as "no hit".
+
+API keys (only for --online screen; the default local run needs no key and no internet):
+    SCREEN_API_KEY is read, in this order, from
+      1. the environment:           export SCREEN_API_KEY=...
+      2. config/api_keys.env:       SCREEN_API_KEY=...   (git-ignored, one KEY=value per line;
+                                    template: config/api_keys.example.env)
+    Never paste a key into this script: it is tracked by git.
 
 Inputs (Step06):
     06_finemapping/<p>/<a>/<GCST>/<GCST>_finemapped_variants.tsv.gz
@@ -109,9 +123,38 @@ SPECIES = "homo_sapiens"
 PROJECT_ROOT = Path.cwd().resolve()
 MAX_ARRAY_TASKS = 1000
 
-SCREEN_GRAPHQL = "https://screen.api.wenglab.org/graphql"
-REGULOMEDB_API = "https://api.regulomedb.org/search"
-REGULOMEDB_FALLBACK = "https://regulomedb.org/regulome-search/"
+# ---- web APIs (only with --online; the default local annotation calls none) --
+SCREEN_GRAPHQL = "https://screen.api.wenglab.org/graphql"       # needs SCREEN_API_KEY
+REGULOMEDB_API = "https://api.regulomedb.org/search"            # public, no key
+REGULOMEDB_FALLBACK = "https://regulomedb.org/regulome-search/"  # public, no key
+# Keys: environment first, then this git-ignored file (KEY=value lines). Never put a key in this script.
+API_KEYS_FILE = PROJECT_ROOT / "config" / "api_keys.env"
+API_KEY_NAMES = {"screen": "SCREEN_API_KEY"}                    # --online provider -> key variable
+
+
+def read_api_keys_file(path: Path = API_KEYS_FILE) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.is_file():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.removeprefix("export ").split("=", 1)
+        values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+def api_key(name: str) -> tuple[str, str]:
+    """(value, source) of an API key: environment, then config/api_keys.env; ('', '') if unset."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value, "environment"
+    value = read_api_keys_file().get(name, "").strip()
+    return (value, API_KEYS_FILE.relative_to(PROJECT_ROOT).as_posix()) if value else ("", "")
+
+
+SCREEN_API_KEY, SCREEN_API_KEY_SOURCE = api_key("SCREEN_API_KEY")
 
 # ---- local resources (Step00_Download_Resources.py) -------------------------
 RES = PROJECT_ROOT / "resources"
@@ -1024,7 +1067,7 @@ def get_screen_detail_cached(
 
 
 def worker_screen(batch: pd.DataFrame, args: argparse.Namespace, output_file: Path) -> pd.DataFrame:
-    api_key = os.environ.get("SCREEN_API_KEY", "").strip()
+    api_key = SCREEN_API_KEY
     if not api_key:
         return pd.DataFrame(
             [
@@ -1438,11 +1481,6 @@ def worker_regulomedb(
 
 
 # =============================================================================
-# CLINVAR / NCBI E-UTILITIES
-# =============================================================================
-
-
-# =============================================================================
 # LOCAL RESOURCES
 # =============================================================================
 
@@ -1467,26 +1505,144 @@ def resource_table() -> list[dict[str, Any]]:
     out = []
     for name, path, group, needed in rows:
         index = {".gz": ".tbi", ".fa": ".fai"}.get(path.suffix)
-        present = path.exists() and (index is None or Path(str(path) + index).exists())
+        problem = resource_problem(path, index)
         out.append({"RESOURCE": name, "PATH": str(path), "GROUP": group, "REQUIRED_FOR_VEP": needed,
-                    "PRESENT": present})
+                    "PRESENT": not problem, "PROBLEM": problem})
     return out
 
 
-def print_resources() -> None:
+def resource_problem(path: Path, index: str | None) -> str:
+    """'' when the resource is usable, otherwise what is wrong with it."""
+    if not path.exists():
+        return "missing"
+    if path.is_dir():
+        if not (path / "info.txt").is_file():
+            return "VEP cache incomplete (no info.txt)"
+        chroms = [d for d in path.iterdir() if d.is_dir()]
+        return "" if len(chroms) >= 22 else f"VEP cache incomplete ({len(chroms)} chromosome folders)"
+    if path.stat().st_size == 0:
+        return "empty file"
+    if index:
+        idx = Path(str(path) + index)
+        if not idx.exists():
+            return f"no {index} index"
+    return ""
+
+
+def size_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    if path.is_dir():
+        return "dir"
+    n = float(path.stat().st_size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return ""
+
+
+def python_module_ok(name: str) -> bool:
+    import importlib.util
+    return importlib.util.find_spec(name) is not None
+
+
+def probe_api(provider: str) -> tuple[bool, str]:
+    """One small live request per provider (only with --check-resources --online)."""
+    if requests is None:
+        return False, "python requests not installed"
+    try:
+        if provider == "screen":
+            if not SCREEN_API_KEY:
+                return False, "SCREEN_API_KEY not set"
+            r = requests.post(SCREEN_GRAPHQL, timeout=30, json={"query": "{ __typename }"},
+                              headers={"Authorization": f"Bearer {SCREEN_API_KEY}",
+                                       "Content-Type": "application/json", "Accept": "application/json"})
+        elif provider == "regulomedb":
+            r = requests.get(REGULOMEDB_API, timeout=30, headers={"Accept": "application/json"},
+                             params={"regions": "chr12:40340399-40340400", "genome": "GRCh38"})
+        else:
+            return False, "unknown provider (use screen, regulomedb)"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {str(exc)[:120]}"
+    if r.status_code in (401, 403):
+        return False, f"HTTP {r.status_code}: key rejected"
+    return r.ok, f"HTTP {r.status_code}"
+
+
+def print_resources() -> list[str]:
+    """Print the local data files and tools; return the problems found."""
     banner("STEP 08 - LOCAL ANNOTATION RESOURCES")
-    missing_groups = set()
+    missing_groups, problems = set(), []
     for r in resource_table():
-        print(f"  {'OK     ' if r['PRESENT'] else 'MISSING'}  {r['RESOURCE']:<28} [{r['GROUP']}]  {r['PATH']}")
+        state = "OK     " if r["PRESENT"] else "MISSING"
+        print(f"  {state}  {r['RESOURCE']:<28} [{r['GROUP']:<10}] {size_text(Path(r['PATH'])):>9}  {r['PATH']}"
+              + (f"  <- {r['PROBLEM']}" if r["PROBLEM"] else ""))
         if not r["PRESENT"]:
             missing_groups.add(r["GROUP"])
+            problems.append(f"{r['RESOURCE']}: {r['PROBLEM']}")
     vep = tool("vep")
-    print(f"  {'OK     ' if vep else 'MISSING'}  {'vep executable':<28} [Step00_Installation]  {vep or ''}")
+    print(f"  {'OK     ' if vep else 'MISSING'}  {'vep executable':<28} [install   ] {'':>9}  {vep or ''}")
+    if not vep:
+        problems.append("vep executable: not found (Step00_Installation.py)")
+    for module, use in (("pysam", "CADD / AlphaMissense / ClinVar lookups"), ("pyBigWig", "phyloP"),
+                        ("requests", "--online only")):
+        ok = python_module_ok(module)
+        print(f"  {'OK     ' if ok else 'MISSING'}  {'python ' + module:<28} [install   ] {'':>9}  {use}")
+        if not ok and module != "requests":
+            problems.append(f"python {module}: not installed (Step00_Installation.py)")
     if missing_groups:
         print("\nDownload the missing groups with:")
         print("  envs/pipeline/bin/python Step00_Download_Resources.py --groups "
               + " ".join(sorted(missing_groups)) + " --output Step00_Download_Step08.sh")
         print("  sbatch Step00_Download_Step08.sh")
+    return problems
+
+
+def check_resources_mode(args) -> None:
+    """--check-resources: is everything there to annotate this phenotype / ancestry / panel?"""
+    P = project_paths(args)
+    problems = print_resources()
+
+    banner(f"STEP 08 - INPUT FROM STEP06 - {P['phenotype']} / {P['label']} - LD panel {P['panel']}")
+    ready, skipped = finemapped_studies(P)
+    print(f"  Fine-mapping folder : {P['finemap']}  ({'exists' if P['finemap'].exists() else 'MISSING'})")
+    print(f"  Ready to annotate   : {len(ready)} studies  {' '.join(ready[:10])}{' ...' if len(ready) > 10 else ''}")
+    for accession, why in skipped:
+        print(f"  Skipped             : {accession}  ({why})")
+    if not ready:
+        problems.append(f"no fine-mapped studies under {P['finemap']} - run Step06"
+                        f"{panel_option(P['panel'])} first")
+    print(f"  Results will go to  : {P['out']}")
+
+    banner("STEP 08 - WEB APIs (optional, only used with --online)")
+    print("  The default annotation is fully local: no API and no internet needed.")
+    print(f"  SCREEN_API_KEY      : {'SET (from ' + SCREEN_API_KEY_SOURCE + ')' if SCREEN_API_KEY else 'not set'}"
+          f"  - needed only for --online screen")
+    print(f"                        set it with: export SCREEN_API_KEY=...  or  SCREEN_API_KEY=... in "
+          f"{API_KEYS_FILE.relative_to(PROJECT_ROOT).as_posix()}")
+    print("  RegulomeDB          : public, no key needed")
+    print(f"  Endpoints           : SCREEN {SCREEN_GRAPHQL}")
+    print(f"                        RegulomeDB {REGULOMEDB_API}")
+    providers = [x.strip().lower() for x in (args.online or "").split(",") if x.strip()]
+    for provider in providers:
+        ok, detail = probe_api(provider)
+        print(f"  {'OK     ' if ok else 'FAILED '}  live test {provider:<12} {detail}")
+        if not ok:
+            problems.append(f"--online {provider}: {detail}")
+    if not providers:
+        print("  (add --online screen,regulomedb to test the APIs live from this node)")
+
+    banner("STEP 08 - CHECK RESULT")
+    if problems:
+        print(f"NOT READY - {len(problems)} problem(s):")
+        for problem in problems:
+            print(f"  - {problem}")
+        raise SystemExit(1)
+    print("READY - every annotation resource, tool and Step06 input is present.")
+    base = (f"envs/pipeline/bin/python {Path(__file__).name} --phenotype {shlex.quote(P['phenotype'])} "
+            f"--ancestry {P['code']}{panel_option(P['panel'])}")
+    print(f"NEXT:\n  {base}")
 
 
 def tabix_contig(contigs: Iterable[str], chrom: int) -> str | None:
@@ -2177,7 +2333,7 @@ def planner_mode(args) -> None:
 set -euo pipefail
 cd {shlex.quote(str(PROJECT_ROOT))}
 export PATH={shlex.quote(str(PROJECT_ROOT / 'envs' / 'pipeline' / 'bin'))}:"$PATH"
-{'export SCREEN_API_KEY="${SCREEN_API_KEY:-}"' if 'screen' in (args.online or '') else ''}
+{'# SCREEN_API_KEY: exported in the environment or read from config/api_keys.env' if 'screen' in (args.online or '') else ''}
 
 {' '.join(shlex.quote(x) for x in command)}
 """, encoding="utf-8", newline="\n")
@@ -2322,7 +2478,10 @@ def arguments(argv=None):
                        help="Study N of the Step02 download manifest: annotate it on this machine.")
     modes.add_argument("--status", action="store_true", help="READ-ONLY: done / failed / pending per study.")
     modes.add_argument("--stats", action="store_true", help="Credible-set functional summary per study.")
-    modes.add_argument("--check-resources", action="store_true", help="Which local resources are present.")
+    modes.add_argument("--check-resources", action="store_true",
+                       help="Verify every annotation file (+ index), the VEP cache, tools, Python modules, the "
+                            "Step06 input of this panel and the API keys; exit 1 if anything is missing. "
+                            "With --online, also test the web APIs live.")
     modes.add_argument("--test-variant", default=None, help="Annotate one GRCh38 variant, e.g. 4:89822321:G:A.")
     modes.add_argument("--worker-manifest", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--reference-panel", default=DEFAULT_PANEL,
@@ -2357,7 +2516,7 @@ def arguments(argv=None):
 def main() -> None:
     args = arguments()
     if args.check_resources:
-        print_resources()
+        check_resources_mode(args)
     elif args.test_variant:
         test_variant_mode(args)
     elif args.status:

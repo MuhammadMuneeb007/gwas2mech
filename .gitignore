@@ -47,3 +47,8 @@ Encrico/
 # Python
 __pycache__/
 *.pyc
+
+# API keys (template: config/api_keys.example.env) - never commit
+config/api_keys.env
+*.env
+!config/api_keys.example.env

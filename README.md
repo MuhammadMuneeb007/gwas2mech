@@ -670,8 +670,18 @@ Annotates **every** fine-mapped variant from local, versioned files (no web serv
 compute nodes without internet, reproducible). Download once:
 `Step00_Download_Resources.py --groups vep genome annotation cadd`.
 
+**Check first** that everything annotation needs is there. `--check-resources` verifies every data file
+(present, non-empty, `.tbi` / `.fai` index), the VEP 116 cache, the `vep` executable, the Python modules
+(`pysam`, `pyBigWig`), the Step06 fine-mapping input of the chosen panel and the API keys. It prints the
+Step00 command for anything missing and exits with code 1 (`READY` and exit 0 when all is present):
 ```bash
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
+# also test the web APIs live (login node with internet; only matters if you use --online)
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources --online screen,regulomedb
+```
+
+```bash
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR   # plan
 sbatch Step08_Annotate_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --status
@@ -683,6 +693,7 @@ envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Par
 **With the 1000 Genomes 30x panel** (reads `06_finemapping/<phenotype>/<ancestry>_1000G30x/`, writes
 `08_annotation/<phenotype>/<ancestry>_1000G30x/`):
 ```bash
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
 sbatch Step08_Annotate_parkinson_s_disease_european_1000G30x.sh
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
@@ -700,9 +711,27 @@ envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Par
 | phyloP 100-way (`annotation`) | conservation |
 | gnomAD v4.1 constraint (`annotation`) | LOEUF, pLI, missense Z of the gene |
 
-Optional web lookups for 95% credible-set variants only: `--online screen,regulomedb` (SCREEN
-cell-type cCRE activity and cCRE-gene links, needs `SCREEN_API_KEY`; RegulomeDB score). `--scope cs`
-or `--scope pip --min-pip 0.01` limits the annotation to credible sets / PIP.
+`--scope cs` or `--scope pip --min-pip 0.01` limits the annotation to credible sets / PIP.
+
+**Do you need an API key? No.** Every annotation above comes from local files; the default run calls
+no web service. APIs are used only by the optional `--online` lookups for 95% credible-set variants:
+
+| `--online` provider | Adds | Key |
+|---|---|---|
+| `screen` | ENCODE SCREEN cell-type cCRE activity and cCRE-gene links | `SCREEN_API_KEY` |
+| `regulomedb` | RegulomeDB probability / rank | none (public) |
+
+Set the key once, either in the shell or in the git-ignored `config/api_keys.env` (copy
+`config/api_keys.example.env`); the environment wins if both are set. Never paste a key into a script.
+```bash
+cp config/api_keys.example.env config/api_keys.env    # then edit: SCREEN_API_KEY=<your key>
+# or: export SCREEN_API_KEY=<your key>
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources --online screen,regulomedb
+envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py --phenotype "Parkinson's disease" --ancestry EUR --online screen,regulomedb
+sbatch Step08_Annotate_parkinson_s_disease_european.sh
+```
+Without a key, `--online screen` writes `SCREEN_STATUS = SCREEN_API_KEY_NOT_SET`; network failures are
+recorded as `API_ERROR`, never as "no hit".
 
 Outputs in `08_annotation/<phenotype>/<ancestry>/<GCST>/`: `<GCST>_annotated_variants.tsv.gz` (all
 variants, fine-mapping + annotation, `Z_ALT`/`BETA_ALT` = GWAS effect of the ALT allele),
