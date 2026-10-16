@@ -54,8 +54,16 @@ Per task: resumable download (aria2c, else curl/wget into <file>.part) ->
 exact-size check -> integrity check (gzip -t / tar -t / parquet footer / MD5)
 -> post-processing (FASTA decompress + samtools faidx; tar extraction for
 GTEx, the VEP cache and the molecular-QTL archives - the very large ones are
-deleted after a verified extraction). A corrupt file is deleted so the next
-run fetches it again.
+deleted after a verified extraction).
+
+A task does NOT end before its file is complete: after a dropped or stalled
+connection it resumes the download again and again (waits growing to 10 min),
+a file that fails its integrity check is downloaded again (3 attempts), and
+when the job's walltime is nearly over the running download is stopped cleanly
+(resumable) and the task submits a continuation job for the same file (at most
+10 in a row). It only gives up when the server says the file does not exist
+(HTTP 404 / 410). If the server's file changed size since planning, the new
+size is used.
 
 Resource groups (--groups / --skip-groups); sizes are approximate downloads:
 
@@ -990,8 +998,57 @@ md5_of() {
 # -----------------------------------------------------------------------------
 # download: aria2c (resumable via .aria2), else curl/wget into <file>.part
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# walltime: seconds left in this SLURM job (huge outside SLURM). Every download
+# attempt is stopped RESERVE_S before the end, so it can resume in a new job.
+# -----------------------------------------------------------------------------
+RESERVE_S=900
+MAX_CONTINUATIONS=10
+MAX_LOCAL_ROUNDS=50
+
+time_left() {
+    local left rest d=0 h=0 m=0 s=0 parts
+    if [[ -z "${SLURM_JOB_ID:-}" ]] || ! command -v squeue >/dev/null 2>&1; then echo 999999999; return; fi
+    left="$(squeue -h -j "$SLURM_JOB_ID" -o %L 2>/dev/null | head -1)"
+    if [[ -z "$left" || "$left" == UNLIMITED || "$left" == INVALID || "$left" == NOT_SET ]]; then
+        echo 999999999; return
+    fi
+    rest="$left"
+    if [[ "$rest" == *-* ]]; then d="${rest%%-*}"; rest="${rest#*-}"; fi
+    IFS=: read -r -a parts <<< "$rest"
+    case ${#parts[@]} in
+        3) h="${parts[0]}"; m="${parts[1]}"; s="${parts[2]}" ;;
+        2) m="${parts[0]}"; s="${parts[1]}" ;;
+        1) s="${parts[0]}" ;;
+    esac
+    echo $(( 10#${d:-0} * 86400 + 10#${h:-0} * 3600 + 10#${m:-0} * 60 + 10#${s:-0} ))
+}
+
+# Run one download attempt, stopped (TERM: aria2c / curl keep what they have)
+# RESERVE_S before the walltime ends.
+run_limited() {
+    local budget=$(( $(time_left) - RESERVE_S ))
+    (( budget < 60 )) && return 124
+    if command -v timeout >/dev/null 2>&1 && (( budget < 999999999 - RESERVE_S )); then
+        timeout --signal=TERM "$budget" "$@"
+    else
+        "$@"
+    fi
+}
+
+http_status() {
+    [[ -n "$CURL" ]] || { echo 0; return; }
+    "$CURL" -sIL -o /dev/null -w '%{http_code}' --connect-timeout 60 --max-time 120 "$URL" 2>/dev/null || echo 0
+}
+
+remote_size() {
+    [[ -n "$CURL" ]] || return 0
+    "$CURL" -sIL --connect-timeout 60 --max-time 120 "$URL" 2>/dev/null | tr -d '\r' \
+        | awk 'tolower($1) == "content-length:" { n = $2 } END { if (n != "") print n }'
+}
+
 aria2() {
-    "$ARIA2" --continue=true --max-connection-per-server=4 --split=4 --min-split-size=16M \
+    run_limited "$ARIA2" --continue=true --max-connection-per-server=4 --split=4 --min-split-size=16M \
         --file-allocation=none --auto-file-renaming=false --allow-overwrite=true \
         --max-tries=10 --retry-wait=10 --connect-timeout=60 --timeout=120 \
         --console-log-level=warn --summary-interval=60 \
@@ -1000,34 +1057,77 @@ aria2() {
 
 to_part() {
     if [[ -n "$CURL" ]]; then
-        "$CURL" --fail --location --retry 10 --retry-delay 10 --retry-all-errors \
-            --connect-timeout 60 --continue-at - --output "$OUT.part" "$URL" || return 1
+        # --speed-limit/--speed-time: a stalled connection (< 1 KB/s for 10 min) is
+        # dropped and resumed instead of hanging until the walltime.
+        run_limited "$CURL" --fail --location --retry 10 --retry-delay 10 \
+            --connect-timeout 60 --speed-limit 1024 --speed-time 600 \
+            --continue-at - --output "$OUT.part" "$URL" || return 1
     elif [[ -n "$WGET" ]]; then
-        "$WGET" --continue --tries=10 --waitretry=10 --timeout=120 -O "$OUT.part" "$URL" || return 1
+        run_limited "$WGET" --continue --tries=10 --waitretry=10 --timeout=120 -O "$OUT.part" "$URL" || return 1
     else
         log "ERROR: none of aria2c / curl / wget is available"; return 1
     fi
     mv "$OUT.part" "$OUT"
 }
 
+# One download attempt (resumes whatever is there).
+fetch_once() {
+    if [[ -e "$OUT.aria2" && -n "$ARIA2" ]]; then
+        log "resuming aria2 download ($(file_size "$OUT") bytes so far)"; aria2
+    elif [[ -e "$OUT.part" || -z "$ARIA2" ]]; then
+        [[ -e "$OUT.part" ]] && log "resuming $OUT.part ($(file_size "$OUT.part") bytes so far)"
+        to_part
+    else
+        rm -f "$OUT"            # only reached when OUT is empty / wrong size
+        aria2 && return 0
+        log "aria2c failed; trying curl/wget"
+        to_part
+    fi
+}
+
+# Keep resuming until the file is complete. Returns 0 complete, 2 the file does
+# not exist on the server, 3 walltime nearly over (continue in a new job).
 fetch() {
-    local round
-    for round in 1 2 3; do
-        if [[ -e "$OUT.aria2" && -n "$ARIA2" ]]; then
-            log "resuming aria2 download"; aria2 && return 0
-        elif [[ -e "$OUT.part" || -z "$ARIA2" ]]; then
-            [[ -e "$OUT.part" ]] && log "resuming $OUT.part"
-            to_part && return 0
-        else
-            rm -f "$OUT"            # only reached when OUT is empty / wrong size
-            aria2 && return 0
-            log "aria2c failed; trying curl/wget"
-            to_part && return 0
+    local round=0 wait code remote left
+    while true; do
+        round=$(( round + 1 ))
+        fetch_once
+        valid && return 0
+        # Complete download, but not the planned size: the server's file changed?
+        if [[ -s "$OUT" && ! -e "$OUT.aria2" && "$SIZE" != "-" ]]; then
+            remote="$(remote_size)"
+            if [[ -n "$remote" && "$remote" == "$(file_size "$OUT")" ]]; then
+                log "WARNING: the server's file is $remote bytes (planned: $SIZE); using the server's size"
+                SIZE="$remote"; return 0
+            fi
         fi
-        log "download round $round failed; retrying in $((60 * round))s"
-        sleep $((60 * round))
+        code="$(http_status)"
+        if [[ "$code" == 404 || "$code" == 410 ]]; then
+            log "FAILED: the server returns HTTP $code for $URL (file not available)"; return 2
+        fi
+        left="$(time_left)"
+        if (( left < RESERVE_S + 300 )); then
+            log "walltime nearly over after $round attempt(s); $(file_size "$OUT") / $(file_size "$OUT.part") bytes kept"
+            return 3
+        fi
+        if [[ -z "${SLURM_JOB_ID:-}" ]] && (( round >= MAX_LOCAL_ROUNDS )); then
+            log "FAILED: $round attempts without SLURM"; return 1
+        fi
+        wait=$(( 60 * round < 600 ? 60 * round : 600 ))
+        log "attempt $round incomplete (HTTP $code); resuming in ${wait}s"
+        sleep "$wait"
     done
-    return 1
+}
+
+# Submit a job that continues this array task (same rows) after the walltime.
+continue_in_new_job() {
+    local n=$(( ${G2M_CONTINUATION:-0} + 1 )) job
+    if (( n > MAX_CONTINUATIONS )); then
+        log "FAILED: still incomplete after $MAX_CONTINUATIONS continuation jobs"; return 1
+    fi
+    job="$(sbatch --parsable --array="$SLURM_ARRAY_TASK_ID" --export=ALL,G2M_CONTINUATION="$n" "$SCRIPT")" || {
+        log "FAILED: could not submit a continuation job"; return 1; }
+    log "continuing the unfinished download(s) of task $SLURM_ARRAY_TASK_ID in job $job ($n/$MAX_CONTINUATIONS)"
 }
 
 integrity() {
@@ -1100,16 +1200,20 @@ _run_task() {
     mkdir -p "$(dirname "$OUT")"
     if command -v flock >/dev/null 2>&1; then exec 9>"$OUT.lock"; flock 9; fi
 
-    if valid; then
-        log "[SKIP] target already valid"
-    else
-        fetch || { log "FAILED: download"; return 1; }
-        valid || { log "FAILED: target missing, empty, still partial or wrong size ($(file_size "$OUT") bytes)"; return 1; }
-    fi
-    if ! integrity; then
-        log "FAILED: integrity check ($CHECK); deleting the corrupt file so the next run re-downloads it"
-        rm -f "$OUT"; return 1
-    fi
+    local attempt rc
+    for attempt in 1 2 3; do
+        if valid; then
+            (( attempt == 1 )) && log "[SKIP] target already valid"
+        else
+            fetch; rc=$?
+            if (( rc == 3 )); then CONTINUE_LATER=1; return 3; fi
+            (( rc == 0 )) || { log "FAILED: download"; return 1; }
+        fi
+        integrity && break
+        log "integrity check ($CHECK) failed (attempt $attempt/3): deleting the corrupt file and downloading again"
+        rm -f "$OUT" "$OUT.part" "$OUT.aria2"
+        (( attempt == 3 )) && { log "FAILED: integrity check ($CHECK) after 3 downloads"; return 1; }
+    done
     log "verified: $(file_size "$OUT") bytes ($CHECK)"
 
     post_done || post_process || { log "FAILED: post-processing ($POST)"; return 1; }
@@ -1155,14 +1259,21 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     exit 2
 fi
 
-[[ "$SLURM_ARRAY_TASK_ID" == "1" ]] && submit_finalize
+[[ "$SLURM_ARRAY_TASK_ID" == "1" && -z "${G2M_CONTINUATION:-}" ]] && submit_finalize
+[[ -n "${G2M_CONTINUATION:-}" ]] && log "continuation job ${G2M_CONTINUATION}/$MAX_CONTINUATIONS of task $SLURM_ARRAY_TASK_ID"
 
 # Task k downloads rows k, k+NTASKS, k+2*NTASKS, ... (one row when TOTAL <= NTASKS).
 # Interleaving spreads the large files over different tasks.
 failed=0
+CONTINUE_LATER=0
 for (( row = SLURM_ARRAY_TASK_ID; row <= TOTAL; row += NTASKS )); do
-    run_task "$row" || failed=$(( failed + 1 ))
+    (( CONTINUE_LATER )) && break          # out of walltime: the continuation job does the rest
+    run_task "$row"; rc=$?
+    (( rc == 0 || rc == 3 )) || failed=$(( failed + 1 ))
 done
+if (( CONTINUE_LATER )); then
+    continue_in_new_job || failed=$(( failed + 1 ))
+fi
 if (( failed > 0 )); then
     log "$failed file(s) of this task failed (re-plan and resubmit to retry them)"
     exit 1
