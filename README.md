@@ -1,14 +1,91 @@
 # GWAS2Mech
 
-From GWAS summary statistics to candidate molecular mechanisms: find and QC the GWAS,
-build ancestry-matched LD panels, clump, fine-map with SuSiE-RSS, draw publication figures,
-annotate every fine-mapped variant and colocalise the loci with molecular QTLs.
+From GWAS summary statistics to candidate molecular mechanisms: discover and quality-control GWAS,
+build ancestry-matched LD panels, identify and fine-map loci with SuSiE-RSS, annotate credible-set
+variants, colocalise signals with molecular QTLs, and integrate the evidence into genes, pathways,
+networks and therapeutic hypotheses.
 
 Everything is installed and downloaded **inside the directory you run the scripts from**,
 so the same commands work on a laptop, a workstation or any SLURM cluster.
 Run every command from the repository directory.
 
 ## Pipeline at a glance
+
+```mermaid
+flowchart TB
+    subgraph SETUP["Reproducible setup and reference data"]
+        S00["Step 00<br/>Install software and download versioned resources"]
+        S01["Step 01<br/>Validate files, indexes and headers"]
+        S00 --> S01
+    end
+
+    subgraph GWAS["GWAS locus discovery and statistical fine-mapping"]
+        S02["Step 02<br/>Study discovery, phenotype review and GWAS QC"]
+        S04["Step 04<br/>Ancestry-matched LD reference panels"]
+        S05["Step 05<br/>LD clumping and independent lead variants"]
+        S06["Step 06<br/>SuSiE-RSS fine-mapping and credible sets"]
+        S07["Step 07<br/>Publication figures"]
+        S02 --> S05 --> S06 --> S07
+        S04 --> S05
+        S04 --> S06
+    end
+
+    subgraph FUNCTION["Functional and molecular evidence"]
+        S08["Step 08<br/>Coding, regulatory, clinical and conservation annotation"]
+        S09["Step 09<br/>Bulk-tissue provider-SuSiE colocalisation"]
+        S10["Step 10<br/>Cell-type provider-SuSiE colocalisation"]
+        S11["Step 11<br/>External molecular-QTL coloc.abf"]
+    end
+
+    subgraph INTERPRET["Mechanism interpretation and prioritisation"]
+        S12["Step 12<br/>Variant, signal, locus and gene evidence tables"]
+        S13["Step 13<br/>Open Targets comparison"]
+        S14["Step 14<br/>Gene ranking and pathway enrichment"]
+        S15["Step 15<br/>Protein interaction networks"]
+        S16["Step 16<br/>Drug-target and tractability analysis"]
+        S17["Step 17<br/>Final mechanism evidence matrix and target tiers"]
+        S12 --> S13 --> S14 --> S15 --> S16 --> S17
+        S12 --> S14
+        S12 --> S16
+        S13 --> S17
+        S14 --> S17
+        S15 --> S17
+    end
+
+    S01 --> S02
+    S01 --> S04
+    S06 --> S08
+    S06 --> S09
+    S06 --> S10
+    S06 --> S11
+    S08 --> S12
+    S09 --> S12
+    S10 --> S12
+    S11 --> S12
+
+    OT[("Open Targets")]
+    PATH[("g:Profiler or GMT gene sets")]
+    PPI[("STRING and optional BioGRID")]
+    DRUG[("Open Targets tractability and ChEMBL")]
+    OT --> S13
+    PATH --> S14
+    PPI --> S15
+    DRUG --> S16
+
+    classDef setup fill:#e8eef7,stroke:#355c8a,color:#14263d;
+    classDef statistical fill:#e8f3ec,stroke:#34734d,color:#163823;
+    classDef evidence fill:#fff3dc,stroke:#a96b16,color:#4d3109;
+    classDef integration fill:#f2eafa,stroke:#70459a,color:#301d45;
+    classDef external fill:#f5f5f5,stroke:#666,color:#222;
+    class S00,S01 setup;
+    class S02,S04,S05,S06,S07 statistical;
+    class S08,S09,S10,S11 evidence;
+    class S12,S13,S14,S15,S16,S17 integration;
+    class OT,PATH,PPI,DRUG external;
+```
+
+Arrows represent data dependencies. Steps 09–11 provide distinct molecular-QTL evidence channels;
+Step 12 preserves their provenance while joining them to fine-mapping and functional annotation.
 
 | Step | Script | What it does | One SLURM job per | Output |
 |---|---|---|---|---|
@@ -1109,11 +1186,11 @@ None of these counts as evidence against colocalisation.
 
 Step12 reads the results as a third evidence channel.
 
-## 12. Integration and interpretation (Steps 12-17)
+## Downstream interpretation overview
 
-Six read-only steps turn the per-locus results into ranked genes, pathways, networks and drug
-targets. Each runs as **one job**: it is fast and reads the whole phenotype. They run in order,
-and each one reads the previous step's tables:
+Steps 12–17 turn the per-locus results into ranked genes, pathways, networks, drug-target evidence
+and a final mechanism table. Each stage runs as one job, reads completed upstream tables and writes
+its own auditable output directory.
 
 | Step | Reads | Writes (`<NN>_<name>/<phenotype>/<ancestry>[_<PANEL>]/`) | External data |
 |---|---|---|---|
@@ -1124,15 +1201,13 @@ and each one reads the previous step's tables:
 | 16 drug targets | Step14, Step15, Step12 | `Step16_Target_Prioritisation` (Open Targets tractability, ChEMBL drugs, direction of effect) | Open Targets GraphQL + ChEMBL web APIs |
 | 17 final | Steps 12-16 | `Step17_Final_Target_Ranking`, evidence tiers, pathway / network / drug mechanism maps | none |
 
-Steps 13-15 call web services. Run them where there is internet (most login nodes, or a compute node
-with internet). Their answers are cached in `resources/network_cache/` and `resources/drug_target_cache/`,
-so a re-run is offline. `--check-resources` tests every service. Missing or unreachable evidence is
-reported as such, never as a biological "no". Optional BioGRID key: `export BIOGRID_ACCESS_KEY=...`
-or `BIOGRID_ACCESS_KEY=...` in `config/api_keys.env` (git-ignored; template
-`config/api_keys.example.env`). Step13 no longer downloads Open Targets during the run (it used
-to); get the data once with Step00 (`--download-ot` / `--repair-ot` still exist if you want them).
+Steps 13–16 use external datasets or services. Run web-dependent stages where internet access is
+available. Responses are cached in `resources/network_cache/` and `resources/drug_target_cache/`.
+Missing or unreachable evidence is reported as unavailable and is never interpreted as biological
+evidence against a gene. Store an optional BioGRID key as `BIOGRID_ACCESS_KEY` in the environment or
+in the git-ignored `config/api_keys.env`; see `config/api_keys.example.env`.
 
-**The same flags in every one of the six steps:**
+The same execution and inspection flags are available in every downstream stage:
 
 | Flag | Meaning |
 |---|---|
@@ -1144,43 +1219,103 @@ to); get the data once with Step00 (`--download-ot` / `--repair-ot` still exist 
 | `--index N` | only study N of the Step02 list (results in `<ancestry>[_<PANEL>]/<GCST>/`, read by the next steps with the same `--index`) |
 | `--reference-panel 1000G30x` | read and write the `<ancestry>_1000G30x/` folders of that LD panel |
 
+## 12. Build the integrated evidence tables
+
+`Step12_Master_Table.py` joins Step 06 fine-mapping, Step 08 annotations and the independent
+colocalisation channels from Steps 09–11. It writes variant, signal, locus, gene and long-form
+molecular-evidence tables under `12_master_table/`, while preserving evidence source and
+not-tested reasons.
+
 ```bash
-# Step12: master table
 envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
 envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step12_MasterTable_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+```
 
-# Step13: Open Targets comparison
+Useful options are `--skip-step10`, `--require-step10`, `--skip-step11`, `--strong-pp4` and
+`--suggestive-pp4`. Step 11 remains a separate `STEP11_CUSTOM_ABF` evidence channel. Loci for which
+Steps 09 or 10 have not completed are recorded in `Step12_Coloc_Locus_Coverage.tsv` and are not
+counted as negative results.
+
+## 13. Compare loci and genes with Open Targets
+
+`Step13_Compare_OpenTargets.py` compares the Step 12 evidence with Open Targets studies, credible
+sets, locus-to-gene predictions and colocalisation. It writes gene comparison tiers and locus,
+variant and mechanism benchmarks under `13_opentargets_comparison/`. Download the configured Open
+Targets parquet release once with Step 00; the analysis does not require a fresh download.
+
+```bash
 envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
 envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step13_OpenTargets_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+```
 
-# Step14: gene ranking + pathways
+Useful options are `--study GCST...`, `--ot-release`, `--l2g-top-k`, `--locus-padding` and
+`--allow-no-coloc`. The retained `--download-ot` and `--repair-ot` options are for explicit recovery;
+normal runs use the Step 00 resource bundle.
+
+## 14. Rank genes and test pathway enrichment
+
+`Step14_Pathway_Analysis.py` creates a one-vote-per-gene ranking, defines evidence-based gene sets
+and tests pathway enrichment with g:Profiler or supplied GMT libraries. Results are written under
+`14_pathways/`, including the ranked gene table and significant pathways.
+
+```bash
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step14_Pathways_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+```
 
-# Step15: STRING network
+Useful options are `--gmt <library.gmt>` for offline, repeatable enrichment, `--sources`, `--fdr`,
+`--min-overlap` and `--skip-enrichment`.
+
+## 15. Analyse protein interaction networks
+
+`Step15_PPI_Network_Analysis.py` maps the Step 14 gene sets onto STRING physical and functional
+networks, calculates network centrality and PPI enrichment, and optionally adds connector proteins
+or BioGRID evidence. Tables, GraphML files and figures are written under `15_network/`.
+
+```bash
 envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
 envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step15_Network_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+```
 
-# Step16: tractability + drugs
+Useful options are `--required-score 700`, `--add-nodes 20`, `--network-types`,
+`--known-genes-file` and `--dry-run`.
+
+## 16. Evaluate drug targets and tractability
+
+`Step16_Drug_Target_Analysis.py` combines ranked genes, network evidence and locus-level direction
+of effect with Open Targets tractability and ChEMBL drug and mechanism records. It writes the target
+prioritisation and supporting drug evidence under `16_drug_targets/`.
+
+```bash
 envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
 envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step16_DrugTargets_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+```
 
-# Step17: final mechanism ranking
+Useful options are `--target-set CORE_STRONG`, `--assume-harmonized`, `--dry-run` and
+`--force-refresh`.
+
+## 17. Integrate and rank candidate mechanisms
+
+`Step17_Final_Mechanism_Integration.py` combines the evidence from Steps 12–16 into the final target
+ranking, evidence tiers and pathway, network and drug mechanism maps under `17_mechanism/`. External
+concordance remains traceable as its own component of the final composite evidence score.
+
+```bash
 envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
 envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step17_Mechanism_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --status
@@ -1188,7 +1323,14 @@ envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Park
 envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
 ```
 
-**With the 1000 Genomes 30x panel** (all six steps; each reads and writes `<ancestry>_1000G30x/`):
+Use `--include-suggestive` when the final integration should include suggestive H4 evidence in
+addition to the default strong-evidence set.
+
+### Steps 12–17 with the 1000 Genomes 30x panel
+
+Each stage reads and writes the `<ancestry>_1000G30x/` branch. Submit and complete these jobs in
+order.
+
 ```bash
 envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step12_MasterTable_parkinson_s_disease_european_1000G30x.sh
 envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step13_OpenTargets_parkinson_s_disease_european_1000G30x.sh
@@ -1200,20 +1342,6 @@ envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Park
 envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
 envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
 ```
-
-Step-specific options (see `--help` of each script):
-
-- **Step12:** `--skip-step10` / `--require-step10` (cell-type evidence), `--skip-step11` (external molecular
-  QTL), `--strong-pp4` / `--suggestive-pp4`. Step11 results are a separate channel (`STEP11_CUSTOM_ABF`,
-  `CUSTOM_*` columns; caQTL / haQTL / mQTL get their own modality columns) and count in the overall best H4.
-  Loci that Step09 / Step10 have not finished are listed in `Step12_Coloc_Locus_Coverage.tsv`
-  and are not counted as negatives.
-- **Step13:** `--study GCST...`, `--ot-release`, `--l2g-top-k`, `--locus-padding`, `--allow-no-coloc`.
-- **Step14:** `--gmt <library.gmt>` (offline, repeatable), `--sources GO:BP,REAC,KEGG,WP`, `--fdr`,
-  `--min-overlap`, `--skip-enrichment`.
-- **Step15:** `--required-score 700`, `--add-nodes 20`, `--network-types`, `--known-genes-file`, `--dry-run`.
-- **Step16:** `--target-set CORE_STRONG`, `--assume-harmonized`, `--dry-run`, `--force-refresh`.
-- **Step17:** `--include-suggestive`.
 
 ## Resource groups
 
