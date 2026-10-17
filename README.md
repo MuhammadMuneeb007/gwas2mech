@@ -23,7 +23,7 @@ Run every command from the repository directory.
 | 8 | `Step08_Annotate_Finemapped_Variants.py` | local VEP, CADD, AlphaMissense, ClinVar, cCRE, phyloP, LOEUF, RegulomeDB | GWAS | `08_annotation/` |
 | 9 | `Step09_Colocalize_GTEx_SuSiE.py` | provider-SuSiE coloc (coloc.bf_bf) with bulk-tissue eQTL / sQTL / isoQTL / exonQTL / pQTL | **locus** | `09_coloc/` |
 | 10 | `Step10_CellType_QTL_Colocalization.py` | the same with single-cell / cell-type eQTL | **locus** | `10_celltype_coloc/` |
-| 11 | `Step11_Custom_QTL_Colocalization.py` | coloc.abf with the local molecular QTL (ADSP brain pQTL / sQTL / haQTL / mQTL, Kumasaka caQTL, ...) | **locus** | `11_custom_qtl_coloc/` |
+| 11 | `Step11_Custom_QTL_Colocalization.py` | coloc.abf with the downloaded molecular QTL (ADSP FunGen brain sQTL / pQTL / haQTL / mQTL, Kumasaka caQTL), every Step06 locus | **locus** | `11_custom_qtl_coloc/` |
 | 12 | `Step12_Master_Table.py` | variant → signal → gene → tissue / cell master tables (Steps 06, 08, 09, 10, 11) | – (one job) | `12_master_table/` |
 | 13 | `Step13_Compare_OpenTargets.py` | loci / genes / mechanisms vs Open Targets credible sets, L2G, colocalisation | – (one job) | `13_opentargets_comparison/` |
 | 14 | `Step14_Pathway_Analysis.py` | one-vote-per-gene ranking, gene sets, pathway enrichment (g:Profiler or GMT) | – (one job) | `14_pathways/` |
@@ -82,7 +82,7 @@ $RUN envs/pipeline/bin/python Step07_Plots.py             "${PD[@]}" --index 2
 $RUN envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py "${PD[@]}" --index 2
 $RUN envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py      "${PD[@]}" --index 2   # every locus of study 2
 $RUN envs/pipeline/bin/python Step10_CellType_QTL_Colocalization.py "${PD[@]}" --index 2   # single-cell eQTL
-$RUN envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py "${PD[@]}" --index 2   # local molecular QTL (after --scan + registry, section 11)
+$RUN envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py "${PD[@]}" --index 2   # downloaded molecular QTL (after --scan, section 11)
 # 12-17. integration and interpretation, study 2 (results in <ancestry>/<GCST>/)
 for s in Step12_Master_Table Step13_Compare_OpenTargets Step14_Pathway_Analysis Step15_PPI_Network_Analysis Step16_Drug_Target_Analysis Step17_Final_Mechanism_Integration; do
   $RUN envs/pipeline/bin/python $s.py "${PD[@]}" --index 2
@@ -977,24 +977,21 @@ Outputs in `09_coloc/` (Step10: `10_celltype_coloc/`) `<phenotype>/<ancestry>[_<
 | `coloc_manifest.tsv`, `qtl_contexts_snapshot.tsv` | locus → array task, the contexts used |
 | `coloc_stats.tsv`, `coloc_all_candidates.tsv`, `coloc_locus_qtl_summary.tsv`, `<GCST>/<GCST>_coloc_results.tsv` | written by `--stats` |
 
-## 11. External molecular-QTL colocalisation (Step11, coloc.abf)
+## 11. External molecular-QTL colocalisation (Step11)
 
-Steps 09 / 10 need provider SuSiE fine-mapping, which only the eQTL Catalogue publishes. The local
-molecular-QTL resources (`Step00 --groups molecular_qtl meqtl` → `resources/molecular_qtl/`) have
-summary statistics only. These are ADSP FunGen brain pQTL / sQTL / haQTL / mQTL (Knight-ADRC,
-MSBB, ROSMAP) and the Kumasaka caQTL. Step11 colocalises them with **`coloc::coloc.abf`**,
-independently of Steps 09 / 10. One SLURM array task per locus, like Steps 09 / 10.
-
-Nothing is used until you approve it, through a registry of every file:
+Steps 09 / 10 use eQTL Catalogue datasets that ship provider SuSiE fine-mapping. The molecular QTL from
+`Step00 --groups molecular_qtl meqtl` (`resources/molecular_qtl/`) only have association statistics:
+ADSP FunGen xQTL brain sQTL / pQTL / haQTL / mQTL (NIAGADS NG00184: ROSMAP, MSBB, Knight-ADRC) and the
+Kumasaka caQTL (QTD100018). Step11 colocalises them with **`coloc::coloc.abf`**, one SLURM array task per
+Step06 locus.
 
 ```bash
-# 1. inventory: config/Step11_Custom_QTL_Registry.tsv (every row DISABLED) + config/Step11_Column_Audit.tsv
+# 1. resource table: datasets from the Step00 manifests, columns from the file header, coordinates and
+#    alleles checked against GRCh38, QTL N from the metadata -> VALIDATION_STATUS per dataset
 envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --scan
-# 2. edit the registry for each dataset: check the columns against the audit (headerless ADSP BED tracks:
-#    map c1, c2, ... to variant_col / trait_col / p_col / beta_col / se_col / maf_col), fill n (QTL sample
-#    size, or AN), set enabled = 1. Re-running --scan keeps your edits and adds new files disabled.
-# 3. check, plan, submit
+# 2. this phenotype: datasets (+ duplicates of Step09 / Step10), GWAS type and N, every Step06 locus
 envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+# 3. plan, submit, follow
 envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR
 sbatch Step11_CustomQTL_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --status
@@ -1002,7 +999,7 @@ envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkin
 envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --index 2 --locus L001
 envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --force   # redo all loci
 
-# 1000 Genomes 30x LD panel (reads 06_finemapping/<p>/<a>_1000G30x/, writes 11_custom_qtl_coloc/<p>/<a>_1000G30x/)
+# 1000 Genomes 30x LD panel (loci from 06_finemapping/<p>/<a>_1000G30x/, results in 11_custom_qtl_coloc/<p>/<a>_1000G30x/)
 envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
 envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
 sbatch Step11_CustomQTL_parkinson_s_disease_european_1000G30x.sh
@@ -1011,29 +1008,106 @@ envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkin
 envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
 ```
 
-Per locus:
+**Inputs.** Step11 reuses what earlier steps recorded and does not scan directories recursively.
 
-- **GWAS side:** the Step06 matched regional table (beta / SE, or P). The GWAS type and N come from Step06
-  `finemapping_summary.json`: Binary → case-control with the case fraction, Continuous → quantitative.
-- **Datasets:** every READY dataset, read with tabix for the locus window. The files of one dataset share a
-  name (ADSP: 22 chromosomes × snp / indel files), and only the locus chromosome is read.
-- **Candidates:** molecular traits with P ≤ `CANDIDATE_P` (top `MAX_TRAITS`).
-- **Variant matching:** exact GRCh38 CHR:POS:REF:ALT, REF/ALT-swapped pairs included, with ≥ `MIN_SHARED`
-  shared variants and ≥ `MIN_OVERLAP` of the smaller side.
-- **coloc.abf:** all traits of a locus run in one R session, with prior sensitivity at p12 = 1e-6 / 1e-5.
+| what | source |
+|---|---|
+| ADSP datasets and files | `resources/molecular_qtl/<qtl>/adsp_fungen_brain/ADSP_FunGen_xQTL.v1.<QTL>.all.manifest.txt` (Step00), with `.metadata.json` / `.metadata.txt` / `provenance.json` |
+| Kumasaka caQTL, Sun_2018 pQTL | `EQTL_CATALOGUE_FORMAT_DATASETS` in `Step11_Config.py` (+ `QTD100018_peak_metadata.tsv.gz`); `sample_size` from `tabix_ftp_paths*.tsv` |
+| other registries (if present) | `resources/molecular_qtl/resource_registry.tsv`, `resources/coloc/custom_qtl_registry.tsv` |
+| GWAS type and N | Step02 `01_gwas_catalog/<p>/<a>/GWAS_study_metadata.tsv` |
+| loci | Step06 `<GCST>/loci_definition.tsv`: every locus, including those without a GWAS credible set |
+| GWAS statistics | Step06 `<GCST>/regional_gwas/<L>.tsv.gz` (before LD-panel matching); if absent, Step02 QC within the locus boundaries. The LD-filtered Step06 matched table is never used. |
 
-**Safety:** a disabled or incomplete registry row, a missing N / sdY / MAF, a headerless file without a
-column mapping, or too little overlap gives `NOT_TESTED`, never a negative colocalisation. `coloc.abf`
-assumes at most one causal variant per trait and locus, so these results are exploratory until checked
-with a multi-signal method. Sun_2018 (QTD000584) is also in Step09; enabling it here counts it twice.
+A modality whose directory holds no association files (for example `mqtl/adsp_fungen_brain/` with only
+`provenance.json`) is reported `NOT_DOWNLOADED` and is not processed.
 
-**Parameters** live in `Step11_Config.py`: resource root, registry path, QTL types, `CANDIDATE_P`,
-`MAX_TRAITS`, `MIN_SHARED`, `MIN_OVERLAP`, priors, thresholds and SLURM.
+**Validation (`--scan`, per dataset).**
 
-Outputs in `11_custom_qtl_coloc/<phenotype>/<ancestry>[_<PANEL>]/`: `<GCST>/loci/<L>/locus_coloc_results.tsv`
-(Step09 columns with `COLOC_METHOD = coloc.abf`) and `discovery_audit.tsv`, plus `registry_snapshot.tsv`,
-`coloc_manifest.tsv` and `resource_plan.tsv` (from `--check-resources`). `--stats` also writes
-`coloc_stats.tsv` and `coloc_all_candidates.tsv`. Step12 reads these results as a third evidence channel.
+- **Columns:** taken from the file header. Headerless tracks are `NEEDS_COLUMN_MAPPING` until you add
+  `COLUMN_OVERRIDES` (the message shows the first row).
+- **Coordinates:** BED tracks use POS = chromStart + 1. This is verified against the variant ID or the
+  GRCh38 FASTA.
+- **Alleles:** checked against GRCh38. a1 / a2 columns are resolved against the FASTA.
+- **Statistics:** P must be reproduced by beta / SE.
+- **Frequencies:** must lie in 0–1.
+- **QTL N:** taken from a file column (per trait), the eQTL Catalogue `sample_size`, the provider
+  metadata, or `QTL_N` in the config (with a source). For eQTL Catalogue files only, AN/2 is used, after
+  checking the documented `an` meaning and that AN is even.
+- **Missing N:** `NEEDS_QTL_N`. N is never guessed.
+
+**GWAS N.**
+
+- **Binary trait:** coloc type `cc`, N = N_CASES + N_CONTROLS, s = N_CASES / N. N_EFF (the SuSiE-RSS N)
+  is recorded as `GWAS_N_EFF_NOT_USED`.
+- **Continuous trait:** type `quant`, N = N_TOTAL, with the GWAS MAF from Step02 EAF.
+- **Unknown or NEEDS_REVIEW:** `NOT_TESTED`.
+
+**Harmonisation, per candidate trait** (molecular traits with P ≤ `CANDIDATE_P`):
+
+- **Matching:** on CHR + POS + both alleles. `ALIGNED` means QTL REF/ALT = GWAS NEA/EA. `SWAPPED` means
+  the GWAS beta sign is flipped.
+- **Strand:** there is no strand-complement matching, because both sides are GRCh38 forward strand.
+- **Indels:** match only when the alleles are identical.
+- **Palindromic SNPs:** handled according to `PALINDROMIC_POLICY`.
+- **Frequencies:** GWAS and QTL frequencies are kept separate. A variant without its own QTL frequency is
+  excluded and never filled from the GWAS.
+- **Overlap:** at least `MIN_SHARED` shared variants and at least `MIN_OVERLAP` of the smaller side.
+- **Audit:** `harmonised_variants.tsv.gz` keeps every QTL row with its original ID, harmonised ID, match
+  status and exclusion reason.
+
+**Method.**
+
+- **coloc.abf** (single causal variant) runs with priors p1 / p2 / p12, prior sensitivity at P12_LOW /
+  P12_HIGH, and PP.H0–H4 reported. Rows are labelled `COLOC_METHOD = coloc.abf` and
+  `METHOD_FAMILY = ABF_SINGLE_CAUSAL_VARIANT`.
+- **Provider SuSiE:** a dataset with provider SuSiE (credible sets + LBF) becomes `PROVIDER_SUSIE_USE_STEP09`.
+  It is colocalised with multi-signal `coloc.bf_bf` in Step09 / Step10 and is not re-run here as ABF. The
+  ADSP "all" archives and the Kumasaka file contain association statistics only.
+- **ABF_ASSUMPTION_WARNING** marks loci where the single-causal-variant assumption may not hold:
+  - more than one independent GWAS lead variant (Step05);
+  - more than one GWAS credible set (Step06);
+  - a complex-LD region (`COMPLEX_LD_REGIONS`: MHC, 17q21.31 MAPT, 8p23.1).
+
+**Overlap with Steps 09 / 10.**
+
+- **Same dataset ID** as in `09_coloc/.../qtl_contexts_snapshot.tsv` or `10_celltype_coloc/...`
+  (e.g. Sun_2018 QTD000584): skipped as `DUPLICATE_OF_STEP09`.
+- **Same cohort, modality and tissue:** tested, but marked `INDEPENDENT_EVIDENCE = NO`.
+
+Steps 09 / 10 are only read.
+
+**Not tested is not negative.** Each case has an explicit reason per candidate, dataset or locus:
+
+- a missing input or N;
+- too little overlap;
+- no trait below `CANDIDATE_P`;
+- a duplicate dataset.
+
+None of these counts as evidence against colocalisation.
+
+**Parameters** are in `Step11_Config.py`:
+
+- resource locations;
+- `QTL_N`, `QTL_SDY` and `COLUMN_OVERRIDES` (documented values only);
+- `DISABLED_DATASETS`;
+- `CANDIDATE_P`, `MIN_SHARED`, `MIN_OVERLAP`, `PALINDROMIC_POLICY`;
+- priors and thresholds;
+- SLURM.
+
+**Outputs.**
+
+- **`config/`:**
+  - `Step11_Custom_QTL_Registry.tsv`, the resource table: study, dataset, modality, context, build and
+    evidence, files, columns, coordinates, QTL N + source, provider fine-mapping, validation status;
+  - `Step11_Custom_QTL_Files.tsv`, one row per file, with manifest md5 / size, present and indexed.
+- **`11_custom_qtl_coloc/<phenotype>/<ancestry>[_<PANEL>]/`:**
+  - `resource_plan.tsv`, `locus_plan.tsv`, `registry_snapshot.tsv`, `coloc_manifest.tsv`;
+  - `<GCST>/loci/<L>/locus_coloc_results.tsv`, in Step09 columns plus provenance and flags;
+  - `harmonised_variants.tsv.gz`, `dataset_audit.tsv`, `custom_coloc_done.json`.
+- **`--stats`** writes `coloc_stats.tsv`, `coloc_all_candidates.tsv` and `locus_reasons.tsv`.
+
+Step12 reads the results as a third evidence channel.
 
 ## 12. Integration and interpretation (Steps 12-17)
 
