@@ -1495,6 +1495,24 @@ def file_state(row: dict) -> tuple[str, int]:
     dest = ROOT / row["DEST"]
     post_dir, marker = row.get("POST_DIR") or "-", row.get("POST_MARKER") or "-"
     expected = int(row["SIZE_BYTES"]) if str(row.get("SIZE_BYTES", "")).isdigit() else None
+
+    # Older saved plans did not include POST. Provider LBF downloads are replaced
+    # after validation by a position-sorted bgzip file and its tabix index, so
+    # recognise that stable filename convention when reading those plans.
+    post = row.get("POST") or "-"
+    if post == "-" and "lbf_variable" in dest.name:
+        post = "lbf-tabix"
+    if post == "lbf-tabix":
+        indexed = lbf_index_path(dest)
+        index = Path(str(indexed) + ".tbi")
+        if local_file_valid(indexed) and local_file_valid(index):
+            return "DONE", expected or indexed.stat().st_size
+        partial = [p for p in (dest, Path(str(dest) + ".part"), indexed, index)
+                   if p.is_file() and p.stat().st_size > 0]
+        if partial or Path(str(dest) + ".aria2").exists():
+            return "PARTIAL", sum(p.stat().st_size for p in partial)
+        return "MISSING", 0
+
     if post_dir != "-" and (ROOT / post_dir / marker).is_file():
         return "DONE", expected or (dest.stat().st_size if dest.is_file() else 0)
     if local_file_valid(dest, expected):
@@ -1669,9 +1687,9 @@ def main() -> int:
     MANIFESTS.mkdir(parents=True, exist_ok=True)
     LOGS.mkdir(parents=True, exist_ok=True)
 
-    write_tsv(PLAN, ["RESOURCE", "GROUP", "STATUS", "SIZE_BYTES", "SOURCE", "DEST", "POST_DIR", "POST_MARKER"],
+    write_tsv(PLAN, ["RESOURCE", "GROUP", "STATUS", "SIZE_BYTES", "SOURCE", "DEST", "POST", "POST_DIR", "POST_MARKER"],
               [[e["resource"], e["group"], "PLANNED" if e in pending else "VALID", e["size"] or "",
-                e["url"], e["dest"], e["post_dir"], e["post_marker"]] for e in entries])
+                e["url"], e["dest"], e["post"], e["post_dir"], e["post_marker"]] for e in entries])
 
     ot = [e for e in entries if e["group"].startswith("opentargets/")]
     if ot and all(e["size"] for e in ot):
