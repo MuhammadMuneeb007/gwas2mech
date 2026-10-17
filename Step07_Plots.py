@@ -412,7 +412,11 @@ def prepare(P, args):
 
         leads = lead_table(P, accession)
         leads["GENE"] = [nearest_gene(genes, c, p) for c, p in zip(leads["CHR"], leads["POS"])]
-        leads["LABEL"] = np.where(leads["GENE"] != "", leads["GENE"] + " " + leads["ID"], leads["ID"])
+        leads["GENE"] = leads["GENE"].fillna("").astype(str).str.strip()
+        leads["ID"] = leads["ID"].fillna("").astype(str).str.strip()
+        leads["LABEL"] = leads["ID"].where(
+            leads["GENE"].eq(""), leads["GENE"].str.cat(leads["ID"], sep=" ")
+        )
         leads.to_csv(out / "leads.tsv", sep="\t", index=False)
 
         study_dir = P["finemap"] / accession
