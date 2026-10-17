@@ -48,6 +48,10 @@ ALLOW_VERIFIED_AN_HALF = True          # N = AN/2 only for the eQTL Catalogue sc
 
 # ---- GWAS side --------------------------------------------------------------------------------------
 ALLOW_UNREVIEWED_GWAS_TYPE = False     # Unknown / NEEDS_REVIEW studies stay NOT_TESTED
+REQUIRE_GWAS_CREDIBLE_SET = True       # loci without a Step06 95% CS are explicitly NOT_TESTED
+REQUIRE_CS_VARIANT_OVERLAP = True      # candidate must retain an allele-matched GWAS CS variant
+MIN_CS_VARIANTS_SHARED = 1             # minimum harmonised Step06 CS members in a tested candidate
+MIN_CS_H4_MASS = 0.50                  # strong PP.H4 also needs this conditional H4 mass inside the GWAS CS
 
 # ---- overlap with Step09 / Step10 ---------------------------------------------------------------------
 ALLOW_DUPLICATES_OF_STEP09_10 = False  # same dataset id already in a Step09 / Step10 snapshot -> skipped

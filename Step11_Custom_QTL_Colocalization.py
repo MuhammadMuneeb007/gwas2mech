@@ -44,7 +44,8 @@ Inputs (nothing is rediscovered that an earlier step already recorded)
   GWAS       Step02 01_gwas_catalog/<p>/<a>/GWAS_study_metadata.tsv: PHENOTYPE_TYPE, N_CASES, N_CONTROLS, N_TOTAL, N_EFF
              Binary -> coloc type cc, N = N_CASES + N_CONTROLS, s = N_CASES / N  (N_EFF, the SuSiE-RSS N, is never used)
              Continuous -> type quant, N = N_TOTAL.  Unknown / NEEDS_REVIEW -> NOT_TESTED.
-  Loci       Step06 <GCST>/loci_definition.tsv: EVERY locus (also those without a GWAS credible set).
+  Loci       Step06 <GCST>/loci_definition.tsv: EVERY locus is audited; by default only loci with
+              Step06 95% credible-set variants are eligible for molecular colocalisation.
              GWAS statistics: Step06 regional_gwas/<L>.tsv.gz (extracted BEFORE LD-panel matching); if absent, the
              Step02 QC file within the same locus boundaries (recorded as STEP02_QC_FALLBACK). The LD-filtered
              Step06 matched table is never used.
@@ -58,12 +59,16 @@ Per locus and dataset
      frequency is excluded, never filled from the GWAS. Every QTL row keeps its original id, harmonised id, match
      status and exclusion reason (harmonised_variants.tsv.gz).
   4. Overlap: >= MIN_SHARED shared variants and >= MIN_OVERLAP of the smaller side.
-  5. Method: datasets with provider SuSiE (credible sets + LBF) are colocalised with coloc.bf_bf in Step09 / Step10
+   5. GWAS credible sets from Step06 are required (configurable). Each candidate QTL must share at least
+      one allele-harmonised GWAS CS variant with the regional GWAS data (configurable), while ALL
+      eligible regional variants remain in the coloc.abf input. The conditional H4 SNP-posterior
+      mass within GWAS CS variants is calculated for candidate prioritisation (not used as a prior).
+   6. Method: datasets with provider SuSiE (credible sets + LBF) are colocalised with coloc.bf_bf in Step09 / Step10
      (multi-signal) and are NOT re-run here as ABF. All others: coloc.abf (single causal variant), priors p1 / p2 /
      p12 with sensitivity at P12_LOW / P12_HIGH, PP.H0-H4 reported. Loci with several independent GWAS signals or
      SuSiE credible sets, or in a complex-LD region (MHC, 17q21.31 MAPT, 8p23.1), are flagged
      (ABF_ASSUMPTION_WARNING) - the single-causal-variant assumption may not hold there.
-  6. Datasets already in the Step09 / Step10 QTL snapshot are skipped (DUPLICATE_OF_STEP09/10); same cohort +
+   7. Datasets already in the Step09 / Step10 QTL snapshot are skipped (DUPLICATE_OF_STEP09/10); same cohort +
      modality + tissue is kept but marked INDEPENDENT_EVIDENCE = NO.
 
 NOT_TESTED is never evidence against colocalisation: missing N / MAF, too little overlap, no candidate trait or
@@ -110,7 +115,7 @@ import numpy as np
 import pandas as pd
 
 
-VERSION = "2.0.0-custom-qtl-metadata-driven"
+VERSION = "3.0.0-credible-set-integrated"
 PROJECT_ROOT = Path.cwd().resolve()
 MAX_ARRAY_TASKS = 1000
 DEFAULT_PANEL = "1000G"
@@ -149,6 +154,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "INCLUDE_INDELS": True,
     "PALINDROMIC_POLICY": "drop_high_maf",
     "PALINDROMIC_MAX_MAF": 0.42,
+    # Credible-set aware Step11. The full locus remains the input to coloc.abf.
+    # CS membership determines locus/candidate eligibility and variant-level support.
+    "REQUIRE_GWAS_CREDIBLE_SET": True,
+    "REQUIRE_CS_VARIANT_OVERLAP": True,
+    "MIN_CS_VARIANTS_SHARED": 1,
+    # A prioritisation cutoff, NOT a new Bayesian colocalisation hypothesis.
+    "MIN_CS_H4_MASS": 0.50,
     "CANDIDATE_P": 1e-5,
     "MAX_TRAITS": 100,
     "MIN_SHARED": 50,
@@ -171,7 +183,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 # parameters that change a locus result (resume hash)
-RESULT_KEYS = ("CANDIDATE_P", "MAX_TRAITS", "MIN_SHARED", "MIN_OVERLAP", "INCLUDE_INDELS", "PALINDROMIC_POLICY",
+RESULT_KEYS = ("REQUIRE_GWAS_CREDIBLE_SET", "REQUIRE_CS_VARIANT_OVERLAP", "MIN_CS_VARIANTS_SHARED", "MIN_CS_H4_MASS", "CANDIDATE_P", "MAX_TRAITS", "MIN_SHARED", "MIN_OVERLAP", "INCLUDE_INDELS", "PALINDROMIC_POLICY",
                "PALINDROMIC_MAX_MAF", "P1", "P2", "P12", "P12_LOW", "P12_HIGH", "STRONG_PP4", "SUGGESTIVE_PP4",
                "ALLOW_UNREVIEWED_GWAS_TYPE", "ALLOW_DUPLICATES_OF_STEP09_10", "COMPLEX_LD_REGIONS", "QTL_SDY")
 
@@ -190,11 +202,11 @@ ROLE_ALIASES = {
     "alt": ("alt", "alt_allele", "alternate_allele", "effect_allele", "ea", "allele1"),
     "trait": ("molecular_trait_id", "phenotype_id", "molecular_trait", "target", "target_id", "feature_id", "feature",
               "trait_id", "peak_id", "intron_id", "cpg", "cpg_id", "probe_id", "protein_id", "region_id", "event_id"),
-    "gene": ("gene_id", "gene", "target_gene", "ensembl_gene_id", "gene_name", "target_gene_symbol", "gene_symbol"),
-    "beta": ("beta", "slope", "effect_size", "bhat", "beta_hat", "b", "effect"),
-    "se": ("se", "slope_se", "standard_error", "sebeta", "sbhat", "se_beta", "stderr"),
+    "gene": ("target_ensembl_id", "gene_id", "gene", "target_gene", "ensembl_gene_id", "gene_name", "target_gene_symbol", "gene_symbol"),
+    "beta": ("beta_non_ref", "beta", "slope", "effect_size", "bhat", "beta_hat", "b", "effect"),
+    "se": ("beta_se_non_ref", "se", "slope_se", "standard_error", "sebeta", "sbhat", "se_beta", "stderr"),
     "p": ("pvalue", "p_value", "pval", "p", "pval_nominal", "nominal_p", "p.value", "pvalue_nominal"),
-    "freq": ("maf", "af", "alt_af", "alt_freq", "freq", "eaf", "effect_allele_frequency", "alt_allele_freq",
+    "freq": ("non_ref_af", "maf", "af", "alt_af", "alt_freq", "freq", "eaf", "effect_allele_frequency", "alt_allele_freq",
              "allele_frequency", "af_alt"),
     "n": ("n", "sample_size", "n_samples", "num_samples", "nsamples", "n_obs", "n_total"),
     "an": ("an",),
@@ -403,6 +415,10 @@ def load_config(path: Path) -> dict:
     cfg["QTL_TYPES"] = [QTL_TYPE_NAMES.get(t.lower(), t) for t in cfg["QTL_TYPES"]]
     if cfg["PALINDROMIC_POLICY"] not in {"keep", "drop_high_maf", "drop"}:
         raise SystemExit("PALINDROMIC_POLICY must be keep, drop_high_maf or drop")
+    if int(cfg["MIN_CS_VARIANTS_SHARED"]) < 1:
+        raise SystemExit("MIN_CS_VARIANTS_SHARED must be >= 1")
+    if not 0 <= float(cfg["MIN_CS_H4_MASS"]) <= 1:
+        raise SystemExit("MIN_CS_H4_MASS must be in [0,1]")
     return cfg
 
 
@@ -558,6 +574,81 @@ def gwas_cs_counts(study_dir: Path) -> dict[str, int]:
     if cs.empty or not {"LOCUS_ID", "CREDIBLE_SET"} <= set(cs.columns):
         return {}
     return cs.drop_duplicates(["LOCUS_ID", "CREDIBLE_SET"]).groupby("LOCUS_ID").size().astype(int).to_dict()
+
+
+# -----------------------------------------------------------------------------
+# GWAS 95% credible-set membership comes from Step06 (not a new fine-map fit).
+# Step08 is consulted only for optional functional labels; no Step08 annotation
+# is needed to run the statistical analysis.
+# -----------------------------------------------------------------------------
+def canonical_allele_key(chrom: Any, pos: Any = None, ref: Any = None, alt: Any = None) -> str:
+    """Match GRCh38 variants by position and the unordered allele pair.
+
+    This deliberately does not perform strand-complement matching or indel
+    left-normalisation; the upstream reference and QTL coordinates are GRCh38.
+    """
+    if pos is None and ref is None and alt is None:
+        parts = str(chrom).replace("_", ":").split(":")
+        if len(parts) != 4:
+            return ""
+        chrom, pos, ref, alt = parts
+    c = clean_chrom(chrom)
+    p = safe_float(pos)
+    a, b = str(ref).upper().strip(), str(alt).upper().strip()
+    if not np.isfinite(p) or not float(p).is_integer() or not a or not b:
+        return ""
+    if not ACGT.fullmatch(a) or not ACGT.fullmatch(b) or a == b:
+        return ""
+    x, y = sorted((a, b))
+    return f"{c}:{int(p)}:{x}:{y}"
+
+
+def credible_set_data(P: dict, accession: str, locus_id: str) -> tuple[dict, dict, str]:
+    """Return (canonical-key -> PIP, key -> annotation, SHA1 of Step06 CS file).
+
+    Fail rather than silently mislabel CS membership if Step06 CS IDs cannot be
+    parsed as allele-resolved GRCh38 variant keys.
+    """
+    study = P["S06"] / accession
+    source = study / f"{accession}_95pct_credible_sets.tsv"
+    if not nonempty(source):
+        return {}, {}, "MISSING"
+    raw = source.read_bytes()
+    digest = hashlib.sha1(raw).hexdigest()[:16]
+    cs = pd.read_csv(source, sep="\t", dtype=str, keep_default_na=False)
+    required = {"LOCUS_ID", "REFERENCE_ID", "PIP"}
+    if not required <= set(cs.columns):
+        raise RuntimeError(f"Step06 CS table {source} missing {sorted(required-set(cs.columns))}")
+    cs = cs[cs["LOCUS_ID"].astype(str).eq(locus_id)]
+    cs_pips = {}
+    bad_ids = []
+    for r in cs.to_dict("records"):
+        key = canonical_allele_key(r["REFERENCE_ID"])
+        if not key:
+            bad_ids.append(r["REFERENCE_ID"])
+            continue
+        pip = safe_float(r["PIP"])
+        if key not in cs_pips or (np.isfinite(pip) and
+                                  (not np.isfinite(cs_pips[key]) or pip > cs_pips[key])):
+            cs_pips[key] = pip
+    if bad_ids:
+        raise RuntimeError(f"Step06 CS identifiers not allele-resolved: {bad_ids[:5]} ({source})")
+
+    ann_file = PROJECT_ROOT / "08_annotation" / P["p"] / P["r"] / accession / f"{accession}_credible_set_variants.tsv"
+    annotation = {}
+    if cs_pips and nonempty(ann_file):
+        a = pd.read_csv(ann_file, sep="\t", dtype=str, keep_default_na=False)
+        if "VARIANT_KEY" in a.columns and "LOCUS_ID" in a.columns:
+            for r in a[a["LOCUS_ID"].astype(str).eq(locus_id)].to_dict("records"):
+                k = canonical_allele_key(r["VARIANT_KEY"])
+                if k in cs_pips:
+                    annotation[k] = {
+                        "RSID": r.get("PRIMARY_RSID", ""),
+                        "GENE": r.get("VEP_GENE_SYMBOL", ""),
+                        "CONSEQUENCE": r.get("VEP_BEST_CONSEQUENCE", ""),
+                        "EVIDENCE": r.get("FUNCTIONAL_EVIDENCE", ""),
+                    }
+    return cs_pips, annotation, digest
 
 
 GWAS_COLUMNS = ["CHR", "POS", "SNPID", "EA", "NEA", "BETA", "SE", "P", "Z", "EAF"]
@@ -1186,6 +1277,28 @@ def validate_dataset(d: dict, files: pd.DataFrame, cfg: dict) -> dict:
         if n.gt(0).mean() >= 0.99:
             row["QTL_N"], row["QTL_N_SOURCE"], row["QTL_N_PER_TRAIT"] = (
                 f"{float(n.median()):g} (median)", f"file column {mapping['n']} (per trait)", "YES")
+    # ADSP user_input contains the association-level sample size.
+    if not row["QTL_N"] and "user_input" in x.columns:
+        observed_n = pd.to_numeric(
+            x["user_input"].astype(str).str.extract(
+                r"(?:^|;)num_samples=(\d+)(?:;|$)",
+                expand=False
+            ),
+            errors="coerce"
+        )
+        if observed_n.gt(0).mean() >= 0.99:
+            row["QTL_N"] = f"{float(observed_n.median()):g} (median)"
+            row["QTL_N_SOURCE"] = (
+                "ADSP BED user_input:num_samples (per association row)"
+            )
+            row["QTL_N_PER_TRAIT"] = "YES"
+            if observed_n.min() != observed_n.max():
+                warnings.append(
+                    f"ADSP num_samples varies "
+                    f"({observed_n.min():g}-{observed_n.max():g}) "
+                    "in validation rows; use per-trait values when testing"
+                )
+
     if not row["QTL_N"] and np.isfinite(safe_float(d.get("_META_N"))):
         row["QTL_N"], row["QTL_N_SOURCE"], row["QTL_N_PER_TRAIT"] = f"{safe_float(d['_META_N']):g}", d["_META_N_SOURCE"], "NO"
     if not row["QTL_N"] and did in cfg["QTL_N"]:
@@ -1414,6 +1527,17 @@ def normalize_qtl(df: pd.DataFrame, r: dict, chrom: str, start: int, end: int) -
     if not r.get("COL_FREQ") and r.get("COL_AC") and r.get("COL_AN"):
         freq = pd.to_numeric(col("ac"), errors="coerce") / pd.to_numeric(col("an"), errors="coerce")
     gene = col("gene").astype(str) if r.get("COL_GENE") else pd.Series("", index=df.index)
+    n_qtl_row = pd.to_numeric(col("n"), errors="coerce")
+
+    if not r.get("COL_N") and "user_input" in df.columns:
+        n_qtl_row = pd.to_numeric(
+            df["user_input"].astype(str).str.extract(
+                r"(?:^|;)num_samples=(\d+)(?:;|$)",
+                expand=False
+            ),
+            errors="coerce"
+        )
+
     out = pd.DataFrame({
         "TRAIT": col("trait").astype(str), "GENE": gene,
         "CHR": chrom, "POS": pos, "REF": ref, "ALT": alt,
@@ -1421,7 +1545,7 @@ def normalize_qtl(df: pd.DataFrame, r: dict, chrom: str, start: int, end: int) -
         (chrom + ":" + pos.astype("Int64").astype(str) + ":" + ref + ":" + alt),
         "P_QTL": pd.to_numeric(col("p"), errors="coerce"), "BETA_QTL": pd.to_numeric(col("beta"), errors="coerce"),
         "SE_QTL": pd.to_numeric(col("se"), errors="coerce"),
-        "MAF_QTL": np.minimum(freq, 1 - freq), "N_QTL_ROW": pd.to_numeric(col("n"), errors="coerce"),
+        "MAF_QTL": np.minimum(freq, 1 - freq), "N_QTL_ROW": n_qtl_row,
         "AN_QTL": pd.to_numeric(col("an"), errors="coerce")})
     out = out[out.POS.between(start, end)]
     out["POS"] = out["POS"].astype(int)
@@ -1522,7 +1646,9 @@ rows <- list()
 for (i in seq_len(nrow(cands))) {
   cid <- cands$CANDIDATE_ID[i]
   r <- list(CANDIDATE_ID=cid, R_STATUS="OK", MESSAGE="", PP_H0=NA, PP_H1=NA, PP_H2=NA, PP_H3=NA, PP_H4=NA,
-            PP_H4_P12_LOW=NA, PP_H4_P12_HIGH=NA, BEST_SNP="", BEST_SNP_PP_H4=NA, N_SNPS=0)
+            PP_H4_P12_LOW=NA, PP_H4_P12_HIGH=NA, BEST_SNP="", BEST_SNP_PP_H4=NA, N_SNPS=0,
+             CS_H4_POSTERIOR_MASS=NA_real_, CS_TOP_SNP="", CS_TOP_SNP_PP_H4=NA_real_,
+             BEST_SNP_IN_GWAS_CS="NO")
   res <- tryCatch({
     d <- x[x$CANDIDATE_ID == cid, , drop=FALSE]
     r$N_SNPS <- nrow(d)
@@ -1542,6 +1668,19 @@ for (i in seq_len(nrow(cands))) {
     rr <- z[[1]]$results
     if (!is.null(rr) && "SNP.PP.H4" %in% names(rr)) {
       j <- which.max(rr$SNP.PP.H4); r$BEST_SNP <- as.character(rr$snp[j]); r$BEST_SNP_PP_H4 <- rr$SNP.PP.H4[j]
+      # SNP.PP.H4 is conditional on the shared-causal-variant hypothesis H4.
+      # Sum it over the pre-existing GWAS Step06 credible-set members.
+      is_cs <- as.logical(d$IS_GWAS_CS[match(rr$snp, d$SNP)])
+      is_cs[is.na(is_cs)] <- FALSE
+      post <- suppressWarnings(as.numeric(rr$SNP.PP.H4))
+      post[!is.finite(post)] <- 0
+      r$CS_H4_POSTERIOR_MASS <- sum(post[is_cs])
+      r$BEST_SNP_IN_GWAS_CS <- ifelse(is_cs[j], "YES", "NO")
+      if (any(is_cs)) {
+        jj <- which(is_cs)[which.max(post[is_cs])]
+        r$CS_TOP_SNP <- as.character(rr$snp[jj])
+        r$CS_TOP_SNP_PP_H4 <- post[jj]
+      }
     }
     r
   }, error=function(e) { r$R_STATUS <- "ERROR"; r$MESSAGE <- gsub("[\t\n]", " ", conditionMessage(e)); r })
@@ -1556,7 +1695,11 @@ RESULT_COLUMNS = [
     "N_DISCOVERY_ROWS", "GWAS_CS_INDEXES", "QTL_CS_INDEXES", "STATUS", "COLOC_TESTED", "PP_H4", "COLOC_CLASS",
     "COLOCALIZED_STRONG", "SHARED_SIGNAL", "PRIOR_ROBUST_STRONG", "PP_H4_P12_LOW", "PP_H4_P12_HIGH",
     "PP_H0", "PP_H1", "PP_H2", "PP_H3", "DOMINANT_HYPOTHESIS", "BEST_GWAS_VARIANT", "BEST_QTL_VARIANT",
-    "BEST_SNP_PP_H4", "N_SIGNAL_PAIRS", "N_GWAS_SIGNALS", "N_QTL_SIGNALS", "N_GWAS_VARIANTS", "N_QTL_VARIANTS",
+    "BEST_SNP_PP_H4", "GWAS_CS_VARIANTS", "N_CS_VARIANTS_SHARED", "CS_VARIANTS_SHARED",
+    "CS_H4_POSTERIOR_MASS", "CS_TOP_SNP", "CS_TOP_SNP_PP_H4", "BEST_SNP_IN_GWAS_CS",
+    "CS_TOP_SNP_GWAS_PIP", "CS_TOP_SNP_RSID", "CS_TOP_SNP_GENE", "CS_TOP_SNP_CONSEQUENCE",
+    "CS_TOP_SNP_FUNCTIONAL_EVIDENCE", "CS_SUPPORTED_STRONG", "CS_SUPPORT_CLASS",
+    "N_SIGNAL_PAIRS", "N_GWAS_SIGNALS", "N_QTL_SIGNALS", "N_GWAS_VARIANTS", "N_QTL_VARIANTS",
     "N_COMMON_VARIANTS", "GWAS_MODE", "QTL_MODE", "COLOC_METHOD", "ERROR", "CANDIDATE_ID",
     # Step11 provenance / harmonisation / assumption flags
     "METHOD_FAMILY", "NOT_TESTED_REASON", "SOURCE_STUDY", "COHORT", "QTL_N_SOURCE", "QTL_MAF_SOURCE",
@@ -1589,7 +1732,7 @@ def locus_flags(locus: dict, n_cs: int | None, cfg: dict) -> dict:
     if n_cs is not None and n_cs > 1:
         multi.append(f"{n_cs} GWAS SuSiE credible sets (Step06)")
     warning = "; ".join(multi + [f"complex LD region {x}" for x in complex_ld])
-    return {"GWAS_N_CREDIBLE_SETS": n_cs if n_cs is not None else "NO_GWAS_CREDIBLE_SET (ABF still applicable)",
+    return {"GWAS_N_CREDIBLE_SETS": n_cs if n_cs is not None else 0,
             "GWAS_N_INDEPENDENT_SIGNALS": n_ind, "MULTI_SIGNAL_FLAG": "YES" if multi else "NO",
             "COMPLEX_LD_REGION": ",".join(complex_ld),
             "ABF_ASSUMPTION_WARNING": (warning + " - coloc.abf assumes one causal variant per trait; a multi-signal "
@@ -1602,7 +1745,8 @@ def process_locus(row: pd.Series, args, cfg: dict, planned: pd.DataFrame, files:
     study_dir = P["S06"] / accession
     out = P["OUT"] / accession / "loci" / locus_id
     done_file = out / DONE_FILE
-    run_hash = sha1_short(planned_hash(planned) + results_hash(cfg) + VERSION)
+    cs_pips, cs_annotations, cs_digest = credible_set_data(P, accession, locus_id)
+    run_hash = sha1_short(planned_hash(planned) + results_hash(cfg) + VERSION + cs_digest)
     previous = read_json(done_file)
     if previous and not args.force and previous.get("RUN_HASH") == run_hash:
         print(f"[RESUME] {accession} {locus_id}: {previous.get('STATUS')} (same datasets and parameters)")
@@ -1622,6 +1766,7 @@ def process_locus(row: pd.Series, args, cfg: dict, planned: pd.DataFrame, files:
     flags = locus_flags(locus, gwas_cs_counts(study_dir).get(locus_id), cfg)
     banner(f"STEP 11 - {accession} {locus_id} chr{chrom}:{start:,}-{end:,} - {len(planned)} QTL datasets")
     region = {"CHR": chrom, "LOCUS_START": start, "LOCUS_END": end,
+              "GWAS_CS_VARIANTS": len(cs_pips), "CS_SOURCE_HASH": cs_digest,
               **{k: gmeta[k] for k in ("GWAS_TYPE", "GWAS_N", "GWAS_N_SOURCE", "GWAS_CASE_FRACTION",
                                        "GWAS_N_EFF_NOT_USED")}, **flags}
 
@@ -1635,7 +1780,9 @@ def process_locus(row: pd.Series, args, cfg: dict, planned: pd.DataFrame, files:
         write_json(done_file, {"VERSION": VERSION, "STEP": "Step11", "STATUS": status, "STUDY_ACCESSION": accession,
                                "LOCUS_ID": locus_id, "RUN_HASH": run_hash, "N_DATASETS": int(len(planned)),
                                "N_CANDIDATES": int(len(results)), "N_TESTED": int(len(tested)),
-                               "N_STRONG": int((h4 >= cfg["STRONG_PP4"]).sum()), **region, **extra,
+                               "N_STRONG": int((h4 >= cfg["STRONG_PP4"]).sum()),
+                               "N_CS_SUPPORTED_STRONG": int((tested.get("CS_SUPPORTED_STRONG", pd.Series(dtype=str)).astype(str) == "YES").sum()),
+                               **region, **extra,
                                "SECONDS": round(time.time() - started, 1), "COMPLETED_UTC": utcnow()})
         if not args.keep_work:
             shutil.rmtree(work, ignore_errors=True)
@@ -1643,6 +1790,9 @@ def process_locus(row: pd.Series, args, cfg: dict, planned: pd.DataFrame, files:
               f"({time.time() - started:.0f}s)")
         return status
 
+    if cfg["REQUIRE_GWAS_CREDIBLE_SET"] and not cs_pips:
+        return finish("NOT_TESTED_NO_GWAS_CREDIBLE_SET", pd.DataFrame(), [], [],
+                      {"REASON": "Step06 has no 95% GWAS credible-set variants for this locus"})
     if gmeta["GWAS_META_REASON"]:
         return finish(gmeta["GWAS_META_REASON"].split(" (")[0], pd.DataFrame(), [], [],
                       {"REASON": gmeta["GWAS_META_REASON"]})
@@ -1698,7 +1848,10 @@ def process_locus(row: pd.Series, args, cfg: dict, planned: pd.DataFrame, files:
                 n_matched = int(m.EXCLUSION_REASON.eq("").sum())
                 gmode, qmode, not_tested, var_reason = choose_modes(m, gmeta, r)
                 m.loc[(m.EXCLUSION_REASON == "") & (var_reason != ""), "EXCLUSION_REASON"] = var_reason
+                # Membership is evaluated AFTER the existing allele and QC filters.
+                m["IS_GWAS_CS"] = m["HARMONISED_ID"].map(canonical_allele_key).isin(cs_pips)
                 use = m[m.EXCLUSION_REASON.eq("")]
+                cs_shared = use[use.IS_GWAS_CS]
                 # QTL sample size of this trait
                 if r["QTL_N"] == "AN/2":
                     an = qt.AN_QTL.dropna()
@@ -1723,6 +1876,8 @@ def process_locus(row: pd.Series, args, cfg: dict, planned: pd.DataFrame, files:
                         "QTL_MAF_SOURCE": r["FREQ_KIND"], "DISCOVERY_MIN_P": float(min_p[trait]),
                         "N_DISCOVERY_ROWS": int(len(qt)), "N_GWAS_VARIANTS": int(len(g)),
                         "N_QTL_VARIANTS": int(len(qt)), "N_COMMON_VARIANTS": int(len(use)),
+                        "GWAS_CS_VARIANTS": len(cs_pips), "N_CS_VARIANTS_SHARED": len(cs_shared),
+                        "CS_VARIANTS_SHARED": ";".join(cs_shared.HARMONISED_ID.astype(str).head(100)),
                         "N_ALIGNED": int((use.MATCH_STATUS == "ALIGNED").sum()),
                         "N_SWAPPED": int((use.MATCH_STATUS == "SWAPPED").sum()), "N_EXCLUDED": int(len(excluded)),
                         "EXCLUSIONS": ";".join(f"{k}={v}" for k, v in excluded.EXCLUSION_REASON.value_counts().items()),
@@ -1732,8 +1887,11 @@ def process_locus(row: pd.Series, args, cfg: dict, planned: pd.DataFrame, files:
                         "QTL_MODE": qmode, "COLOC_METHOD": "coloc.abf", "METHOD_FAMILY": "ABF_SINGLE_CAUSAL_VARIANT",
                         "DUPLICATE_OF": r.get("DUPLICATE_OF", ""), "INDEPENDENT_EVIDENCE": r.get("INDEPENDENT_EVIDENCE", ""),
                         "COLOC_TESTED": "NO", "GWAS_CS_INDEXES": "", "QTL_CS_INDEXES": ""}
+                m["GWAS_CS_PIP"] = m.HARMONISED_ID.map(
+                    lambda s: cs_pips.get(canonical_allele_key(s), np.nan))
                 harm.append(m.assign(CANDIDATE_ID=cid, DATASET_ID=did, USED_IN_COLOC=m.EXCLUSION_REASON.eq(""))[
-                    ["CANDIDATE_ID", "DATASET_ID", "TRAIT", "HARMONISED_ID", "QTL_ORIGINAL_ID", "GWAS_ORIGINAL_ID",
+                    ["CANDIDATE_ID", "DATASET_ID", "TRAIT", "HARMONISED_ID", "IS_GWAS_CS", "GWAS_CS_PIP",
+                     "QTL_ORIGINAL_ID", "GWAS_ORIGINAL_ID",
                      "MATCH_STATUS", "PALINDROMIC", "EXCLUSION_REASON", "USED_IN_COLOC", "P_GWAS", "BETA_GWAS",
                      "BETA_GWAS_ALIGNED", "SE_GWAS", "MAF_GWAS", "P_QTL", "BETA_QTL", "SE_QTL", "MAF_QTL"]])
                 why = ""
@@ -1747,6 +1905,9 @@ def process_locus(row: pd.Series, args, cfg: dict, planned: pd.DataFrame, files:
                                 len(use) / max(1, min(len(g), len(qt))) < float(cfg["MIN_OVERLAP"])):
                     why = (f"NOT_TESTED_INSUFFICIENT_VARIANT_OVERLAP ({len(use)} shared; need >= {cfg['MIN_SHARED']} "
                            f"and >= {cfg['MIN_OVERLAP']:.0%} of the smaller side)")
+                if not why and cfg["REQUIRE_CS_VARIANT_OVERLAP"] and len(cs_shared) < int(cfg["MIN_CS_VARIANTS_SHARED"]):
+                    why = (f"NOT_TESTED_NO_SHARED_GWAS_CS_VARIANT ({len(cs_shared)} GWAS CS variants "
+                           f"after harmonisation; need >= {cfg['MIN_CS_VARIANTS_SHARED']})")
                 if why:
                     cands.append({**base, "STATUS": why.split(" (")[0], "NOT_TESTED_REASON": why})
                     continue
@@ -1754,7 +1915,8 @@ def process_locus(row: pd.Series, args, cfg: dict, planned: pd.DataFrame, files:
                     "CANDIDATE_ID": cid, "SNP": use.HARMONISED_ID.values, "P_GWAS": use.P_GWAS.values,
                     "BETA_GWAS": use.BETA_GWAS_ALIGNED.values, "SE_GWAS": use.SE_GWAS.values,
                     "MAF_GWAS": use.MAF_GWAS.values, "P_QTL": use.P_QTL.values, "BETA_QTL": use.BETA_QTL.values,
-                    "SE_QTL": use.SE_QTL.values, "MAF_QTL": use.MAF_QTL.values}))
+                    "SE_QTL": use.SE_QTL.values, "MAF_QTL": use.MAF_QTL.values,
+                    "IS_GWAS_CS": use.IS_GWAS_CS.values.astype(bool)}))
                 cands.append({**base, "STATUS": "PENDING_R", "QTL_SDY": r.get("QTL_SDY") or "NA"})
         except Exception as exc:
             entry["STATUS"] = f"NOT_TESTED_RESOURCE_ERROR: {type(exc).__name__}: {str(exc)[:200]}"
@@ -1805,6 +1967,24 @@ def process_locus(row: pd.Series, args, cfg: dict, planned: pd.DataFrame, files:
             results.at[i, "PRIOR_ROBUST_STRONG"] = "YES" if np.isfinite(low) and low >= cfg["STRONG_PP4"] else "NO"
             results.at[i, "BEST_GWAS_VARIANT"] = results.at[i, "BEST_QTL_VARIANT"] = str(a.get("BEST_SNP", ""))
             results.at[i, "BEST_SNP_PP_H4"] = safe_float(a.get("BEST_SNP_PP_H4"))
+            results.at[i, "CS_H4_POSTERIOR_MASS"] = safe_float(a.get("CS_H4_POSTERIOR_MASS"))
+            results.at[i, "CS_TOP_SNP"] = str(a.get("CS_TOP_SNP", "") or "")
+            results.at[i, "CS_TOP_SNP_PP_H4"] = safe_float(a.get("CS_TOP_SNP_PP_H4"))
+            results.at[i, "BEST_SNP_IN_GWAS_CS"] = str(a.get("BEST_SNP_IN_GWAS_CS", "NO"))
+            best_cs = canonical_allele_key(a.get("CS_TOP_SNP", ""))
+            cs_annotation = cs_annotations.get(best_cs, {})
+            results.at[i, "CS_TOP_SNP_GWAS_PIP"] = cs_pips.get(best_cs, np.nan)
+            for field, source in (("CS_TOP_SNP_RSID", "RSID"), ("CS_TOP_SNP_GENE", "GENE"),
+                                  ("CS_TOP_SNP_CONSEQUENCE", "CONSEQUENCE"),
+                                  ("CS_TOP_SNP_FUNCTIONAL_EVIDENCE", "EVIDENCE")):
+                results.at[i, field] = cs_annotation.get(source, "")
+            cs_mass = safe_float(a.get("CS_H4_POSTERIOR_MASS"))
+            is_strong = np.isfinite(pp[4]) and pp[4] >= cfg["STRONG_PP4"]
+            cs_supported = is_strong and np.isfinite(cs_mass) and cs_mass >= cfg["MIN_CS_H4_MASS"]
+            results.at[i, "CS_SUPPORTED_STRONG"] = "YES" if cs_supported else "NO"
+            results.at[i, "CS_SUPPORT_CLASS"] = (
+                "STRONG_CS_SUPPORTED" if cs_supported else
+                "STRONG_CS_MASS_BELOW_CUTOFF" if is_strong else "BELOW_COLOC_THRESHOLD")
             results.at[i, "COLOC_TESTED"] = "YES"
             results.at[i, "STATUS"] = "TESTED"
     order = pd.to_numeric(results["PP_H4"], errors="coerce").fillna(-1)
@@ -1921,7 +2101,8 @@ def locus_plan(P: dict, cfg: dict) -> pd.DataFrame:
             regional = study_dir / "regional_gwas" / f"{lid}.tsv.gz"
             source = "STEP06_REGIONAL" if regional.is_file() else "STEP02_QC_FALLBACK" if nonempty(qc) else "MISSING"
             flags = locus_flags(locus, cs.get(lid), cfg)
-            reason = gm["GWAS_META_REASON"] or ("NOT_TESTED_NO_GWAS_INPUT" if source == "MISSING" else "")
+            reason = ("NOT_TESTED_NO_GWAS_CREDIBLE_SET" if cfg["REQUIRE_GWAS_CREDIBLE_SET"] and lid not in cs
+                      else gm["GWAS_META_REASON"] or ("NOT_TESTED_NO_GWAS_INPUT" if source == "MISSING" else ""))
             rows.append({"STUDY_ACCESSION": accession, "LOCUS_ID": lid, "CHR": locus["CHR"],
                          "LOCUS_START": locus["LOCUS_START"], "LOCUS_END": locus["LOCUS_END"],
                          "GWAS_INPUT": source, "GWAS_TYPE": gm["GWAS_TYPE"], "GWAS_N": gm["GWAS_N"],
@@ -1937,6 +2118,10 @@ def check_resources_mode(args, cfg) -> None:
     problems = []
     banner("STEP 11 - RESOURCE CHECK - external molecular QTL")
     print(f"Config     : {cfg['_FILE'] or 'built-in defaults'}")
+    print(f"CS policy : require GWAS 95% CS={cfg['REQUIRE_GWAS_CREDIBLE_SET']}, "
+          f"require matched CS variant={cfg['REQUIRE_CS_VARIANT_OVERLAP']}, "
+          f"min CS variants={cfg['MIN_CS_VARIANTS_SHARED']}, "
+          f"CS conditional H4 mass cutoff={cfg['MIN_CS_H4_MASS']}")
     print(f"QTL types  : {', '.join(cfg['QTL_TYPES'])}   CANDIDATE_P {cfg['CANDIDATE_P']}   MIN_SHARED "
           f"{cfg['MIN_SHARED']}   MIN_OVERLAP {cfg['MIN_OVERLAP']}   palindromic: {cfg['PALINDROMIC_POLICY']}")
     rscript = find_executable("Rscript")
@@ -1981,7 +2166,7 @@ def check_resources_mode(args, cfg) -> None:
             LOCI=("LOCUS_ID", "size"), TESTABLE=("TESTABLE", lambda s: int((s == "YES").sum())),
             REGIONAL=("GWAS_INPUT", lambda s: int((s == "STEP06_REGIONAL").sum())),
             QC_FALLBACK=("GWAS_INPUT", lambda s: int((s == "STEP02_QC_FALLBACK").sum())),
-            NO_GWAS_CS=("GWAS_N_CREDIBLE_SETS", lambda s: int(s.astype(str).str.startswith("NO_").sum())),
+            NO_GWAS_CS=("GWAS_N_CREDIBLE_SETS", lambda s: int(pd.to_numeric(s, errors="coerce").fillna(0).eq(0).sum())),
             MULTI_SIGNAL=("MULTI_SIGNAL_FLAG", lambda s: int((s == "YES").sum())),
             TYPE=("GWAS_TYPE", "first"), N=("GWAS_N", "first"), CASE_FRACTION=("GWAS_CASE_FRACTION", "first"),
             REASON=("REASON", "first")).reset_index()
@@ -1989,7 +2174,7 @@ def check_resources_mode(args, cfg) -> None:
         with pd.option_context("display.width", 250, "display.max_colwidth", 70):
             print(per.to_string(index=False))
         print(f"\nLoci: {len(lp)} from loci_definition.tsv ({int((lp.TESTABLE == 'YES').sum())} with GWAS input + N); "
-              f"loci without a GWAS credible set stay in (coloc.abf does not need one).")
+              f"loci without a GWAS credible set are marked NOT_TESTED when REQUIRE_GWAS_CREDIBLE_SET=True.")
         print(f"GWAS N source: {lp.GWAS_N_SOURCE.iloc[0] or '-'}  (N_EFF is never used for coloc.abf)")
         if not (lp.TESTABLE == "YES").any():
             problems.append("no testable locus (GWAS metadata / input)")
@@ -2054,7 +2239,7 @@ export PATH={shlex.quote(str(PROJECT_ROOT / 'envs' / 'pipeline' / 'bin'))}:"$PAT
 {' '.join(shlex.quote(x) for x in command)}
 """, encoding="utf-8", newline="\n")
     P["BASH"].chmod(0o755)
-    print(f"\nStudies   : {len(studies)}\nLoci      : {len(manifest)} (all of loci_definition.tsv) -> array {array}"
+    print(f"\nStudies   : {len(studies)}\nLoci      : {len(manifest)} (all of loci_definition.tsv, no-CS loci will be marked NOT_TESTED) -> array {array}"
           + (f" ({len(manifest) / n_tasks:.1f} loci per task)" if len(manifest) > n_tasks else " (one locus per task)"))
     print(f"Datasets  : {len(planned)} planned, frozen in registry_snapshot.tsv")
     print(f"Manifest  : {manifest_file}\n\nRUN:\n  sbatch {P['BASH'].name}\nTHEN:\n  {base_command(P)} --status\n"
@@ -2196,6 +2381,12 @@ def stats_mode(args, cfg) -> None:
         print("No candidate results yet (see --status).")
         return
     x = pd.concat(frames, ignore_index=True)
+    # Older completed loci may predate credible-set-aware result columns.
+    # Do not mistake absent metadata for negative evidence.
+    for col in ("CS_SUPPORTED_STRONG", "CS_H4_POSTERIOR_MASS", "N_CS_VARIANTS_SHARED",
+                "CS_TOP_SNP", "CS_TOP_SNP_GWAS_PIP", "CS_SUPPORT_CLASS"):
+        if col not in x.columns:
+            x[col] = np.nan
     tested = x[x["COLOC_TESTED"].astype(str) == "YES"].copy()
     tested["PP_H4"] = pd.to_numeric(tested["PP_H4"], errors="coerce")
     strong, suggestive = cfg["STRONG_PP4"], cfg["SUGGESTIVE_PP4"]
@@ -2207,6 +2398,7 @@ def stats_mode(args, cfg) -> None:
                      "CANDIDATES": len(grp), "TESTED": len(t), "STRONG": int((t.PP_H4 >= strong).sum()),
                      "SUGGESTIVE": int(((t.PP_H4 >= suggestive) & (t.PP_H4 < strong)).sum()),
                      "PRIOR_ROBUST": int((t.PRIOR_ROBUST_STRONG.astype(str) == "YES").sum()),
+                     "CS_SUPPORTED_STRONG": int((t.CS_SUPPORTED_STRONG.astype(str) == "YES").sum()),
                      "STRONG_MULTI_SIGNAL_LOCI": int(((t.PP_H4 >= strong) & (t.MULTI_SIGNAL_FLAG.astype(str) == "YES")).sum()),
                      "TOP (PP.H4)": f"{b.iloc[0]['MOLECULAR_TRAIT_ID']} {b.iloc[0]['TISSUE']} ({b.iloc[0]['PP_H4']:.2f})"
                      if len(b) else ""})
@@ -2221,9 +2413,17 @@ def stats_mode(args, cfg) -> None:
             show = top.assign(IDX=top["STUDY_ACCESSION"].map(order).fillna(""), PP_H4=top["PP_H4"].round(3),
                               WARN=top["ABF_ASSUMPTION_WARNING"].astype(str).ne("").map({True: "YES", False: ""}))
             cols = ["IDX", "STUDY_ACCESSION", "LOCUS_ID", "QTL_TYPE", "DATASET_ID", "MOLECULAR_TRAIT_ID",
-                    "N_COMMON_VARIANTS", "PP_H4", "PRIOR_ROBUST_STRONG", "INDEPENDENT_EVIDENCE", "WARN"]
+                    "N_COMMON_VARIANTS", "N_CS_VARIANTS_SHARED", "PP_H4", "CS_H4_POSTERIOR_MASS",
+                    "CS_SUPPORTED_STRONG", "CS_TOP_SNP", "CS_TOP_SNP_GWAS_PIP",
+                    "PRIOR_ROBUST_STRONG", "INDEPENDENT_EVIDENCE", "WARN"]
             print(show[cols].to_string(index=False))
     print("\nCandidate status: " + "  ".join(f"{k}={v}" for k, v in x["STATUS"].astype(str).value_counts().items()))
+    if len(tested):
+        cs_support = tested.CS_SUPPORTED_STRONG.astype(str).eq("YES")
+        print(f"Credible-set-supported strong results: {int(cs_support.sum())} "
+              f"(conditional H4 mass >= {cfg['MIN_CS_H4_MASS']:.2f} within GWAS 95% CS)")
+        for typ, q in tested[cs_support].groupby("QTL_TYPE"):
+            print(f"  {typ}: {len(q)} CS-supported strong candidate-trait tests")
     write_tsv(x, P["OUT"] / "coloc_all_candidates.tsv")
     write_tsv(table, P["OUT"] / "coloc_stats.tsv")
     print(f"\nTables: {P['OUT'] / 'coloc_stats.tsv'}\n        {P['OUT'] / 'coloc_all_candidates.tsv'}\n"

@@ -105,13 +105,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import re
 import shutil
 import subprocess
-import sys
 import time
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -156,15 +153,21 @@ STEP_FRAME = {
     "INPUTS": [
         ("Step12", "12_master_table", ["Step12_Locus_Gene_Master.tsv"], True, True),
         ("Step12", "12_master_table", ["Step12_Locus_Master.tsv"], True, True),
-        ("Step06", "06_finemapping", ["GCST*/*_finemapped_variants.tsv.gz"], False, False),
+        ("Step06", "06_finemapping", ["GCST*/*_finemapped_variants.tsv.gz", "GCST*/*_95pct_credible_sets.tsv"], False, False),
+        ("Step05", "05_ld_clumping", ["GCST*/lead_variants.tsv"], False, False),
+        ("Step11", "11_custom_qtl_coloc", ["coloc_all_candidates.tsv"], False, False),
     ],
     "MODULES": [("duckdb", True, "reads the Open Targets parquet files"), ("scipy", False, "correlations")],
     "STATS_TABLES": [
         ("Step13_Gene_Comparison.tsv", ["STUDY_ACCESSION", "LOCUS_ID", "EFFECTOR_GENE_SYMBOL", "EFFECTOR_GENE_ID",
                                         "BEST_H4", "OPEN_TARGETS_EVIDENCE_CLASS", "NOVELTY_TIER_STEP13"], "BEST_H4",
          "GWAS2Mech GENES vs OPEN TARGETS"),
-        ("Step13_Novelty_Tier_Summary.tsv", ["NOVELTY_TIER_STEP13", "N_GENES", "N_ROWS", "COUNT", "N"], "",
+        ("Step13_Novelty_Tier_Summary.tsv", ["NOVELTY_TIER_STEP13", "N_GENE_ROWS", "N_DISTINCT_GENES", "N_LOCI"], "",
          "TIER SUMMARY"),
+        ("Step13_Study_Comparability.tsv", ["STUDY_ID", "N_GWAS2M_LOCI", "N_OT_CREDIBLE_SETS", "N_PRIMARY_MATCHES", "COMPARABILITY_CLASS"], "", "EXACT-STUDY COVERAGE"),
+        ("Step13_Individual_Credible_Set_Comparison.tsv", ["STUDY_ID", "GWAS2M_LOCUS_ID", "GWAS2M_CS_ID", "OT_STUDY_LOCUS_ID", "N_SHARED_CS_VARIANTS", "CS_JACCARD", "CS_AGREEMENT_STATUS"], "N_SHARED_CS_VARIANTS", "GWAS SuSiE CS vs OT CS (pairwise)"),
+        ("OpenTargets_Molecular_QTL_Colocalisation_Only.tsv", ["OT_STUDY_LOCUS_ID", "OTHER_STUDY_LOCUS_ID", "OT_COLOC_ORIENTATION", "OT_COLOC_METHOD", "OT_COLOC_GENE_ID", "OT_H4", "OT_CLPP"], "OT_H4", "OPEN TARGETS MOLECULAR COLOCALISATION"),
+        ("Step13_Gene_Comparison.tsv", ["STUDY_ACCESSION", "LOCUS_ID", "EFFECTOR_GENE_SYMBOL", "BEST_H4", "GWAS2M_STEP11_N_CS_SUPPORTED_STRONG", "GWAS2M_STEP11_ANY_ABF_ASSUMPTION_WARNING", "OT_N_MATCHED_CREDIBLE_SETS", "OT_COLOC_GENE_PRESENT_H4_THRESHOLD", "NOVELTY_TIER_STEP13"], "BEST_H4", "GENE x STEP11 QC x OPEN TARGETS"),
     ],
 }
 
@@ -456,7 +459,7 @@ def pipeline_main(run) -> None:
 # ============================ end of pipeline frame ===========================
 
 
-VERSION = "2.0.0"
+VERSION = "2.1.0-ot26.09-credible-set-audited"
 DEFAULT_OT_RELEASE = "26.09"
 DEFAULT_STRONG_H4 = 0.80
 DEFAULT_SUGGESTIVE_H4 = 0.50
@@ -986,6 +989,152 @@ def build_gwas_loci(locus_master: pd.DataFrame, gwas_variants: pd.DataFrame) -> 
     return pd.DataFrame(rows)
 
 
+def attach_step05_original_leads(
+    gwas_loci: pd.DataFrame, root: Path, phenotype: str, ancestry_label: str,
+) -> pd.DataFrame:
+    """Distinguish clumping index SNP(s) from maximum-PIP fine-mapping SNP."""
+    base = root / "05_ld_clumping" / slugify(phenotype) / panel_slug(slugify(ancestry_label))
+    z = gwas_loci.copy()
+    z["GWAS2M_STEP05_LEAD_VARIANTS"] = ""
+    z["GWAS2M_STEP05_LEAD_POSITIONS"] = ""
+    z["GWAS2M_STEP05_LEAD_STATUS"] = "NOT_RESOLVED"
+    for study in z["STUDY_ID"].dropna().unique():
+        # Step06 saved authoritative intervals and original PLINK leads.
+        definition = root / "06_finemapping" / slugify(phenotype) / panel_slug(slugify(ancestry_label)) / str(study) / "loci_definition.tsv"
+        if definition.is_file():
+            try:
+                defs = pd.read_csv(definition, sep="\t", dtype=str).fillna("")
+                for i, r in z[z["STUDY_ID"].eq(study)].iterrows():
+                    hit = defs[defs["LOCUS_ID"].astype(str).eq(clean_str(r.get("GWAS2M_LOCUS_ID")))]
+                    if hit.empty: continue
+                    v=hit.iloc[0]
+                    for k,col in [("GWAS2M_CHR","CHR"),("GWAS2M_START","LOCUS_START"),("GWAS2M_END","LOCUS_END")]:
+                        if col in v and clean_str(v[col]):
+                            z.at[i,k] = canonical_chr(v[col]) if k=="GWAS2M_CHR" else finite_float(v[col])
+                    z.at[i,"GWAS2M_STEP05_LEAD_POSITIONS"] = clean_str(v.get("LEAD_POSITIONS"))
+            except Exception as exc:
+                print(f"[WARN] Step06 locus definition could not be loaded: {exc}")
+        f = base / str(study) / "lead_variants.tsv"
+        if not f.is_file():
+            continue
+        try:
+            d = pd.read_csv(f, sep="\t", dtype=str, low_memory=False).fillna("")
+            chrom_col = first_existing(d.columns, ["CHR", "CHROM", "LEAD_CHR", "CHROMOSOME"])
+            pos_col = first_existing(d.columns, ["POS", "BP", "LEAD_POS", "POSITION"])
+            ref_col = first_existing(d.columns, ["REF", "REFERENCE_REF", "LEAD_REF"])
+            alt_col = first_existing(d.columns, ["ALT", "REFERENCE_ALT", "LEAD_ALT"])
+            key_col = first_existing(d.columns, ["VARIANT_KEY", "LEAD_VARIANT", "LEAD_ID", "SNP", "ID"])
+            if not ((chrom_col and pos_col and ref_col and alt_col) or key_col):
+                continue
+            keys = []
+            for _, r in d.iterrows():
+                k = canonical_variant(r.get(key_col)) if key_col else ""
+                if not k and chrom_col and pos_col and ref_col and alt_col:
+                    k = variant_from_parts(r[chrom_col], r[pos_col], r[ref_col], r[alt_col])
+                keys.append(k)
+            d["_LEAD_KEY"] = keys
+            if not chrom_col or not pos_col:
+                d["_CHR"] = d["_LEAD_KEY"].str.split(":").str[0]
+                d["_POS"] = d["_LEAD_KEY"].str.split(":").str[1]
+            else:
+                d["_CHR"] = d[chrom_col].map(canonical_chr)
+                d["_POS"] = pd.to_numeric(d[pos_col], errors="coerce")
+            d["_POS"] = pd.to_numeric(d["_POS"], errors="coerce")
+            for i, r in z[z["STUDY_ID"].eq(study)].iterrows():
+                mask = d["_CHR"].eq(clean_str(r.get("GWAS2M_CHR"))) & d["_POS"].between(
+                    finite_float(r.get("GWAS2M_START")), finite_float(r.get("GWAS2M_END"))
+                )
+                leads = [k for k in d.loc[mask, "_LEAD_KEY"].astype(str) if k]
+                z.at[i, "GWAS2M_STEP05_LEAD_VARIANTS"] = ";".join(dict.fromkeys(leads))
+                z.at[i, "GWAS2M_STEP05_LEAD_STATUS"] = "RESOLVED" if leads else "NOT_RESOLVED"
+        except Exception as exc:
+            print(f"[WARN] Failed Step05 lead extraction for {study}: {exc}", flush=True)
+    return z
+
+
+def load_gwas_susie_credible_set_memberships(
+    root: Path, phenotype: str, ancestry_label: str, studies: Iterable[str]
+) -> pd.DataFrame:
+    """True Step06 SuSiE component membership; not the union of all locus CS SNPs."""
+    base = root / "06_finemapping" / slugify(phenotype) / panel_slug(slugify(ancestry_label))
+    records = []
+    for study in studies:
+        f = base / str(study) / f"{study}_95pct_credible_sets.tsv"
+        if not f.is_file():
+            print(f"[WARN] Step06 component membership file missing for {study}: {f}", flush=True)
+            continue
+        cs = pd.read_csv(f, sep="\t", dtype=str, low_memory=False).fillna("")
+        required = {"LOCUS_ID", "CREDIBLE_SET", "REFERENCE_ID"}
+        if not required.issubset(cs.columns):
+            print(f"[WARN] Step06 CS file incompatible ({f}): {sorted(cs.columns)}")
+            continue
+        for _, row in cs.iterrows():
+            variant = canonical_variant(row.get("REFERENCE_ID", ""))
+            if not variant:
+                print(f"[WARN] Non-normalisable Step06 CS variant in {f}: {row.get('REFERENCE_ID')}")
+                continue
+            records.append({
+                "STUDY_ID": str(study),
+                "GWAS2M_LOCUS_ID": clean_str(row["LOCUS_ID"]),
+                "GWAS2M_CS_ID": clean_str(row["CREDIBLE_SET"]),
+                "VARIANT_KEY": variant,
+                "GWAS2M_CS_VARIANT_PIP": finite_float(row.get("PIP")),
+                "GWAS2M_CS_COVERAGE": finite_float(row.get("CS_COVERAGE")),
+                "GWAS2M_CS_PURITY_MIN_ABS_R": finite_float(row.get("PURITY_MIN_ABS_R")),
+            })
+    return pd.DataFrame(records)
+
+
+def compare_individual_credible_sets(
+    pair_matches: pd.DataFrame, memberships: pd.DataFrame, ot_variants: pd.DataFrame,
+) -> pd.DataFrame:
+    """One row per actual GWAS SuSiE component x matching OT credible set."""
+    if memberships.empty or pair_matches.empty or ot_variants.empty:
+        return pd.DataFrame()
+    rows = []
+    g_groups = memberships.groupby(["STUDY_ID", "GWAS2M_LOCUS_ID", "GWAS2M_CS_ID"])
+    o_groups = {k: v for k,v in ot_variants.groupby("OT_STUDY_LOCUS_ID")}
+    for _,match in pair_matches.iterrows():
+        kstudy=clean_str(match.get("STUDY_ID"))
+        klocus=clean_str(match.get("GWAS2M_LOCUS_ID"))
+        otid=clean_str(match.get("OT_STUDY_LOCUS_ID"))
+        o=o_groups.get(otid)
+        if o is None: continue
+        o=o[o["OT_IS_95_CS"].map(boolish)].copy()
+        osv=set(o["VARIANT_KEY"].dropna().astype(str))
+        if not osv: continue
+        for (study,locus,csid),g in g_groups:
+            if study!=kstudy or locus!=klocus: continue
+            gsv=set(g["VARIANT_KEY"].dropna().astype(str))
+            overlap=gsv&osv
+            overlap_detail=g[["VARIANT_KEY", "GWAS2M_CS_VARIANT_PIP"]].merge(
+                o[["VARIANT_KEY", "OT_PIP"]], on="VARIANT_KEY", how="inner"
+            )
+            rows.append({
+                "STUDY_ID": study,
+                "GWAS2M_LOCUS_ID": locus,
+                "GWAS2M_CS_ID": csid,
+                "OT_STUDY_LOCUS_ID": otid,
+                "OT_METHOD": clean_str(match.get("OT_METHOD")),
+                "REGIONAL_MATCH_CONFIDENCE":clean_str(match.get("MATCH_CONFIDENCE")),
+                "N_GWAS2M_CS_VARIANTS":len(gsv),
+                "N_OT_CS_VARIANTS":len(osv),
+                "N_SHARED_CS_VARIANTS":len(overlap),
+                "CS_JACCARD":jaccard(gsv,osv),
+                "GWAS2M_CS_TOP_VARIANT":clean_str(g.sort_values("GWAS2M_CS_VARIANT_PIP",ascending=False).iloc[0]["VARIANT_KEY"]),
+                "OT_CS_TOP_VARIANT":clean_str(o.sort_values("OT_PIP",ascending=False).iloc[0]["VARIANT_KEY"]),
+                "PIP_SPEARMAN_ON_SHARED":safe_corr(overlap_detail["GWAS2M_CS_VARIANT_PIP"],overlap_detail["OT_PIP"],"spearman"),
+                "PIP_MAE_ON_SHARED":float((overlap_detail["GWAS2M_CS_VARIANT_PIP"]-overlap_detail["OT_PIP"]).abs().mean()) if not overlap_detail.empty else np.nan,
+                "STEP06_MIN_CS_PURITY_ABS_R":float(g["GWAS2M_CS_PURITY_MIN_ABS_R"].min()) if g["GWAS2M_CS_PURITY_MIN_ABS_R"].notna().any() else np.nan,
+                "CS_AGREEMENT_STATUS":"SHARED_CREDIBLE_SET_VARIANTS" if overlap else "SAME_REGION_NO_CS_VARIANT_OVERLAP",
+            })
+    out=pd.DataFrame(rows)
+    if not out.empty:
+        out=out.sort_values(["STUDY_ID","GWAS2M_LOCUS_ID","GWAS2M_CS_ID","N_SHARED_CS_VARIANTS","CS_JACCARD"], ascending=[True,True,True,False,False])
+        out["BEST_MATCH_FOR_GWAS2M_CS"] = ~out.duplicated(["STUDY_ID","GWAS2M_LOCUS_ID","GWAS2M_CS_ID"])
+    return out
+
+
 # =============================================================================
 # OPEN TARGETS PARQUET ACCESS
 # =============================================================================
@@ -1400,6 +1549,33 @@ def subset_parquet(path: Path, column_candidates: list[str], values: Iterable[An
         con.close()
 
 
+def subset_colocalisation_both_sides(path: Path, locus_ids: Iterable[Any]) -> pd.DataFrame:
+    """Strict 26.09 schema: both leftStudyLocusId and rightStudyLocusId."""
+    require_duckdb()
+    cols = duckdb_columns(path)
+    left = first_existing(cols, ["leftStudyLocusId", "left_study_locus_id"])
+    right = first_existing(cols, ["rightStudyLocusId", "right_study_locus_id"])
+    if not left or not right:
+        raise RuntimeError(
+            "Open Targets colocalisation schema is incompatible: expected "
+            "leftStudyLocusId AND rightStudyLocusId; observed: " + ", ".join(cols)
+        )
+    wanted = sorted({clean_str(v) for v in locus_ids if clean_str(v)})
+    if not wanted:
+        return pd.DataFrame()
+    files = parquet_files(path)
+    flist = "[" + ",".join(sql_quote(x) for x in files) + "]"
+    vals = "(" + ",".join(sql_quote(x) for x in wanted) + ")"
+    query = (f'SELECT * FROM read_parquet({flist}, union_by_name=true) '
+             f'WHERE CAST("{left}" AS VARCHAR) IN {vals} '
+             f'OR CAST("{right}" AS VARCHAR) IN {vals}')
+    con = duckdb.connect(database=":memory:")
+    try:
+        return con.execute(query).fetchdf()
+    finally:
+        con.close()
+
+
 # =============================================================================
 # OPEN TARGETS CREDIBLE SETS
 # =============================================================================
@@ -1434,6 +1610,7 @@ def flatten_ot_credible_sets(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     chr_col = first_existing(cols, ["chromosome", "chr"])
     pos_col = first_existing(cols, ["position", "pos"])
     qtl_gene_col = first_existing(cols, ["qtlGeneId", "qtl_gene_id", "geneId", "gene_id"])
+    study_type_col = first_existing(cols, ["studyType", "study_type"])
     lead_col = first_existing(cols, ["variantId", "variant_id", "leadVariantId", "lead_variant_id"])
     locus_col = first_existing(cols, ["locus", "variants", "credibleSetVariants", "credible_set_variants"])
 
@@ -1448,6 +1625,7 @@ def flatten_ot_credible_sets(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
         study = clean_str(rec.get(study_col)) if study_col else ""
         method = clean_str(rec.get(method_col)) if method_col else ""
         qtl_gene = gene_base(rec.get(qtl_gene_col)) if qtl_gene_col else ""
+        study_type = clean_str(rec.get(study_type_col)) if study_type_col else ""
         members = as_list(rec.get(locus_col)) if locus_col else []
 
         local: list[dict[str, Any]] = []
@@ -1491,6 +1669,7 @@ def flatten_ot_credible_sets(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
             "OT_STUDY_ID": study,
             "OT_METHOD": method,
             "OT_QTL_GENE_ID": qtl_gene,
+            "OT_STUDY_TYPE": study_type,
             "OT_CHR": chrom,
             "OT_START": start,
             "OT_END": end,
@@ -1511,9 +1690,12 @@ def candidate_locus_pairs(gwas_loci: pd.DataFrame, ot_loci: pd.DataFrame, gwas_v
     rows: list[dict[str, Any]] = []
 
     gvar_map: dict[tuple[str, str], set[str]] = {}
+    gcs_map: dict[tuple[str, str], set[str]] = {}
     if not gwas_variants.empty:
         for (study, locus), g in gwas_variants.groupby(["STUDY_ACCESSION", "GWAS2M_LOCUS_ID"], sort=False):
-            gvar_map[(str(study), str(locus))] = set(g["VARIANT_KEY"].dropna().astype(str))
+            key = (str(study), str(locus))
+            gvar_map[key] = set(g["VARIANT_KEY"].dropna().astype(str))
+            gcs_map[key] = set(g.loc[g["GWAS2M_IS_95_CS"].map(boolish), "VARIANT_KEY"].dropna().astype(str))
 
     ovar_map: dict[str, set[str]] = {}
     if not ot_variants.empty:
@@ -1533,7 +1715,18 @@ def candidate_locus_pairs(gwas_loci: pd.DataFrame, ot_loci: pd.DataFrame, gwas_v
             otid = clean_str(o.get("OT_STUDY_LOCUS_ID"))
             ov = ovar_map.get(otid, set())
             shared = gv & ov
-            lead_exact = bool(clean_str(g.get("GWAS2M_LEAD_VARIANT")) and clean_str(g.get("GWAS2M_LEAD_VARIANT")) == clean_str(o.get("OT_LEAD_VARIANT")))
+            gcs = gcs_map.get((study, locus), set())
+            ocs = set(ot_variants.loc[
+                (ot_variants["OT_STUDY_LOCUS_ID"].astype(str) == otid)
+                & ot_variants["OT_IS_95_CS"].map(boolish), "VARIANT_KEY"
+            ].astype(str)) if not ot_variants.empty else set()
+            shared_cs = gcs & ocs
+            original_leads = set_from_semicolon(g.get("GWAS2M_STEP05_LEAD_VARIANTS", ""))
+            exact_step05 = bool(original_leads and clean_str(o.get("OT_LEAD_VARIANT")) in original_leads)
+            exact_top_pip = bool(clean_str(g.get("GWAS2M_LEAD_VARIANT")) and clean_str(g.get("GWAS2M_LEAD_VARIANT")) == clean_str(o.get("OT_LEAD_VARIANT")))
+            lead_exact = exact_step05 or exact_top_pip
+            lead_positions = set_from_semicolon(g.get("GWAS2M_STEP05_LEAD_POSITIONS", ""))
+            exact_step05_position = str(int(float(o.get("OT_LEAD_POSITION")))) in lead_positions if lead_positions and math.isfinite(finite_float(o.get("OT_LEAD_POSITION"))) else False
             ov_bp = interval_overlap(g.get("GWAS2M_START"), g.get("GWAS2M_END"), o.get("OT_START"), o.get("OT_END"))
             ij = interval_jaccard(g.get("GWAS2M_START"), g.get("GWAS2M_END"), o.get("OT_START"), o.get("OT_END"))
             gap = interval_gap(g.get("GWAS2M_START"), g.get("GWAS2M_END"), o.get("OT_START"), o.get("OT_END"))
@@ -1562,8 +1755,14 @@ def candidate_locus_pairs(gwas_loci: pd.DataFrame, ot_loci: pd.DataFrame, gwas_v
             if not eligible:
                 continue
 
-            if lead_exact:
-                basis = "EXACT_LEAD"
+            if exact_step05:
+                basis = "EXACT_STEP05_LEAD"
+            elif exact_top_pip:
+                basis = "EXACT_TOP_PIP_VARIANT"
+            elif exact_step05_position:
+                basis = "EXACT_STEP05_LEAD_POSITION_ONLY"
+            elif shared_cs:
+                basis = "SHARED_GWAS_AND_OT_CS_VARIANT"
             elif shared:
                 basis = "SHARED_VARIANT"
             elif is_pics and lead_inside:
@@ -1583,6 +1782,8 @@ def candidate_locus_pairs(gwas_loci: pd.DataFrame, ot_loci: pd.DataFrame, gwas_v
             # overlap contributes strongly for non-PICS methods but not for PICS.
             score = (
                 (1_000_000 if lead_exact else 0)
+                + (250_000 if exact_step05_position else 0)
+                + len(shared_cs) * 50_000
                 + len(shared) * 10_000
                 + (0 if is_pics else int(ov_bp > 0) * 5_000)
                 + int(lead_inside) * 2_000
@@ -1603,6 +1804,10 @@ def candidate_locus_pairs(gwas_loci: pd.DataFrame, ot_loci: pd.DataFrame, gwas_v
                 "OT_END": o.get("OT_END"),
                 "OT_LEAD_VARIANT": clean_str(o.get("OT_LEAD_VARIANT")),
                 "EXACT_LEAD": lead_exact,
+                "EXACT_STEP05_LEAD": exact_step05,
+                "EXACT_STEP05_LEAD_POSITION_ONLY": exact_step05_position and not exact_step05,
+                "EXACT_TOP_PIP_VARIANT": exact_top_pip,
+                "N_SHARED_GWAS_OT_CS_VARIANTS": len(shared_cs),
                 "N_SHARED_VARIANTS": len(shared),
                 "VARIANT_JACCARD": jaccard(gv, ov),
                 "INTERVAL_OVERLAP_BP": ov_bp,
@@ -1611,6 +1816,13 @@ def candidate_locus_pairs(gwas_loci: pd.DataFrame, ot_loci: pd.DataFrame, gwas_v
                 "LOCUS_GAP_BP": gap,
                 "OT_LEAD_INSIDE_GWAS2M_LOCUS": lead_inside,
                 "MATCH_BASIS": basis,
+                "MATCH_CONFIDENCE": (
+                    "ALLELE_AND_CS_SUPPORTED" if shared_cs or exact_step05
+                    else "ALLELE_SUPPORTED" if lead_exact or shared
+                    else "POSITION_ONLY" if exact_step05_position
+                    else "INTERVAL_ONLY" if ov_bp > 0 or lead_inside
+                    else "PROXIMITY_ONLY"
+                ),
                 "MATCH_SCORE": score,
             })
 
@@ -1971,35 +2183,41 @@ def flatten_l2g(df: pd.DataFrame) -> pd.DataFrame:
 # OPEN TARGETS COLOCALISATION / STUDY METADATA
 # =============================================================================
 
-def flatten_colocalisation(df: pd.DataFrame) -> pd.DataFrame:
+def flatten_colocalisation(df: pd.DataFrame, matched_ids: Iterable[str]) -> pd.DataFrame:
+    """Orient both endpoints so OT_STUDY_LOCUS_ID always denotes matched GWAS CS.
+
+    Preserve coloc-PIP H4 and eCAVIAR CLPP as different statistical measures.
+    """
     if df.empty:
         return pd.DataFrame()
-    cols = df.columns
-    sid = first_existing(cols, ["studyLocusId", "study_locus_id"])
-    other = first_existing(cols, ["otherStudyLocusId", "other_study_locus_id"])
-    nested = first_existing(cols, ["colocalisation", "colocalization", "rows"])
-    rows: list[dict[str, Any]] = []
-
-    def row_from_item(left: str, item: dict) -> dict[str, Any]:
-        return {
-            "OT_STUDY_LOCUS_ID": left,
-            "OTHER_STUDY_LOCUS_ID": clean_str(dictionary_get(item, ["otherStudyLocusId", "other_study_locus_id"])),
-            "OT_COLOC_METHOD": clean_str(dictionary_get(item, ["colocalisationMethod", "colocalizationMethod", "method"])),
-            "OT_H3": finite_float(dictionary_get(item, ["h3", "H3"])),
-            "OT_H4": finite_float(dictionary_get(item, ["h4", "H4"])),
-            "OT_CLPP": finite_float(dictionary_get(item, ["clpp", "CLPP"])),
-        }
-
-    if sid and other:
-        for _, rec in df.iterrows():
-            rows.append(row_from_item(clean_str(rec.get(sid)), rec.to_dict()))
-    elif sid and nested:
-        for _, rec in df.iterrows():
-            left = clean_str(rec.get(sid))
-            for item in as_list(rec.get(nested)):
-                if isinstance(item, dict):
-                    rows.append(row_from_item(left, item))
-    return pd.DataFrame(rows)
+    left = first_existing(df.columns, ["leftStudyLocusId", "left_study_locus_id"])
+    right = first_existing(df.columns, ["rightStudyLocusId", "right_study_locus_id"])
+    if not left or not right:
+        raise RuntimeError("OT 26.09 colocalisation lacks leftStudyLocusId/rightStudyLocusId")
+    matched = set(map(str, matched_ids))
+    out = []
+    for _, r in df.iterrows():
+        a, b = clean_str(r[left]), clean_str(r[right])
+        method = clean_str(r.get("colocalisationMethod", r.get("colocalizationMethod", "")))
+        for gwas_id, other_id, orientation in (
+            [(a, b, "GWAS_LEFT")] if a in matched and b not in matched else
+            [(b, a, "GWAS_RIGHT")] if b in matched and a not in matched else
+            [(a, b, "GWAS_LEFT"), (b, a, "GWAS_RIGHT")] if a in matched and b in matched else []
+        ):
+            if not gwas_id or not other_id or gwas_id == other_id:
+                continue
+            out.append({
+                "OT_STUDY_LOCUS_ID": gwas_id,
+                "OTHER_STUDY_LOCUS_ID": other_id,
+                "OT_COLOC_ORIENTATION": orientation,
+                "OT_COLOC_METHOD": method,
+                "OT_RIGHT_STUDY_TYPE_RAW": clean_str(r.get("rightStudyType", "")),
+                "OT_H3": finite_float(r.get("h3", r.get("H3"))),
+                "OT_H4": finite_float(r.get("h4", r.get("H4"))),
+                "OT_CLPP": finite_float(r.get("clpp", r.get("CLPP"))),
+                "OT_COLOC_N_COMMON": finite_float(r.get("numberColocalisingVariants")),
+            })
+    return pd.DataFrame(out).drop_duplicates()
 
 
 def study_metadata(df: pd.DataFrame) -> pd.DataFrame:
@@ -2025,6 +2243,7 @@ def study_metadata(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def resolve_ot_coloc(coloc: pd.DataFrame, other_credible_meta: pd.DataFrame, study_meta: pd.DataFrame) -> pd.DataFrame:
+    """Attach molQTL gene and study data to the non-GWAS endpoint."""
     if coloc.empty:
         return pd.DataFrame()
     x = coloc.copy()
@@ -2034,18 +2253,27 @@ def resolve_ot_coloc(coloc: pd.DataFrame, other_credible_meta: pd.DataFrame, stu
             "OT_STUDY_ID": "OT_OTHER_STUDY_ID",
             "OT_QTL_GENE_ID": "OT_COLOC_GENE_ID",
             "OT_METHOD": "OT_OTHER_FINEMAPPING_METHOD",
+            "OT_STUDY_TYPE": "OT_OTHER_STUDY_TYPE",
         })
-        keep = [c for c in ["OTHER_STUDY_LOCUS_ID", "OT_OTHER_STUDY_ID", "OT_COLOC_GENE_ID", "OT_OTHER_FINEMAPPING_METHOD"] if c in meta.columns]
-        x = x.merge(meta[keep].drop_duplicates("OTHER_STUDY_LOCUS_ID"), on="OTHER_STUDY_LOCUS_ID", how="left")
+        keep = [c for c in ["OTHER_STUDY_LOCUS_ID", "OT_OTHER_STUDY_ID", "OT_COLOC_GENE_ID", "OT_OTHER_FINEMAPPING_METHOD", "OT_OTHER_STUDY_TYPE"] if c in meta.columns]
+        x = x.merge(meta[keep].drop_duplicates("OTHER_STUDY_LOCUS_ID"), on="OTHER_STUDY_LOCUS_ID", how="left", validate="many_to_one")
     if not study_meta.empty and "OT_OTHER_STUDY_ID" in x.columns:
-        x = x.merge(study_meta, on="OT_OTHER_STUDY_ID", how="left")
-    if "OT_COLOC_GENE_ID" not in x.columns:
+        x = x.merge(study_meta, on="OT_OTHER_STUDY_ID", how="left", validate="many_to_one")
+    if "OT_COLOC_GENE_ID" not in x:
         x["OT_COLOC_GENE_ID"] = ""
-    if "OT_GENE_ID_FROM_STUDY" in x.columns:
-        x["OT_COLOC_GENE_ID"] = [
-            gene_base(a) or gene_base(b)
-            for a, b in zip(x["OT_COLOC_GENE_ID"], x["OT_GENE_ID_FROM_STUDY"])
-        ]
+    if "OT_GENE_ID_FROM_STUDY" in x:
+        x["OT_COLOC_GENE_ID"] = [gene_base(a) or gene_base(b) for a, b in zip(x["OT_COLOC_GENE_ID"], x["OT_GENE_ID_FROM_STUDY"])]
+    # RightStudyType describes right endpoint only. For a GWAS_RIGHT row,
+    # molecular type must come from the left-side credible set/study metadata.
+    x["OT_IS_MOLECULAR_QTL"] = False
+    for i, r in x.iterrows():
+        typ = clean_str(r.get("OT_OTHER_STUDY_TYPE", r.get("OT_STUDY_TYPE"))).lower()
+        if not typ and clean_str(r.get("OT_COLOC_ORIENTATION")) == "GWAS_LEFT":
+            typ = clean_str(r.get("OT_RIGHT_STUDY_TYPE_RAW")).lower()
+        if typ:
+            x.at[i, "OT_IS_MOLECULAR_QTL"] = typ not in {"gwas", "genome_wide_association", "gwas_catalog"}
+        else:
+            x.at[i, "OT_IS_MOLECULAR_QTL"] = bool(gene_base(r.get("OT_COLOC_GENE_ID")))
     return x
 
 
@@ -2067,12 +2295,12 @@ def classify_gene_row(
         return "NO_OT_STUDY_COVERAGE", "COVERAGE_OR_MAPPING_UNRESOLVED"
     if not locus_matched:
         if math.isfinite(best_h4) and best_h4 >= strong_h4:
-            return "GWAS2M_ONLY_LOCUS_IN_OT_COVERED_STUDY", "D_POTENTIAL_NEW_LOCUS_CANDIDATE_REQUIRES_EXTERNAL_VALIDATION"
+            return "GWAS2M_UNMATCHED_OT_COVERED_STUDY_NOT_VALIDATED", "D_POTENTIAL_NEW_LOCUS_CANDIDATE_REQUIRES_EXTERNAL_VALIDATION"
         return "GWAS2M_ONLY_LOCUS_WEAK_OR_UNTESTED", "COVERAGE_OR_MAPPING_UNRESOLVED"
     if not gene_resolved:
         return "OT_LOCUS_MATCH_EFFECTOR_UNRESOLVED", "COVERAGE_OR_MAPPING_UNRESOLVED"
     if in_ot_coloc:
-        return "OT_RECAPITULATED_GENE_AND_MOLQTL", "A_ESTABLISHED_OT_GENE_AND_MOLQTL"
+        return "OT_SAME_GENE_MOLECULAR_QTL_CONCORDANT", "A_ESTABLISHED_OT_GENE_AND_MOLQTL"
     # If any OT colocalisation shard is corrupt/missing, absence of a same-gene
     # colocalisation record is NOT interpretable as biological absence.
     if not ot_coloc_complete:
@@ -2080,8 +2308,8 @@ def classify_gene_row(
             return "OT_L2G_SUPPORTED_MOLQTL_DATA_INCOMPLETE", "COVERAGE_OR_MAPPING_UNRESOLVED"
         return "OT_LOCUS_MATCH_OT_MOLQTL_DATA_INCOMPLETE", "COVERAGE_OR_MAPPING_UNRESOLVED"
     if in_l2g:
-        return "OT_SUPPORTED_GENE_NO_SAME_GENE_MOLQTL", "B_OT_SUPPORTED_GENE_POTENTIAL_NEW_MECHANISM"
-    return "OT_LOCUS_MATCH_GENE_NOT_IN_OT_EVIDENCE", "C_KNOWN_OT_LOCUS_NEW_EFFECTOR_CANDIDATE"
+        return "OT_L2G_GENE_NO_MATCHED_MOLQTL_EVIDENCE", "B_OT_SUPPORTED_GENE_POTENTIAL_NEW_MECHANISM"
+    return "OT_L2G_ABSENT_OR_INELIGIBLE_UNVALIDATED_GENE", "C_KNOWN_OT_LOCUS_NEW_EFFECTOR_CANDIDATE"
 
 
 def compare_genes(
@@ -2096,97 +2324,137 @@ def compare_genes(
     strong_h4: float,
     ot_coloc_complete: bool = True,
 ) -> pd.DataFrame:
-    match_map = {
-        (clean_str(r["STUDY_ID"]), clean_str(r["GWAS2M_LOCUS_ID"])): clean_str(r["OT_STUDY_LOCUS_ID"])
-        for _, r in matches.iterrows()
-    } if not matches.empty else {}
-    match_method = {
-        (clean_str(r["STUDY_ID"]), clean_str(r["GWAS2M_LOCUS_ID"])): clean_str(r.get("OT_METHOD"))
-        for _, r in matches.iterrows()
-    } if not matches.empty else {}
-    match_basis = {
-        (clean_str(r["STUDY_ID"]), clean_str(r["GWAS2M_LOCUS_ID"])): clean_str(r.get("MATCH_BASIS"))
-        for _, r in matches.iterrows()
-    } if not matches.empty else {}
+    """Score each study/locus/gene using *all* matched OT credible sets.
 
+    We preserve the highest-ranked OT credible-set match for display, but never
+    discard the additional OT signals when resolving a gene or molecular QTL.
+    L2G absence is a coverage gap, not a new-gene discovery.
+    """
+    if gene_master.empty:
+        return pd.DataFrame()
+    pair_map: dict[tuple[str, str], pd.DataFrame] = {}
+    if not matches.empty:
+        pair_map = {
+            (str(study), str(locus)): group.sort_values("MATCH_SCORE", ascending=False)
+            for (study, locus), group in matches.groupby(["STUDY_ID", "GWAS2M_LOCUS_ID"])
+        }
     studies_with_ot = set(ot_loci["OT_STUDY_ID"].dropna().astype(str)) if not ot_loci.empty else set()
-    rows: list[dict[str, Any]] = []
+    if not ot_coloc.empty and "OT_IS_MOLECULAR_QTL" in ot_coloc:
+        molecular = ot_coloc.loc[ot_coloc["OT_IS_MOLECULAR_QTL"].map(boolish)].copy()
+    else:
+        molecular = pd.DataFrame()
 
+    rows = []
     for _, r in gene_master.iterrows():
-        study = clean_str(r.get("STUDY_ACCESSION")); locus = clean_str(r.get("LOCUS_ID"))
+        study = clean_str(r.get("STUDY_ACCESSION"))
+        locus = clean_str(r.get("LOCUS_ID"))
         gene = gene_base(r.get("EFFECTOR_GENE_ID"))
-        otid = match_map.get((study, locus), "")
-        locus_matched = bool(otid)
+        pair = pair_map.get((study, locus), pd.DataFrame())
+        ids = list(dict.fromkeys(pair["OT_STUDY_LOCUS_ID"].astype(str))) if not pair.empty else []
+        primary_id = ids[0] if ids else ""
+        locus_matched = bool(ids)
         study_has_ot = study in studies_with_ot
+        lg = l2g[l2g["OT_STUDY_LOCUS_ID"].astype(str).isin(ids)].copy() if ids and not l2g.empty else pd.DataFrame()
+        cg = molecular[molecular["OT_STUDY_LOCUS_ID"].astype(str).isin(ids)].copy() if ids and not molecular.empty else pd.DataFrame()
 
-        lg = l2g[l2g["OT_STUDY_LOCUS_ID"].astype(str).eq(otid)].copy() if otid and not l2g.empty else pd.DataFrame()
-        cg = ot_coloc[ot_coloc["OT_STUDY_LOCUS_ID"].astype(str).eq(otid)].copy() if otid and not ot_coloc.empty else pd.DataFrame()
-
-        in_l2g = False; l2g_rank = np.nan; l2g_score = np.nan
-        top1 = ""; top5 = ""
+        in_l2g = False
+        l2g_rank, l2g_score = np.nan, np.nan
+        top1, top5, best_l2g_id = "", "", ""
         if not lg.empty:
-            lg = lg.sort_values("OT_L2G_RANK")
+            lg = lg.sort_values("OT_L2G_SCORE", ascending=False)
             top1 = clean_str(lg.iloc[0].get("OT_GENE_ID"))
-            top5 = semicolon_unique(lg.head(l2g_top_k)["OT_GENE_ID"])
+            top5 = semicolon_unique(lg.head(max(5, l2g_top_k))["OT_GENE_ID"], limit=l2g_top_k)
             same = lg[lg["OT_GENE_ID"].astype(str).eq(gene)] if gene else pd.DataFrame()
             if not same.empty:
                 in_l2g = True
+                same = same.sort_values("OT_L2G_SCORE", ascending=False)
+                best_l2g_id = clean_str(same.iloc[0].get("OT_STUDY_LOCUS_ID"))
                 l2g_rank = finite_float(same.iloc[0].get("OT_L2G_RANK"))
                 l2g_score = finite_float(same.iloc[0].get("OT_L2G_SCORE"))
 
-        in_coloc = False; coloc_max_h4 = np.nan; coloc_types = ""; coloc_biosamples = ""; coloc_traits = ""
+        in_coloc = False
+        coloc_max_h4, coloc_max_clpp = np.nan, np.nan
+        coloc_types, coloc_biosamples, coloc_traits, coloc_methods = "", "", "", ""
+        coloc_otids = ""
         if not cg.empty and gene:
             same = cg[cg["OT_COLOC_GENE_ID"].astype(str).eq(gene)].copy()
             if not same.empty:
                 h = safe_numeric(same["OT_H4"])
+                clpp = safe_numeric(same["OT_CLPP"])
                 coloc_max_h4 = float(h.max()) if h.notna().any() else np.nan
+                coloc_max_clpp = float(clpp.max()) if clpp.notna().any() else np.nan
                 in_coloc = math.isfinite(coloc_max_h4) and coloc_max_h4 >= ot_coloc_h4
-                coloc_types = semicolon_unique(same.get("OT_STUDY_TYPE", pd.Series(dtype=str)), limit=50)
-                coloc_biosamples = semicolon_unique(same.get("OT_BIOSAMPLE_ID", pd.Series(dtype=str)), limit=50)
-                coloc_traits = semicolon_unique(same.get("OT_TRAIT", pd.Series(dtype=str)), limit=50)
+                coloc_methods = semicolon_unique(same["OT_COLOC_METHOD"], limit=30)
+                coloc_types = semicolon_unique(same.get("OT_STUDY_TYPE", same.get("OT_OTHER_STUDY_TYPE", pd.Series(dtype=str))), limit=30)
+                coloc_biosamples = semicolon_unique(same.get("OT_BIOSAMPLE_ID", pd.Series(dtype=str)), limit=30)
+                coloc_traits = semicolon_unique(same.get("OT_TRAIT", pd.Series(dtype=str)), limit=30)
+                coloc_otids = semicolon_unique(same["OT_STUDY_LOCUS_ID"], limit=30)
 
         best_h4 = finite_float(r.get("BEST_H4"))
         evidence_class, novelty = classify_gene_row(
             locus_matched, study_has_ot, bool(gene), in_l2g, in_coloc,
-            best_h4, strong_h4, ot_coloc_complete=ot_coloc_complete
+            best_h4, strong_h4, ot_coloc_complete=ot_coloc_complete,
         )
+        # Absence cannot be called mechanistic novelty when no matched OT
+        # molecular QTL pairs/genes are available for that particular locus.
+        # An OT dataset being syntactically readable is not enough.
+        if locus_matched and not in_coloc and (cg.empty or not cg.get("OT_COLOC_GENE_ID", pd.Series(dtype=str)).map(gene_base).str.startswith("ENSG").any()):
+            if in_l2g:
+                evidence_class = "OT_L2G_GENE_MOLQTL_COVERAGE_UNRESOLVED"
+            else:
+                evidence_class = "OT_L2G_NOT_PRIORITISED_MOLQTL_COVERAGE_UNRESOLVED"
+            novelty = "COVERAGE_OR_MAPPING_UNRESOLVED"
+        if not gene or not gene.startswith("ENSG"):
+            evidence_class = "EFFECTOR_GENE_IDENTIFIER_NOT_RESOLVED_TO_ENSEMBL"
+            novelty = "COVERAGE_OR_MAPPING_UNRESOLVED"
+        if locus_matched and not pair.empty and clean_str(pair.iloc[0].get("MATCH_CONFIDENCE")) in {"INTERVAL_ONLY", "POSITION_ONLY", "PROXIMITY_ONLY"}:
+            evidence_class = "ONLY_POSITION_OR_INTERVAL_MATCH_UNVALIDATED"
+            novelty = "COVERAGE_OR_MAPPING_UNRESOLVED"
 
-        out = r.to_dict()
-        out.update({
+        output = r.to_dict()
+        output.update({
             "OT_STUDY_COVERAGE": "YES" if study_has_ot else "NO",
             "OT_LOCUS_MATCH": "YES" if locus_matched else "NO",
-            "OT_STUDY_LOCUS_ID": otid,
-            "OT_METHOD": match_method.get((study, locus), ""),
-            "OT_MATCH_BASIS": match_basis.get((study, locus), ""),
+            "OT_STUDY_LOCUS_ID": primary_id,
+            "OT_ALL_MATCHED_STUDY_LOCUS_IDS": ";".join(ids),
+            "OT_N_MATCHED_CREDIBLE_SETS": len(ids),
+            "OT_MATCH_CONFIDENCE": clean_str(pair.iloc[0]["MATCH_CONFIDENCE"]) if not pair.empty else "UNMATCHED",
+            "OT_METHOD": clean_str(pair.iloc[0]["OT_METHOD"]) if not pair.empty else "",
+            "OT_MATCH_BASIS": clean_str(pair.iloc[0]["MATCH_BASIS"]) if not pair.empty else "",
             "OT_L2G_GENE_PRESENT": "YES" if in_l2g else "NO",
             "OT_L2G_RANK": l2g_rank,
             "OT_L2G_SCORE": l2g_score,
+            "OT_L2G_BEST_CREDIBLE_SET_ID": best_l2g_id,
             "OT_L2G_TOP1_GENE": top1,
             f"OT_L2G_TOP{l2g_top_k}_GENES": top5,
             "OT_COLOC_DATASET_COMPLETE": "YES" if ot_coloc_complete else "NO",
-            "OT_COLOC_GENE_PRESENT_H4_THRESHOLD": (
-                "YES" if in_coloc else ("NO" if ot_coloc_complete else "UNKNOWN_INCOMPLETE_OT_DATA")
-            ),
+            "OT_N_MOLECULAR_COLOC_PAIRS_AT_LOCUS": len(cg),
+            "OT_COLOC_GENE_PRESENT_H4_THRESHOLD": "YES" if in_coloc else (
+                "UNKNOWN_NO_MOLQTL_COVERAGE" if cg.empty else
+                "NO_OBSERVED_H4_SUPPORT" if ot_coloc_complete else "UNKNOWN_INCOMPLETE_OT_DATA"),
             "OT_COLOC_MAX_H4_SAME_GENE": coloc_max_h4,
+            "OT_COLOC_MAX_CLPP_SAME_GENE": coloc_max_clpp,
+            "OT_COLOC_METHODS_SAME_GENE": coloc_methods,
+            "OT_COLOC_MATCHED_STUDY_LOCUS_IDS": coloc_otids,
             "OT_COLOC_STUDY_TYPES": coloc_types,
             "OT_COLOC_BIOSAMPLES": coloc_biosamples,
             "OT_COLOC_TRAITS": coloc_traits,
             "OPEN_TARGETS_EVIDENCE_CLASS": evidence_class,
             "NOVELTY_TIER_STEP13": novelty,
+            "NOVELTY_NOT_ESTABLISHED": "YES",
         })
-        rows.append(out)
+        rows.append(output)
 
     out = pd.DataFrame(rows)
-    if not out.empty:
-        tier_order = {
-            "C_KNOWN_OT_LOCUS_NEW_EFFECTOR_CANDIDATE": 0,
-            "D_POTENTIAL_NEW_LOCUS_CANDIDATE_REQUIRES_EXTERNAL_VALIDATION": 1,
-            "B_OT_SUPPORTED_GENE_POTENTIAL_NEW_MECHANISM": 2,
-            "A_ESTABLISHED_OT_GENE_AND_MOLQTL": 3,
-            "COVERAGE_OR_MAPPING_UNRESOLVED": 4,
-        }
-        out["_TIER_ORDER"] = out["NOVELTY_TIER_STEP13"].map(tier_order).fillna(9)
-        out = out.sort_values(["_TIER_ORDER", "BEST_H4", "N_SHARED_QTL_TYPES"], ascending=[True, False, False], na_position="last").drop(columns="_TIER_ORDER")
+    tiers = {
+        "A_ESTABLISHED_OT_GENE_AND_MOLQTL": 0,
+        "B_OT_SUPPORTED_GENE_POTENTIAL_NEW_MECHANISM": 1,
+        "C_KNOWN_OT_LOCUS_NEW_EFFECTOR_CANDIDATE": 2,
+        "D_POTENTIAL_NEW_LOCUS_CANDIDATE_REQUIRES_EXTERNAL_VALIDATION": 3,
+        "COVERAGE_OR_MAPPING_UNRESOLVED": 4,
+    }
+    out["_TIER"] = out["NOVELTY_TIER_STEP13"].map(tiers).fillna(9)
+    out = out.sort_values(["_TIER", "BEST_H4"], ascending=[True, False], na_position="last").drop(columns="_TIER")
     return out.reset_index(drop=True)
 
 
@@ -2468,6 +2736,58 @@ def build_signal_external_comparison(
 
 
 
+def attach_step11_credible_set_qc(
+    gene_cmp: pd.DataFrame, root: Path, phenotype: str, ancestry_label: str,
+    strong_h4: float,
+) -> pd.DataFrame:
+    """Read Step11 raw evidence, not stale Step12 top-H4, for QC context."""
+    d = root / "11_custom_qtl_coloc" / slugify(phenotype) / panel_slug(slugify(ancestry_label))
+    path = d / "coloc_all_candidates.tsv"
+    x = gene_cmp.copy()
+    for c, value in {
+        "GWAS2M_STEP11_N_STRONG_GENE_PAIRS": 0,
+        "GWAS2M_STEP11_N_CS_SUPPORTED_STRONG": 0,
+        "GWAS2M_STEP11_MAX_H4_MASS_IN_GWAS_CS": np.nan,
+        "GWAS2M_STEP11_ANY_ABF_ASSUMPTION_WARNING": "NOT_ASSESSED",
+        "GWAS2M_STEP11_AUDIT_STATE": "NOT_AVAILABLE",
+    }.items():
+        x[c] = value
+    if not path.is_file():
+        print("[WARN] Step11 coloc_all_candidates.tsv missing; CS concordance audit unavailable")
+        return x
+    try:
+        q = pd.read_csv(path, sep="\t", low_memory=False)
+        q["_GENE"] = q.get("GENE_ID", pd.Series("", index=q.index)).astype(str).map(gene_base)
+        if "MOLECULAR_TRAIT_ID" in q:
+            alt = q["MOLECULAR_TRAIT_ID"].astype(str).str.extract(r"(ENSG\d+)", expand=False).fillna("")
+            q.loc[~q["_GENE"].str.startswith("ENSG"), "_GENE"] = alt[~q["_GENE"].str.startswith("ENSG")]
+        q["_H4"] = safe_numeric(q.get("PP_H4", pd.Series(np.nan, index=q.index)))
+        q["_MASS"] = safe_numeric(q.get("CS_H4_POSTERIOR_MASS", pd.Series(np.nan, index=q.index)))
+        q["_STRONG"] = q["_H4"].ge(strong_h4) & q.get("COLOC_TESTED", pd.Series("YES", index=q.index)).map(boolish)
+        q["_CS_SUPPORTED"] = q.get("CS_SUPPORTED_STRONG", pd.Series("NO", index=q.index)).map(boolish)
+        warning = q.get("ABF_ASSUMPTION_WARNING", pd.Series("", index=q.index)).fillna("").astype(str)
+        q["_WARN"] = warning.str.strip().ne("") & ~warning.str.lower().isin(["no", "false", "none", "nan"])
+        grouped = {}
+        for k, group in q[q["_STRONG"] & q["_GENE"].str.startswith("ENSG")].groupby(["STUDY_ACCESSION", "LOCUS_ID", "_GENE"]):
+            grouped[tuple(map(str,k))] = group
+        for i,r in x.iterrows():
+            k=(clean_str(r.get("STUDY_ACCESSION")),clean_str(r.get("LOCUS_ID")),gene_base(r.get("EFFECTOR_GENE_ID")))
+            group=grouped.get(k)
+            x.at[i,"GWAS2M_STEP11_AUDIT_STATE"] = "AVAILABLE"
+            if group is None:
+                continue
+            x.at[i,"GWAS2M_STEP11_N_STRONG_GENE_PAIRS"] = len(group)
+            x.at[i,"GWAS2M_STEP11_N_CS_SUPPORTED_STRONG"] = int(group["_CS_SUPPORTED"].sum())
+            x.at[i,"GWAS2M_STEP11_MAX_H4_MASS_IN_GWAS_CS"] = float(group["_MASS"].max()) if group["_MASS"].notna().any() else np.nan
+            x.at[i,"GWAS2M_STEP11_ANY_ABF_ASSUMPTION_WARNING"] = "YES" if group["_WARN"].any() else "NO"
+        print("Step11 credible-set QC merged into gene benchmark:",
+              int(x["GWAS2M_STEP11_N_CS_SUPPORTED_STRONG"].gt(0).sum()),"gene rows with >=1 supported external sQTL/other pair")
+    except Exception as exc:
+        print(f"[WARN] Step11 raw CS-QC audit failed: {type(exc).__name__}: {exc}")
+        x["GWAS2M_STEP11_AUDIT_STATE"] = "ERROR"
+    return x
+
+
 # =============================================================================
 # SUMMARY
 # =============================================================================
@@ -2505,14 +2825,15 @@ def summary_table(gene_cmp: pd.DataFrame) -> pd.DataFrame:
     return (
         gene_cmp.groupby("NOVELTY_TIER_STEP13", dropna=False)
         .agg(
-            N_GENES=("EFFECTOR_KEY", "size"),
+            N_GENE_ROWS=("EFFECTOR_KEY", "size"),
+            N_DISTINCT_GENES=("EFFECTOR_GENE_ID", "nunique"),
             N_LOCI=("LOCUS_ID", "nunique"),
             N_STUDIES=("STUDY_ACCESSION", "nunique"),
             MAX_H4=("BEST_H4", "max"),
             MEDIAN_H4=("BEST_H4", "median"),
         )
         .reset_index()
-        .sort_values("N_GENES", ascending=False)
+        .sort_values("N_GENE_ROWS", ascending=False)
     )
 
 
@@ -2522,11 +2843,10 @@ def locus_benchmark_summary(
     matches: pd.DataFrame,
     variant_cmp: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Human-readable locus benchmark counts.
+    """Human-readable locus benchmark counts: primary pairs are convenience only.
 
-    IMPORTANT: GWAS2m loci and OT credible sets are distinct objects, so the
-    unmatched totals are reported separately rather than forced into a single
-    denominator. Primary matching is one-to-one within each study.
+    Use unique locus and credible-set denominators; a broad GWAS2Mech locus
+    may overlap multiple independent OT credible sets.
     """
     def nstatus(df: pd.DataFrame, value: str) -> int:
         if df.empty or "COMPARISON_STATUS" not in df.columns:
@@ -2642,7 +2962,9 @@ def main() -> None:
     ) = load_step12(paths, args.study)
     studies = sorted(set(genes["STUDY_ACCESSION"].dropna().astype(str)))
     gwas_variants = load_gwas_variants(paths, step12_variants, studies)
-    gwas_loci = build_gwas_loci(locus_master, gwas_variants)
+    gwas_loci = attach_step05_original_leads(
+        build_gwas_loci(locus_master, gwas_variants), root, phenotype, ancestry_label
+    )
 
     # Resolve OT local datasets; download missing release datasets when enabled.
     resolved = ensure_ot_datasets(
@@ -2719,7 +3041,8 @@ def main() -> None:
     print("\nOpen Targets Parquet health:")
     for k in sorted(dataset_complete):
         if resolved.get(k) is not None:
-            print(f"  {k:18s}: {'COMPLETE' if dataset_complete[k] else 'INCOMPLETE - see QC audit'}")
+            print(f"  {k:18s}: {'ALL_LOCAL_FILES_READABLE' if dataset_complete[k] else 'INCOMPLETE - see QC audit'}")
+    print("[NOTE] Local Parquet readability does not verify the full release shard manifest.")
 
     # Credible sets for exactly the GWAS studies represented by Step12.
     credible_subset, study_col = subset_parquet(
@@ -2739,23 +3062,40 @@ def main() -> None:
 
     banner("LOCUS MATCHING")
     pairs_all = candidate_locus_pairs(gwas_loci, ot_loci, gwas_variants, ot_variants, args.locus_padding)
-    matches = select_primary_matches(pairs_all)
+    # Many OT credible sets may be within one larger GWAS2Mech region.
+    # Do not allow a +/-padding-only match to establish locus equivalence.
+    pairs_supported = pairs_all[
+        ~pairs_all["MATCH_CONFIDENCE"].eq("PROXIMITY_ONLY")
+    ].copy() if not pairs_all.empty else pairs_all.copy()
+    matches = select_primary_matches(pairs_supported)
     print(f"GWAS2m loci          : {len(gwas_loci):,}")
     print(f"OT credible sets     : {len(ot_loci):,}")
     print(f"Candidate pairs      : {len(pairs_all):,}")
     print(f"Primary matched pairs: {len(matches):,}")
+    print(f"All supported GWAS2Mech-region x OT-CS pairs: {len(pairs_supported):,}")
+    print(f"GWAS2Mech loci with >=1 OT CS: "
+          f"{pairs_supported[['STUDY_ID','GWAS2M_LOCUS_ID']].drop_duplicates().shape[0] if not pairs_supported.empty else 0:,}")
 
-    g_locus_cmp, ot_locus_cmp, _ = build_locus_comparison(gwas_loci, ot_loci, matches)
+    g_locus_cmp, ot_locus_cmp, _ = build_locus_comparison(gwas_loci, ot_loci, pairs_supported)
     study_comparability = build_study_comparability(gwas_loci, ot_loci, matches)
     complete_inventory = build_complete_locus_inventory(g_locus_cmp, ot_locus_cmp, matches)
-    variant_cmp = compare_variants(matches, gwas_variants, ot_variants)
-    variant_detail = build_variant_level_detail(matches, gwas_variants, ot_variants)
+    variant_cmp = compare_variants(pairs_supported, gwas_variants, ot_variants)
+    variant_detail = build_variant_level_detail(pairs_supported, gwas_variants, ot_variants)
+    gwas_component_memberships = load_gwas_susie_credible_set_memberships(
+        root, phenotype, ancestry_label, studies
+    )
+    component_cmp = compare_individual_credible_sets(
+        pairs_supported, gwas_component_memberships, ot_variants
+    )
+    print(f"SuSiE GWAS credible set components: "
+          f"{gwas_component_memberships[['STUDY_ID','GWAS2M_LOCUS_ID','GWAS2M_CS_ID']].drop_duplicates().shape[0] if not gwas_component_memberships.empty else 0:,}")
+    print(f"GWAS CS x OT CS comparisons: {len(component_cmp):,}")
     missed_loci = build_missed_loci_diagnostic(
         g_locus_cmp, ot_locus_cmp, pairs_all, gwas_loci, ot_loci, args.locus_padding
     )
 
     # L2G only needs matched OT locus IDs.
-    matched_otids = set(matches.get("OT_STUDY_LOCUS_ID", pd.Series(dtype=str)).dropna().astype(str))
+    matched_otids = set(pairs_supported.get("OT_STUDY_LOCUS_ID", pd.Series(dtype=str)).dropna().astype(str))
     l2g_subset, _ = subset_parquet(
         resolved["l2g_prediction"], ["studyLocusId", "study_locus_id"], matched_otids
     )
@@ -2767,10 +3107,11 @@ def main() -> None:
     other_cred_subset = pd.DataFrame()
     study_subset = pd.DataFrame()
     if resolved["colocalisation"] is not None and matched_otids:
-        coloc_subset, _ = subset_parquet(
-            resolved["colocalisation"], ["studyLocusId", "study_locus_id"], matched_otids
+        coloc_subset = subset_colocalisation_both_sides(
+            resolved["colocalisation"], matched_otids
         )
-        coloc = flatten_colocalisation(coloc_subset)
+        coloc = flatten_colocalisation(coloc_subset, matched_otids)
+        print(f"Open Targets colocalisation raw rows (both orientations): {len(coloc_subset):,}", flush=True)
         if not coloc.empty:
             other_ids = set(coloc["OTHER_STUDY_LOCUS_ID"].dropna().astype(str))
             if other_ids:
@@ -2795,14 +3136,19 @@ def main() -> None:
                         "continuing with qtlGeneId from credible_set where available."
                     )
                 coloc_resolved = resolve_ot_coloc(coloc, other_meta, smeta)
+                print("Open Targets resolved molecular-QTL pairs:",
+                      int(coloc_resolved["OT_IS_MOLECULAR_QTL"].sum()), flush=True)
 
     gene_cmp = compare_genes(
-        genes, gwas_loci, matches, ot_loci, l2g, coloc_resolved,
+        genes, gwas_loci, pairs_supported, ot_loci, l2g, coloc_resolved,
         args.l2g_top_k, args.ot_coloc_h4, args.strong_h4,
         ot_coloc_complete=(
             dataset_complete.get("colocalisation", False)
             and dataset_has_healthy.get("study", False)
         ),
+    )
+    gene_cmp = attach_step11_credible_set_qc(
+        gene_cmp, root, phenotype, ancestry_label, args.strong_h4
     )
     mechanism_cmp = build_mechanism_comparison(gene_cmp, args.strong_h4, args.suggestive_h4)
     # Use the richer mechanism table as the canonical gene comparison from here onward.
@@ -2832,11 +3178,14 @@ def main() -> None:
         "Step13_Study_Comparability.tsv": study_comparability,
         "Step13_Complete_Locus_Inventory.tsv": complete_inventory,
         "Step13_Locus_Pair_Candidates.tsv": pairs_all,
+        "Step13_All_Supported_Locus_Credible_Set_Matches.tsv": pairs_supported,
         "Step13_Locus_Matches.tsv": matches,
         "Step13_GWAS2m_Locus_Comparison.tsv": g_locus_cmp,
         "Step13_OpenTargets_Locus_Comparison.tsv": ot_locus_cmp,
         "Step13_Variant_Comparison.tsv": variant_cmp,
         "Step13_Variant_Level_Detail.tsv": variant_detail,
+        "Step13_GWAS_SuSiE_CS_Memberships.tsv": gwas_component_memberships,
+        "Step13_Individual_Credible_Set_Comparison.tsv": component_cmp,
         "Step13_Missed_Loci_Why.tsv": missed_loci,
         "Step13_Performance_Metrics.tsv": performance,
         "Step13_Strong_Gene_Benchmark.tsv": strong_gene_benchmark,
@@ -2853,6 +3202,7 @@ def main() -> None:
         "OpenTargets_l2g_subset.tsv": l2g,
         "OpenTargets_colocalisation_subset.tsv": coloc_subset,
         "OpenTargets_colocalisation_resolved.tsv": coloc_resolved,
+        "OpenTargets_Molecular_QTL_Colocalisation_Only.tsv": coloc_resolved.loc[coloc_resolved["OT_IS_MOLECULAR_QTL"].map(boolish)] if not coloc_resolved.empty else pd.DataFrame(),
         "Step13_OpenTargets_Parquet_Health.tsv": pd.DataFrame(_PARQUET_HEALTH_ROWS),
         "Step13_OpenTargets_Repair_Audit.tsv": pd.DataFrame(_OT_REPAIR_ROWS),
     }
@@ -2914,14 +3264,24 @@ def main() -> None:
         "n_step12_pathway_genes": len(step12_pathway),
         "n_gwas2m_loci": len(gwas_loci),
         "n_ot_credible_sets": len(ot_loci),
-        "n_matched_loci": len(matches),
-        "n_gwas2m_only_loci": max(0, len(gwas_loci) - len(matches)),
-        "n_opentargets_only_credible_sets": max(0, len(ot_loci) - len(matches)),
+        "n_gwas_susie_credible_sets_available": gwas_component_memberships[["STUDY_ID","GWAS2M_LOCUS_ID","GWAS2M_CS_ID"]].drop_duplicates().shape[0] if not gwas_component_memberships.empty else 0,
+        "n_component_pair_comparisons": len(component_cmp),
+        "n_component_pair_overlaps": int(component_cmp["N_SHARED_CS_VARIANTS"].gt(0).sum()) if not component_cmp.empty else 0,
+        "n_matched_loci": int(g_locus_cmp["COMPARISON_STATUS"].eq("MATCHED").sum()),
+        "n_primary_one_to_one_pairs": len(matches),
+        "n_all_supported_locus_credible_set_pairs": len(pairs_supported),
+        "n_distinct_ot_cs_matched": int(ot_locus_cmp["COMPARISON_STATUS"].eq("MATCHED").sum()),
+        "n_gwas2m_only_loci": int(g_locus_cmp["COMPARISON_STATUS"].ne("MATCHED").sum()),
+        "n_opentargets_only_credible_sets": int(ot_locus_cmp["COMPARISON_STATUS"].ne("MATCHED").sum()),
         "gwas2m_locus_status_counts": g_locus_cmp["COMPARISON_STATUS"].value_counts(dropna=False).to_dict() if not g_locus_cmp.empty else {},
         "opentargets_locus_status_counts": ot_locus_cmp["COMPARISON_STATUS"].value_counts(dropna=False).to_dict() if not ot_locus_cmp.empty else {},
         "match_basis_counts": matches["MATCH_BASIS"].value_counts(dropna=False).to_dict() if not matches.empty and "MATCH_BASIS" in matches.columns else {},
         "n_l2g_rows": len(l2g),
         "n_ot_coloc_rows": len(coloc_resolved),
+        "n_ot_coloc_raw_rows": len(coloc_subset),
+        "n_ot_molecular_qtl_coloc_rows": int(coloc_resolved["OT_IS_MOLECULAR_QTL"].sum()) if not coloc_resolved.empty else 0,
+        "ot_coloc_schema": "leftStudyLocusId/rightStudyLocusId; bidirectional lookup",
+        "parquet_release_completeness": "UNVERIFIED_AGAINST_REMOTE_RELEASE_MANIFEST",
         "novelty_tier_counts": gene_cmp["NOVELTY_TIER_STEP13"].value_counts(dropna=False).to_dict() if not gene_cmp.empty else {},
         "mechanism_class_counts": gene_cmp["EXTERNAL_MECHANISM_CLASS"].value_counts(dropna=False).to_dict() if not gene_cmp.empty and "EXTERNAL_MECHANISM_CLASS" in gene_cmp.columns else {},
         "cell_context_screen_counts": cell_context_cmp["CELL_CONTEXT_SCREEN"].value_counts(dropna=False).to_dict() if not cell_context_cmp.empty and "CELL_CONTEXT_SCREEN" in cell_context_cmp.columns else {},
@@ -2935,13 +3295,29 @@ def main() -> None:
     (paths["OUT"] / "Step13_summary.json").write_text(
         json.dumps(metadata, indent=2, default=json_safe) + "\n", encoding="utf-8"
     )
+    (paths["OUT"] / "Step13_Benchmark_Methodology_Notes.txt").write_text(
+        "OPEN TARGETS 26.09 BENCHMARK - INTERPRETATION NOTES\n"
+        "=================================================\n"
+        "1. Exact GCST comparisons assess computational agreement, not independent replication.\n"
+        "2. A GWAS2Mech region can match multiple Open Targets study-locus credible sets.\n"
+        "3. Component-level overlap is in Step13_Individual_Credible_Set_Comparison.tsv.\n"
+        "4. GWAS2Mech original Step05 lead and Step06 top-PIP SNP are distinct.\n"
+        "5. Open Targets COLOC-PIP H4 and eCAVIAR CLPP have different definitions.\n"
+        "6. Missing OT gene L2G evidence is not novelty, especially for noncoding genes.\n"
+        "7. Local Parquet readability does not guarantee all official shards downloaded.\n"
+        "8. Step11 ABF credible-set posterior mass and assumption warnings are QC, not proof of a causal SNP.\n"
+        "9. Any comparison without matched allele/credible-set support is exploratory.\n"
+        "10. OT evidence can reuse underlying GWAS and molecular QTL datasets.\n",
+        encoding="utf-8",
+    )
 
     banner("STEP13 COMPLETE - LOCUS BENCHMARK")
-    n_g_only = max(0, len(gwas_loci) - len(matches))
-    n_o_only = max(0, len(ot_loci) - len(matches))
+    n_g_only = int((~g_locus_cmp["COMPARISON_STATUS"].eq("MATCHED")).sum())
+    n_o_only = int((~ot_locus_cmp["COMPARISON_STATUS"].eq("MATCHED")).sum())
     print(f"GWAS2m total loci                    : {len(gwas_loci):,}")
     print(f"Open Targets total credible sets     : {len(ot_loci):,}")
-    print(f"COMMON / primary matched loci        : {len(matches):,}")
+    print(f"COMMON / primary one-to-one pairs    : {len(matches):,}")
+    print(f"COMMON / all supported locus-CS pairs: {len(pairs_supported):,}")
     print(f"GWAS2m ONLY / no primary OT match    : {n_g_only:,}")
     print(f"Open Targets ONLY / missed by GWAS2m : {n_o_only:,}")
     print()
