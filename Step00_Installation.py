@@ -25,6 +25,7 @@ GWAS
  -> pathways / intervals  (gseapy, pyranges)
  -> liftover              (pyliftover, CrossMap)
  -> Open Targets / FUMA   (duckdb, pyarrow, polars, rsync)
+ -> benchmarking          (Gentropy 3.4.0; echolocatoR 3.0.0)
  -> resource downloads    (aria2c, curl, wget, pigz, samtools, tabix)
 
 Everything is created beneath the CURRENT WORKING DIRECTORY:
@@ -34,6 +35,8 @@ Everything is created beneath the CURRENT WORKING DIRECTORY:
     envs/pangolin        Pangolin (incompatible with main env)
     envs/ldsc            LDSC 1.0.1 (Python 2.7; incompatible with main env)
     envs/pops            PoPS (pins numpy 1.19 / scikit-learn 0.24)
+    envs/gentropy        Open Targets Gentropy (Python 3.11, PySpark 3.5, Java 11)
+    envs/echolocatoR     echolocatoR and echoverse R packages
     external_tools/Pangolin
     external_tools/pops  PoPS source (pinned commit)
     external_tools/magma/v1.10/   MAGMA binary (official CTG build, SHA-256 checked)
@@ -56,6 +59,7 @@ Usage (from the project directory):
     python Step00_Installation.py --only pipeline       # one environment
     python Step00_Installation.py --only spliceai pangolin
     python Step00_Installation.py --only ldsc pops magma
+    python Step00_Installation.py --only gentropy echolocatoR
     python Step00_Installation.py --verify-only         # read-only check
     python Step00_Installation.py --dry-run             # print commands only
     python Step00_Installation.py --force-recreate --only spliceai
@@ -102,6 +106,8 @@ LOGS = ROOT / "logs" / "installation"
 CORE_ENV = ENVS / "pipeline"
 SPLICEAI_ENV = ENVS / "spliceai"
 PANGOLIN_ENV = ENVS / "pangolin"
+GENTROPY_ENV = ENVS / "gentropy"
+ECHOLOCATOR_ENV = ENVS / "echolocatoR"
 
 PANGOLIN_URL = "https://github.com/tkzeng/Pangolin.git"
 PANGOLIN_REPO = EXTERNAL / "Pangolin"
@@ -188,6 +194,34 @@ POPS_COMMIT = "76eb86cba10254490003c8f4dc7ff5ce492d3667"
 POPS_REPO = EXTERNAL / "pops"
 POPS_CONDA = ["python=3.8", "pip"]
 
+# --- independent benchmark frameworks (kept out of the pipeline environment) ---
+# Gentropy's official metadata requires Python >=3.11,<3.14 and PySpark >=3.5,<3.6.
+GENTROPY_VERSION = "3.4.0"
+GENTROPY_SPEC = f"gentropy=={GENTROPY_VERSION}"
+GENTROPY_CONDA = ["python=3.11", "openjdk=11", "pip"]
+
+# echolocatoR is installed by its documented BiocManager GitHub route. Pinning the
+# release tag makes a benchmark environment reproducible across reruns.
+ECHOLOCATOR_VERSION = "3.0.0"
+ECHOLOCATOR_REF = "v3.0.0"
+ECHOLOCATOR_COMMIT = "96c9030835d37358e8a5cfae08c1a8b32afb6e21"
+ECHOLOCATOR_CONDA = [
+    "python=3.11",  # common verifier/manifests expect a Python executable
+    "r-base=4.4",
+    "r-biocmanager",
+    "r-remotes",
+    "r-devtools",
+    "r-susier",
+    "libcurl",
+    "libxml2",
+    "openssl",
+    "zlib",
+    "pkg-config",
+    "make",
+    "compilers",
+    "git",
+]
+
 # --- MAGMA v1.10 (CTG lab; official binaries, SHA-256 verified) ---
 #     NOTE: the conda package called "magma" is an unrelated GPU linear-algebra
 #     library, so MAGMA is always taken from the official CTG download.
@@ -205,7 +239,7 @@ MAGMA_DOWNLOADS = {
 }
 
 # Rough on-disk size of all environments + package cache.
-EXPECTED_DISK_GB = 30
+EXPECTED_DISK_GB = 50
 
 
 # =============================================================================
@@ -339,6 +373,10 @@ TOOLS = [
     ("git", "pipeline", ["--version"], True, None, "Pangolin checkout (setup)", "git"),
     ("spliceai", "spliceai", None, True, 9, "SpliceAI executable", "spliceai==1.3.1"),
     ("pangolin", "pangolin", None, True, 10, "Pangolin executable", "git+tkzeng/Pangolin"),
+    ("python", "gentropy", ["--version"], True, None, "Gentropy interpreter", "python=3.11"),
+    ("java", "gentropy", ["-version"], True, None, "PySpark runtime", "openjdk=11"),
+    ("gentropy", "gentropy", ["--help"], True, None, "Open Targets benchmark CLI", GENTROPY_SPEC),
+    ("Rscript", "echolocatoR", ["--version"], True, None, "echolocatoR runtime", "r-base=4.4"),
 ]
 
 # import name, distribution name, env, required, step, install method, spec, used by
@@ -372,6 +410,8 @@ PYTHON_PACKAGES = [
     ("gffutils", "gffutils", "pangolin", True, 10, "conda", "gffutils", "Step10 / Pangolin DB"),
     ("pyfastx", "pyfastx", "pangolin", True, 10, "conda", "pyfastx", "Step10"),
     ("Bio", "biopython", "pangolin", True, 10, "conda", "biopython", "Step10"),
+    ("gentropy", "gentropy", "gentropy", True, None, "pip", GENTROPY_SPEC, "benchmarking"),
+    ("pyspark", "pyspark", "gentropy", True, None, "pip", ">=3.5.0,<3.6", "Gentropy runtime"),
 ]
 
 # name, required, step, spec, used by
@@ -432,6 +472,8 @@ RUNTIME_CHECKS = [
     ("spliceai", "SpliceAI Annotator + pkg_resources",
      "import pkg_resources; from spliceai.utils import Annotator"),
     ("pangolin", "Pangolin PyTorch backend", "import torch"),
+    ("gentropy", "Gentropy / PySpark 3.5 compatibility",
+     "import gentropy, pyspark; assert pyspark.__version__.split('.')[:2] == ['3', '5']"),
 ]
 
 # Runtime checks that run a command (component, label, command).
@@ -440,6 +482,9 @@ COMMAND_CHECKS = [
     ("ldsc", "ldsc.py -h", [LDSC_ENV / "bin" / "python", LDSC_ENV / "bin" / "ldsc.py", "-h"]),
     ("pops", "pops --help", [POPS_ENV / "bin" / "pops", "--help"]),
     ("magma", "magma --version", [MAGMA_BIN, "--version"]),
+    ("echolocatoR", "echolocatoR echoverse diagnostics",
+     [ECHOLOCATOR_ENV / "bin" / "Rscript", "-e",
+      "library(echolocatoR); echolocatoR::check_echoverse_setup()"]),
 ]
 
 # Host tools used by the SLURM job scripts; never installed here.
@@ -452,8 +497,27 @@ TOOLS = TOOLS + EXTRA_TOOLS
 PYTHON_PACKAGES = PYTHON_PACKAGES + EXTRA_PYTHON_PACKAGES
 R_PACKAGES = R_PACKAGES + EXTRA_R_PACKAGES
 
+ECHOLOCATOR_R_PACKAGES = [
+    ("echolocatoR", True, None, f"github RajLabMSSM/echolocatoR@{ECHOLOCATOR_REF}", "benchmarking"),
+    ("echoconda", True, None, "echolocatoR dependency", "echoverse"),
+    ("downloadR", True, None, "echolocatoR dependency", "echoverse"),
+    ("echodata", True, None, "echolocatoR dependency", "echoverse"),
+    ("echotabix", True, None, "echolocatoR dependency", "echoverse"),
+    ("echoannot", True, None, "echolocatoR dependency", "echoverse"),
+    ("catalogueR", True, None, "echolocatoR dependency", "echoverse"),
+    ("echoLD", True, None, "echolocatoR dependency", "echoverse"),
+    ("echofinemap", True, None, "echolocatoR dependency", "echoverse"),
+    ("echoplot", True, None, "echolocatoR dependency", "echoverse"),
+    ("susieR", True, None, "r-susier", "fine-mapping"),
+]
+
+R_PACKAGE_SETS = {
+    "pipeline": R_PACKAGES,
+    "echolocatoR": ECHOLOCATOR_R_PACKAGES,
+}
+
 # Conda environments under envs/, plus MAGMA (a binary under external_tools/).
-CONDA_COMPONENTS = ["pipeline", "spliceai", "pangolin", "ldsc", "pops"]
+CONDA_COMPONENTS = ["pipeline", "spliceai", "pangolin", "ldsc", "pops", "gentropy", "echolocatoR"]
 COMPONENTS = CONDA_COMPONENTS + ["magma"]
 
 
@@ -465,7 +529,7 @@ parser = argparse.ArgumentParser(
     description="Install, repair and verify all GWAS2m software environments."
 )
 parser.add_argument("--only", nargs="+", choices=COMPONENTS, default=COMPONENTS,
-                    help="Install only these environments (default: all three).")
+                    help="Install only these environments (default: all components).")
 parser.add_argument("--verify-only", action="store_true",
                     help="READ-ONLY: verify what is installed; install nothing.")
 parser.add_argument("--dry-run", action="store_true",
@@ -759,7 +823,7 @@ def preflight(pms: list[str]) -> bool:
 
     if shutil.which("sbatch") and not os.environ.get("SLURM_JOB_ID") and not args.verify_only:
         log("[NOTE] SLURM detected but this is not a batch job (probably a login node).")
-        log("       A full install takes 30-90 min; consider submitting it with sbatch.")
+        log("       A full install can take several hours; consider submitting it with sbatch.")
 
     try:
         free_gb = shutil.disk_usage(ROOT).free / 1024 ** 3
@@ -778,6 +842,8 @@ def preflight(pms: list[str]) -> bool:
             ("bioconda", "https://conda.anaconda.org/bioconda/noarch/repodata.json"),
             ("PyPI", "https://pypi.org/simple/pip/"),
             ("GitHub", "https://github.com/tkzeng/Pangolin"),
+            ("Gentropy", "https://github.com/opentargets/gentropy"),
+            ("echolocatoR", "https://github.com/RajLabMSSM/echolocatoR"),
             ("CRAN", "https://cloud.r-project.org/"),
             ("MAGMA (CTG)", "https://vu.data.surfsara.nl/"),
         ]:
@@ -1067,6 +1133,68 @@ def install_pops(pms: list[str]) -> None:
     write_wrapper(env_bin(POPS_ENV, "pops_munge_features"), POPS_REPO / "munge_feature_directory.py")
 
 
+def install_gentropy(pms: list[str]) -> None:
+    """Install the Open Targets benchmark stack in its own reproducible env."""
+    banner(f"GENTROPY BENCHMARK ENVIRONMENT  ->  envs/gentropy  ({GENTROPY_SPEC})")
+
+    if args.force_recreate:
+        remove_env(GENTROPY_ENV)
+
+    if env_exists(GENTROPY_ENV):
+        log(f"[CACHE] Gentropy environment exists: {GENTROPY_ENV}")
+    else:
+        with_fallback(
+            pms,
+            lambda pm: [pm, "create", "-y", "-p", GENTROPY_ENV, *CONDA_FORGE, *GENTROPY_CONDA],
+            "Create envs/gentropy",
+        )
+
+    run([env_bin(GENTROPY_ENV, "python"), "-m", "pip", "install", "--upgrade", GENTROPY_SPEC],
+        label=f"pip: {GENTROPY_SPEC}")
+
+
+def install_echolocator(pms: list[str]) -> None:
+    """Install the released echolocatoR/echoverse stack via its documented route."""
+    banner(f"ECHOLOCATOR BENCHMARK ENVIRONMENT  ->  envs/echolocatoR  ({ECHOLOCATOR_REF})")
+
+    if args.force_recreate:
+        remove_env(ECHOLOCATOR_ENV)
+
+    if env_exists(ECHOLOCATOR_ENV):
+        log(f"[CACHE] echolocatoR environment exists: {ECHOLOCATOR_ENV}")
+    else:
+        with_fallback(
+            pms,
+            lambda pm: [pm, "create", "-y", "-p", ECHOLOCATOR_ENV,
+                        *FORGE_BIOCONDA, *ECHOLOCATOR_CONDA],
+            "Create envs/echolocatoR",
+        )
+
+    rscript = env_bin(ECHOLOCATOR_ENV, "Rscript")
+    probe = ("cat('@@VERSION@@', if (requireNamespace('echolocatoR', quietly=TRUE)) "
+             "as.character(packageVersion('echolocatoR')) else '')")
+    rc, installed = capture([rscript, "-e", probe]) if not args.dry_run else (1, "")
+    installed_version = next((line.split("@@VERSION@@", 1)[1].strip()
+                              for line in installed.splitlines() if "@@VERSION@@" in line), "")
+    if rc == 0 and installed_version == ECHOLOCATOR_VERSION:
+        log(f"[CACHE] echolocatoR {ECHOLOCATOR_VERSION} is already installed")
+    else:
+        install_code = (
+            "options(repos=c(CRAN='https://cloud.r-project.org')); "
+            f"BiocManager::install('RajLabMSSM/echolocatoR@{ECHOLOCATOR_REF}', "
+            "ask=FALSE, update=FALSE)"
+        )
+        run([rscript, "-e", install_code],
+            label=f"BiocManager: echolocatoR@{ECHOLOCATOR_REF}")
+
+    if not args.dry_run:
+        MANIFESTS.mkdir(parents=True, exist_ok=True)
+        (MANIFESTS / "echolocatoR.ref.txt").write_text(
+            f"release\t{ECHOLOCATOR_REF}\ncommit\t{ECHOLOCATOR_COMMIT}\n",
+            encoding="utf-8",
+        )
+
+
 def _sha256(path: Path) -> str:
     import hashlib
 
@@ -1155,6 +1283,8 @@ INSTALLERS = {
     "pangolin": install_pangolin,
     "ldsc": install_ldsc,
     "pops": install_pops,
+    "gentropy": install_gentropy,
+    "echolocatoR": install_echolocator,
     "magma": install_magma,
 }
 
@@ -1287,28 +1417,33 @@ def verify_runtime(env_ids: list[str]) -> list[dict]:
 
 
 def verify_r(env_ids: list[str]) -> list[dict]:
-    if "pipeline" not in env_ids:
-        return []
-    rscript = env_bin(CORE_ENV, "Rscript")
-    versions: dict[str, str] = {}
-    if rscript.exists():
-        names = ",".join(f'"{p[0]}"' for p in R_PACKAGES)
-        code = ("cat('@@R@@', 'R', paste0(R.version$major, '.', R.version$minor), '\\n'); "
-                f"for (p in c({names})) "
-                "cat('@@R@@', p, if (requireNamespace(p, quietly=TRUE)) "
-                "as.character(packageVersion(p)) else 'MISSING', '\\n')")
-        rc, out = capture([rscript, "-e", code], timeout=600)
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) == 3 and parts[0] == "@@R@@":
-                versions[parts[1]] = parts[2]
-    rows = [dict(env="pipeline", type="R", name="R runtime", status="OK" if "R" in versions else "MISSING",
-                 version=versions.get("R", ""), required=True, step=6, used_by="R runtime", spec="r-base")]
-    for name, required, step, spec, used in R_PACKAGES:
-        version = versions.get(name, "MISSING")
-        ok = version != "MISSING"
-        rows.append(dict(env="pipeline", type="R", name=name, status="OK" if ok else "MISSING",
-                         version=version if ok else "", required=required, step=step, used_by=used, spec=spec))
+    rows = []
+    for env, packages in R_PACKAGE_SETS.items():
+        if env not in env_ids:
+            continue
+        rscript = env_bin(ENVS / env, "Rscript")
+        versions: dict[str, str] = {}
+        if rscript.exists():
+            names = ",".join(f'"{p[0]}"' for p in packages)
+            code = ("cat('@@R@@', 'R', paste0(R.version$major, '.', R.version$minor), '\\n'); "
+                    f"for (p in c({names})) "
+                    "cat('@@R@@', p, if (requireNamespace(p, quietly=TRUE)) "
+                    "as.character(packageVersion(p)) else 'MISSING', '\\n')")
+            rc, out = capture([rscript, "-e", code], timeout=600)
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) == 3 and parts[0] == "@@R@@":
+                    versions[parts[1]] = parts[2]
+        rows.append(dict(env=env, type="R", name="R runtime",
+                         status="OK" if "R" in versions else "MISSING",
+                         version=versions.get("R", ""), required=True,
+                         step=6 if env == "pipeline" else None, used_by="R runtime", spec="r-base"))
+        for name, required, step, spec, used in packages:
+            version = versions.get(name, "MISSING")
+            ok = version != "MISSING"
+            rows.append(dict(env=env, type="R", name=name, status="OK" if ok else "MISSING",
+                             version=version if ok else "", required=required, step=step,
+                             used_by=used, spec=spec))
     return rows
 
 
@@ -1373,10 +1508,19 @@ def write_manifests(rows: list[dict], pms: list[str]) -> None:
             rc, out = capture([lister, "list", "-p", prefix], timeout=300)
             if rc == 0:
                 (MANIFESTS / f"env_{env}.conda_list.txt").write_text(out, encoding="utf-8")
-        rc, out = capture([env_bin(prefix, "python"), "-m", "pip", "freeze"], timeout=300)
-        if rc == 0:
-            (MANIFESTS / f"env_{env}.pip_freeze.txt").write_text(out, encoding="utf-8")
-    log(f"Package lists     : {MANIFESTS}/env_<name>.conda_list.txt / .pip_freeze.txt")
+        python = env_bin(prefix, "python")
+        if python.exists():
+            rc, out = capture([python, "-m", "pip", "freeze"], timeout=300)
+            if rc == 0:
+                (MANIFESTS / f"env_{env}.pip_freeze.txt").write_text(out, encoding="utf-8")
+        rscript = env_bin(prefix, "Rscript")
+        if rscript.exists():
+            code = ("x <- as.data.frame(installed.packages()[,c('Package','Version','LibPath')]); "
+                    "write.table(x, sep='\\t', row.names=FALSE, quote=FALSE)")
+            rc, out = capture([rscript, "-e", code], timeout=600)
+            if rc == 0:
+                (MANIFESTS / f"env_{env}.R_packages.tsv").write_text(out, encoding="utf-8")
+    log(f"Package lists     : {MANIFESTS}/env_<name>.conda_list.txt / .pip_freeze.txt / .R_packages.tsv")
 
 
 # =============================================================================
@@ -1396,7 +1540,7 @@ def main() -> int:
 
     if not args.verify_only:
         if not args.dry_run:
-            for directory in (ENVS, PKGS_DIR, PIP_CACHE, TMP):
+            for directory in (ENVS, MANIFESTS, PKGS_DIR, PIP_CACHE, TMP):
                 directory.mkdir(parents=True, exist_ok=True)
 
         # Pangolin needs git; when the host has none it comes from envs/pipeline.
@@ -1471,6 +1615,8 @@ def main() -> int:
     log(f"  {env_bin(PANGOLIN_ENV, 'pangolin')}")
     log(f"  {env_bin(LDSC_ENV, 'python')} {env_bin(LDSC_ENV, 'ldsc.py')}")
     log(f"  {env_bin(POPS_ENV, 'pops')}")
+    log(f"  conda activate {GENTROPY_ENV}   # Gentropy benchmark CLI")
+    log(f"  conda activate {ECHOLOCATOR_ENV}  # echolocatoR benchmark")
     log(f"  {MAGMA_BIN}")
     log("Reference data (MAGMA gene locations, LDSC baseline/weights, PoPS features,")
     log("liftover chain files) is NOT downloaded by this script.")

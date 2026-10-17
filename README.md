@@ -52,6 +52,10 @@ flowchart TB
         S15 --> S17
     end
 
+    subgraph BENCHMARK["Independent benchmarking"]
+        B01["Matched-input comparison<br/>Gentropy and echolocatoR"]
+    end
+
     S01 --> S02
     S01 --> S04
     S06 --> S08
@@ -62,6 +66,8 @@ flowchart TB
     S09 --> S12
     S10 --> S12
     S11 --> S12
+    S06 -. fine-mapping benchmark .-> B01
+    S13 -. Open Targets benchmark .-> B01
 
     OT[("Open Targets")]
     PATH[("g:Profiler or GMT gene sets")]
@@ -232,6 +238,7 @@ The installer is the only script started with your system `python`, because
 python Step00_Installation.py                          # install + verify everything
 python Step00_Installation.py --verify-only            # check only
 python Step00_Installation.py --only pipeline pangolin # repair selected environments
+python Step00_Installation.py --only gentropy echolocatoR # benchmark environments only
 ```
 
 Every later command uses the project's own interpreter, **`envs/pipeline/bin/python`**.
@@ -243,7 +250,87 @@ Every later command uses the project's own interpreter, **`envs/pipeline/bin/pyt
 | `envs/pangolin` | Pangolin (pinned commit) |
 | `envs/ldsc` | LDSC / S-LDSC 1.0.1 (Python 2.7) |
 | `envs/pops` | PoPS (pinned commit) |
+| `envs/gentropy` | Open Targets Gentropy 3.4.0; Python 3.11, PySpark 3.5.x and OpenJDK 11 |
+| `envs/echolocatoR` | echolocatoR 3.0.0 and its echoverse R dependencies; R 4.4 |
 | `external_tools/magma` | MAGMA v1.10 (official binary, SHA-256 verified) |
+
+### Install the independent benchmark frameworks
+
+Gentropy and echolocatoR are isolated from the production pipeline so their dependency stacks cannot
+change the GWAS2Mech analysis environment. The installer pins [Gentropy](https://github.com/opentargets/gentropy)
+to 3.4.0 and the [echolocatoR](https://github.com/RajLabMSSM/echolocatoR) v3.0.0 release. Gentropy's
+declared requirements are Python 3.11–3.13 and PySpark 3.5.x; the project environment uses Python 3.11,
+PySpark 3.5.x and Java 11. Run the installation inside a compute-node session:
+
+```bash
+module load miniforge/26.1.0-0
+source "$ROOTMINIFORGE/etc/profile.d/conda.sh"
+
+# Uses project-local environments, package cache, logs and manifests.
+python Step00_Installation.py --only gentropy echolocatoR
+
+# Repeatable, read-only verification after installation.
+python Step00_Installation.py --verify-only --only gentropy echolocatoR
+```
+
+The verification imports Gentropy and PySpark, checks the PySpark 3.5 series, runs `java -version` and
+`gentropy --help`, imports echolocatoR and its required echoverse modules, and runs
+`echolocatoR::check_echoverse_setup()`. A failed GitHub dependency download can be resumed by running
+the same installer command again; the existing environments are repaired in place. If GitHub reports an
+API rate limit, export a `GITHUB_TOKEN` in the compute-node session and rerun; do not write the token into
+the repository or an installation command.
+
+Exact installed versions are written for the manuscript and reproducibility archive:
+
+| Manifest | Contents |
+|---|---|
+| `setup_manifests/installed_software.tsv` | verification status and version of every required component |
+| `setup_manifests/env_gentropy.conda_list.txt` | Gentropy Conda packages, including Java |
+| `setup_manifests/env_gentropy.pip_freeze.txt` | exact Gentropy/PySpark Python environment |
+| `setup_manifests/env_echolocatoR.conda_list.txt` | echolocatoR Conda and system-library environment |
+| `setup_manifests/env_echolocatoR.R_packages.tsv` | exact installed R package versions and library paths |
+| `setup_manifests/echolocatoR.ref.txt` | pinned release tag and Git commit |
+
+Manual checks, if needed:
+
+```bash
+conda activate "$PWD/envs/gentropy"
+python -c "import gentropy, pyspark; print('Gentropy imported'); print('PySpark:', pyspark.__version__)"
+java -version
+gentropy --help
+conda deactivate
+
+conda activate "$PWD/envs/echolocatoR"
+Rscript -e 'library(echolocatoR); packageVersion("echolocatoR")'
+Rscript -e 'echolocatoR::check_echoverse_setup()'
+conda deactivate
+```
+
+### Benchmark design and shared inputs
+
+The benchmark reuses the existing GRCh38 results and 1000G30x EUR LD panel. This avoids creating a
+second large reference copy and ensures that differences can be attributed to software or method
+rather than different source data.
+
+| Benchmark input | Existing GWAS2Mech location |
+|---|---|
+| QC GWAS summary statistics | `02_summary_stats/` |
+| EUR LD reference genotypes | `resources/LD_panels/1000G30x/EUR/` |
+| Fine-mapped variants | `06_finemapping/parkinson_s_disease/european_1000G30x/` |
+| Credible sets | per-study Step06 outputs in the same directory |
+| Functional annotations | `08_annotation/parkinson_s_disease/european_1000G30x/` |
+| Existing Open Targets comparison | `13_opentargets_comparison/parkinson_s_disease/european_1000G30x/` |
+
+The first planned experiment is study `GCST90319903`, expected to contain seven existing loci. Confirm
+the current count from the saved Step06 outputs before freezing the benchmark cohort. Compare
+GWAS2Mech SuSiE-RSS with echolocatoR methods on identical locus definitions, summary statistics and LD;
+run relevant Gentropy stages on matched inputs where its interfaces permit this, and otherwise label the
+comparison as a comparison with Gentropy/Open Targets outputs rather than an identical-input rerun.
+
+Before calculating concordance, freeze and report genome build, locus boundaries, variant normalization,
+effect/other allele orientation, sample-size assumptions, phenotype scale, LD sample ancestry and matrix,
+and credible-set thresholds. Installation alone does not perform these conversions or establish a fair
+benchmark. Every excluded locus or variant must retain an explicit reason.
 
 ## 2. Download the shared resources
 
@@ -1135,9 +1222,16 @@ A modality whose directory holds no association files (for example `mqtl/adsp_fu
 
 **Method.**
 
+- **Step06 credible-set gate:** by default a locus must have a Step06 95% GWAS credible set, and each
+  tested molecular trait must retain at least one allele-matched credible-set variant after harmonisation.
+  Missing credible sets or missing credible-set overlap are recorded as `NOT_TESTED`, not as negative
+  biological evidence.
 - **coloc.abf** (single causal variant) runs with priors p1 / p2 / p12, prior sensitivity at P12_LOW /
   P12_HIGH, and PP.H0–H4 reported. Rows are labelled `COLOC_METHOD = coloc.abf` and
   `METHOD_FAMILY = ABF_SINGLE_CAUSAL_VARIANT`.
+- **Credible-set support:** for a strong coloc result, Step11 also sums the conditional SNP.PP.H4 over
+  pre-existing Step06 credible-set members. `CS_SUPPORTED_STRONG = YES` requires PP.H4 ≥ `STRONG_PP4`
+  and credible-set H4 mass ≥ `MIN_CS_H4_MASS`; this is a support label, not a second colocalisation test.
 - **Provider SuSiE:** a dataset with provider SuSiE (credible sets + LBF) becomes `PROVIDER_SUSIE_USE_STEP09`.
   It is colocalised with multi-signal `coloc.bf_bf` in Step09 / Step10 and is not re-run here as ABF. The
   ADSP "all" archives and the Kumasaka file contain association statistics only.
@@ -1169,6 +1263,8 @@ None of these counts as evidence against colocalisation.
 - `QTL_N`, `QTL_SDY` and `COLUMN_OVERRIDES` (documented values only);
 - `DISABLED_DATASETS`;
 - `CANDIDATE_P`, `MIN_SHARED`, `MIN_OVERLAP`, `PALINDROMIC_POLICY`;
+- `REQUIRE_GWAS_CREDIBLE_SET`, `REQUIRE_CS_VARIANT_OVERLAP`, `MIN_CS_VARIANTS_SHARED`,
+  `MIN_CS_H4_MASS`;
 - priors and thresholds;
 - SLURM.
 
@@ -1251,6 +1347,13 @@ Useful options are `--skip-step10`, `--require-step10`, `--skip-step11`, `--stro
 Steps 09 or 10 have not completed are recorded in `Step12_Coloc_Locus_Coverage.tsv` and are not
 counted as negative results.
 
+Step12 also writes manuscript-ready study, locus, credible-set, molecular-QTL inventory and annotation
+coverage tables (`Step12_Study_Pipeline_Overview.tsv`, `Step12_All_Loci_Publication.tsv`,
+`Step12_Credible_Set_Master.tsv`, and related compressed row-level tables). Six matching longtable LaTeX
+files are written as `Step12_Table01_*.tex` through `Step12_Table06_*.tex`. Provider-SuSiE posterior
+variants are linked only through the selected GWAS/QTL signal pair; Step11 ABF evidence is labelled as
+locus-level evidence with credible-set support and is not presented as a SuSiE signal link.
+
 ## 13. Compare loci and genes with Open Targets
 
 `Step13_Compare_OpenTargets.py` compares the Step 12 evidence with Open Targets studies, credible
@@ -1281,6 +1384,11 @@ envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's 
 Useful options are `--study GCST...`, `--ot-release`, `--l2g-top-k`, `--locus-padding` and
 `--allow-no-coloc`. The retained `--download-ot` and `--repair-ot` options are for explicit recovery;
 normal runs use the Step 00 resource bundle.
+
+Benchmark outputs include study comparability, all supported locus/credible-set matches, individual
+SuSiE credible-set comparisons, variant-level agreement, missed-locus reasons, performance metrics,
+gene/mechanism/context comparisons and Open Targets parquet health and repair audits. Absence from an
+incomplete Open Targets dataset is retained as unresolved coverage rather than interpreted as novelty.
 
 ## 14. Rank genes and test pathway enrichment
 
