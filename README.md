@@ -21,7 +21,7 @@ flowchart TB
 
     subgraph GWAS["GWAS locus discovery and statistical fine-mapping"]
         S02["Step 02<br/>Study discovery, phenotype review and GWAS QC"]
-        S04["Step 04<br/>Ancestry-matched LD reference panels"]
+        S04["Step 04<br/>Ancestry-matched 1000G or 1000G30x LD panel"]
         S05["Step 05<br/>LD clumping and independent lead variants"]
         S06["Step 06<br/>SuSiE-RSS fine-mapping and credible sets"]
         S07["Step 07<br/>Publication figures"]
@@ -93,7 +93,7 @@ Step 12 preserves their provenance while joining them to fine-mapping and functi
 | 0 | `Step00_Download_Resources.py` | downloads the shared reference data | file | `resources/` |
 | 1 | `Step01_Download_Resources_Checkheaders.py` | checks every download is readable | – | `setup_manifests/` |
 | 2 | `Step02_Plan_QC_GWAS.py` | finds the GWAS, classifies Binary / Continuous, **downloads and QCs each GWAS in one job** | GWAS | `01_gwas_catalog/`, `02_summary_stats/` |
-| 4 | `Step04_Prepare_LD_Reference.py` | 1000 Genomes LD panels per ancestry | chromosome | `resources/1000G/<ANC>/` |
+| 4 | `Step04_Prepare_LD_Reference.py` | ancestry-specific 1000G or 1000G30x LD panels | chromosome | `resources/1000G/<ANC>/` or `resources/LD_panels/1000G30x/<ANC>/` |
 | 5 | `Step05_Clump_GWAS_Loci.py` | LD clumping → independent lead variants | GWAS | `05_ld_clumping/` |
 | 6 | `Step06_FineMap_GWAS_Loci.py` | SuSiE-RSS fine-mapping with locus QC | GWAS | `06_finemapping/` |
 | 7 | `Step07_Plots.py` | Manhattan, ideograms, regional / LD / PIP / gene figures | – (one job) | `07_plots/` |
@@ -1234,6 +1234,18 @@ envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease
 envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
 ```
 
+**With the 1000 Genomes 30x panel** (reads the Step 06 and Step 08–11
+`<ancestry>_1000G30x/` branches and writes `12_master_table/<phenotype>/<ancestry>_1000G30x/`):
+
+```bash
+envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
+envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm
+sbatch Step12_MasterTable_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+```
+
 Useful options are `--skip-step10`, `--require-step10`, `--skip-step11`, `--strong-pp4` and
 `--suggestive-pp4`. Step 11 remains a separate `STEP11_CUSTOM_ABF` evidence channel. Loci for which
 Steps 09 or 10 have not completed are recorded in `Step12_Coloc_Locus_Coverage.tsv` and are not
@@ -1254,6 +1266,18 @@ envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's 
 envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
 ```
 
+**With the 1000 Genomes 30x panel** (reads `12_master_table/<phenotype>/<ancestry>_1000G30x/`
+and writes `13_opentargets_comparison/<phenotype>/<ancestry>_1000G30x/`):
+
+```bash
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm
+sbatch Step13_OpenTargets_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+```
+
 Useful options are `--study GCST...`, `--ot-release`, `--l2g-top-k`, `--locus-padding` and
 `--allow-no-coloc`. The retained `--download-ot` and `--repair-ot` options are for explicit recovery;
 normal runs use the Step 00 resource bundle.
@@ -1270,6 +1294,18 @@ envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's dis
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+```
+
+**With the 1000 Genomes 30x panel** (reads the matching Step 12–13 evidence branch and writes
+`14_pathways/<phenotype>/<ancestry>_1000G30x/`):
+
+```bash
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm
+sbatch Step14_Pathways_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
 ```
 
 Useful options are `--gmt <library.gmt>` for offline, repeatable enrichment, `--sources`, `--fdr`,
@@ -1289,6 +1325,18 @@ envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's
 envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
 ```
 
+**With the 1000 Genomes 30x panel** (reads `14_pathways/<phenotype>/<ancestry>_1000G30x/`
+and writes `15_network/<phenotype>/<ancestry>_1000G30x/`):
+
+```bash
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm
+sbatch Step15_Network_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
+```
+
 Useful options are `--required-score 700`, `--add-nodes 20`, `--network-types`,
 `--known-genes-file` and `--dry-run`.
 
@@ -1304,6 +1352,18 @@ envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's
 envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats
 envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+```
+
+**With the 1000 Genomes 30x panel** (reads the matching Step 12, Step 14 and Step 15 branches and
+writes `16_drug_targets/<phenotype>/<ancestry>_1000G30x/`):
+
+```bash
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm
+sbatch Step16_DrugTargets_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
 ```
 
 Useful options are `--target-set CORE_STRONG`, `--assume-harmonized`, `--dry-run` and
@@ -1323,25 +1383,20 @@ envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Park
 envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
 ```
 
-Use `--include-suggestive` when the final integration should include suggestive H4 evidence in
-addition to the default strong-evidence set.
-
-### Steps 12–17 with the 1000 Genomes 30x panel
-
-Each stage reads and writes the `<ancestry>_1000G30x/` branch. Submit and complete these jobs in
-order.
+**With the 1000 Genomes 30x panel** (integrates the matching Step 12–16 branches and writes
+`17_mechanism/<phenotype>/<ancestry>_1000G30x/`):
 
 ```bash
-envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step12_MasterTable_parkinson_s_disease_european_1000G30x.sh
-envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step13_OpenTargets_parkinson_s_disease_european_1000G30x.sh
-envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step14_Pathways_parkinson_s_disease_european_1000G30x.sh
-envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step15_Network_parkinson_s_disease_european_1000G30x.sh
-envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step16_DrugTargets_parkinson_s_disease_european_1000G30x.sh
-envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step17_Mechanism_parkinson_s_disease_european_1000G30x.sh
-# progress / results of any of them, e.g.
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm
+sbatch Step17_Mechanism_parkinson_s_disease_european_1000G30x.sh
 envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
 envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
 ```
+
+Use `--include-suggestive` when the final integration should include suggestive H4 evidence in
+addition to the default strong-evidence set.
 
 ## Resource groups
 
