@@ -23,6 +23,13 @@ Run every command from the repository directory.
 | 8 | `Step08_Annotate_Finemapped_Variants.py` | local VEP, CADD, AlphaMissense, ClinVar, cCRE, phyloP, LOEUF, RegulomeDB | GWAS | `08_annotation/` |
 | 9 | `Step09_Colocalize_GTEx_SuSiE.py` | provider-SuSiE coloc (coloc.bf_bf) with bulk-tissue eQTL / sQTL / isoQTL / exonQTL / pQTL | **locus** | `09_coloc/` |
 | 10 | `Step10_CellType_QTL_Colocalization.py` | the same with single-cell / cell-type eQTL | **locus** | `10_celltype_coloc/` |
+| 11 | `Step11_Custom_QTL_Colocalization.py` | coloc.abf with the local molecular QTL (ADSP brain pQTL / sQTL / haQTL / mQTL, Kumasaka caQTL, ...) | **locus** | `11_custom_qtl_coloc/` |
+| 12 | `Step12_Master_Table.py` | variant → signal → gene → tissue / cell master tables (Steps 06, 08, 09, 10, 11) | – (one job) | `12_master_table/` |
+| 13 | `Step13_Compare_OpenTargets.py` | loci / genes / mechanisms vs Open Targets credible sets, L2G, colocalisation | – (one job) | `13_opentargets_comparison/` |
+| 14 | `Step14_Pathway_Analysis.py` | one-vote-per-gene ranking, gene sets, pathway enrichment (g:Profiler or GMT) | – (one job) | `14_pathways/` |
+| 15 | `Step15_PPI_Network_Analysis.py` | STRING (optional BioGRID) networks, centrality, connectors | – (one job) | `15_network/` |
+| 16 | `Step16_Drug_Target_Analysis.py` | tractability (Open Targets), drugs / mechanisms (ChEMBL), direction of effect | – (one job) | `16_drug_targets/` |
+| 17 | `Step17_Final_Mechanism_Integration.py` | final evidence matrix, tiers and target ranking | – (one job) | `17_mechanism/` |
 
 Every step plans its own SLURM array from the `#SBATCH` header of `HPC_CPU.sh` (never more than
 1,000 jobs; above that, a job processes several items), skips work that is already done, and
@@ -75,6 +82,11 @@ $RUN envs/pipeline/bin/python Step07_Plots.py             "${PD[@]}" --index 2
 $RUN envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py "${PD[@]}" --index 2
 $RUN envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py      "${PD[@]}" --index 2   # every locus of study 2
 $RUN envs/pipeline/bin/python Step10_CellType_QTL_Colocalization.py "${PD[@]}" --index 2   # single-cell eQTL
+$RUN envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py "${PD[@]}" --index 2   # local molecular QTL (after --scan + registry, section 11)
+# 12-17. integration and interpretation, study 2 (results in <ancestry>/<GCST>/)
+for s in Step12_Master_Table Step13_Compare_OpenTargets Step14_Pathway_Analysis Step15_PPI_Network_Analysis Step16_Drug_Target_Analysis Step17_Final_Mechanism_Integration; do
+  $RUN envs/pipeline/bin/python $s.py "${PD[@]}" --index 2
+done
 
 # results
 envs/pipeline/bin/python Step05_Clump_GWAS_Loci.py   "${PD[@]}" --stats    # leads, loci
@@ -82,6 +94,7 @@ envs/pipeline/bin/python Step06_FineMap_GWAS_Loci.py "${PD[@]}" --stats    # cre
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py "${PD[@]}" --stats   # coding / LoF / ClinVar / cCRE in credible sets
 envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py      "${PD[@]}" --stats   # eQTL / sQTL / pQTL colocalisation (PP.H4)
 envs/pipeline/bin/python Step10_CellType_QTL_Colocalization.py "${PD[@]}" --stats  # single-cell eQTL colocalisation
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py "${PD[@]}" --index 2 --stats   # final target ranking
 ls 07_plots/parkinson_s_disease/european/GCST90475830/                      # Manhattan, ideogram, loci/
 ```
 
@@ -102,6 +115,14 @@ envs/pipeline/bin/python Step07_Plots.py "${PD[@]}" --slurm               && sba
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py "${PD[@]}" && sbatch Step08_Annotate_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py "${PD[@]}"       && sbatch Step09_Coloc_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step10_CellType_QTL_Colocalization.py "${PD[@]}" && sbatch Step10_CellTypeColoc_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py "${PD[@]}" && sbatch Step11_CustomQTL_parkinson_s_disease_european.sh
+# Steps 12-17 are one job each, in order (each reads the previous one):
+envs/pipeline/bin/python Step12_Master_Table.py "${PD[@]}" --slurm           && sbatch Step12_MasterTable_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py "${PD[@]}" --slurm    && sbatch Step13_OpenTargets_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step14_Pathway_Analysis.py "${PD[@]}" --slurm       && sbatch Step14_Pathways_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py "${PD[@]}" --slurm   && sbatch Step15_Network_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py "${PD[@]}" --slurm   && sbatch Step16_DrugTargets_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py "${PD[@]}" --slurm && sbatch Step17_Mechanism_parkinson_s_disease_european.sh
 ```
 
 The same for the **1000 Genomes 30x LD panel** (Step04-Step10 results in `<ancestry>_1000G30x/` folders;
@@ -114,6 +135,10 @@ envs/pipeline/bin/python Step07_Plots.py "${PD[@]}" --reference-panel 1000G30x -
 envs/pipeline/bin/python Step08_Annotate_Finemapped_Variants.py "${PD[@]}" --reference-panel 1000G30x && sbatch Step08_Annotate_parkinson_s_disease_european_1000G30x.sh
 envs/pipeline/bin/python Step09_Colocalize_GTEx_SuSiE.py "${PD[@]}" --reference-panel 1000G30x       && sbatch Step09_Coloc_parkinson_s_disease_european_1000G30x.sh
 envs/pipeline/bin/python Step10_CellType_QTL_Colocalization.py "${PD[@]}" --reference-panel 1000G30x && sbatch Step10_CellTypeColoc_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py "${PD[@]}" --reference-panel 1000G30x && sbatch Step11_CustomQTL_parkinson_s_disease_european_1000G30x.sh
+for s in Step12_Master_Table Step13_Compare_OpenTargets Step14_Pathway_Analysis Step15_PPI_Network_Analysis Step16_Drug_Target_Analysis Step17_Final_Mechanism_Integration; do
+  envs/pipeline/bin/python $s.py "${PD[@]}" --reference-panel 1000G30x     # one after the other (or --slurm + sbatch each)
+done
 ```
 
 Wait for each array to finish (`--status`) before planning the next step.
@@ -952,6 +977,170 @@ Outputs in `09_coloc/` (Step10: `10_celltype_coloc/`) `<phenotype>/<ancestry>[_<
 | `coloc_manifest.tsv`, `qtl_contexts_snapshot.tsv` | locus → array task, the contexts used |
 | `coloc_stats.tsv`, `coloc_all_candidates.tsv`, `coloc_locus_qtl_summary.tsv`, `<GCST>/<GCST>_coloc_results.tsv` | written by `--stats` |
 
+## 11. External molecular-QTL colocalisation (Step11, coloc.abf)
+
+Steps 09 / 10 need provider SuSiE fine-mapping, which only the eQTL Catalogue publishes. The local
+molecular-QTL resources (`Step00 --groups molecular_qtl meqtl` → `resources/molecular_qtl/`) have
+summary statistics only. These are ADSP FunGen brain pQTL / sQTL / haQTL / mQTL (Knight-ADRC,
+MSBB, ROSMAP) and the Kumasaka caQTL. Step11 colocalises them with **`coloc::coloc.abf`**,
+independently of Steps 09 / 10. One SLURM array task per locus, like Steps 09 / 10.
+
+Nothing is used until you approve it, through a registry of every file:
+
+```bash
+# 1. inventory: config/Step11_Custom_QTL_Registry.tsv (every row DISABLED) + config/Step11_Column_Audit.tsv
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --scan
+# 2. edit the registry for each dataset: check the columns against the audit (headerless ADSP BED tracks:
+#    map c1, c2, ... to variant_col / trait_col / p_col / beta_col / se_col / maf_col), fill n (QTL sample
+#    size, or AN), set enabled = 1. Re-running --scan keeps your edits and adds new files disabled.
+# 3. check, plan, submit
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR
+sbatch Step11_CustomQTL_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --index 2 --locus L001
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --force   # redo all loci
+
+# 1000 Genomes 30x LD panel (reads 06_finemapping/<p>/<a>_1000G30x/, writes 11_custom_qtl_coloc/<p>/<a>_1000G30x/)
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
+sbatch Step11_CustomQTL_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2 --locus L001
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step11_Custom_QTL_Colocalization.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+```
+
+Per locus:
+
+- **GWAS side:** the Step06 matched regional table (beta / SE, or P). The GWAS type and N come from Step06
+  `finemapping_summary.json`: Binary → case-control with the case fraction, Continuous → quantitative.
+- **Datasets:** every READY dataset, read with tabix for the locus window. The files of one dataset share a
+  name (ADSP: 22 chromosomes × snp / indel files), and only the locus chromosome is read.
+- **Candidates:** molecular traits with P ≤ `CANDIDATE_P` (top `MAX_TRAITS`).
+- **Variant matching:** exact GRCh38 CHR:POS:REF:ALT, REF/ALT-swapped pairs included, with ≥ `MIN_SHARED`
+  shared variants and ≥ `MIN_OVERLAP` of the smaller side.
+- **coloc.abf:** all traits of a locus run in one R session, with prior sensitivity at p12 = 1e-6 / 1e-5.
+
+**Safety:** a disabled or incomplete registry row, a missing N / sdY / MAF, a headerless file without a
+column mapping, or too little overlap gives `NOT_TESTED`, never a negative colocalisation. `coloc.abf`
+assumes at most one causal variant per trait and locus, so these results are exploratory until checked
+with a multi-signal method. Sun_2018 (QTD000584) is also in Step09; enabling it here counts it twice.
+
+**Parameters** live in `Step11_Config.py`: resource root, registry path, QTL types, `CANDIDATE_P`,
+`MAX_TRAITS`, `MIN_SHARED`, `MIN_OVERLAP`, priors, thresholds and SLURM.
+
+Outputs in `11_custom_qtl_coloc/<phenotype>/<ancestry>[_<PANEL>]/`: `<GCST>/loci/<L>/locus_coloc_results.tsv`
+(Step09 columns with `COLOC_METHOD = coloc.abf`) and `discovery_audit.tsv`, plus `registry_snapshot.tsv`,
+`coloc_manifest.tsv` and `resource_plan.tsv` (from `--check-resources`). `--stats` also writes
+`coloc_stats.tsv` and `coloc_all_candidates.tsv`. Step12 reads these results as a third evidence channel.
+
+## 12. Integration and interpretation (Steps 12-17)
+
+Six read-only steps turn the per-locus results into ranked genes, pathways, networks and drug
+targets. Each runs as **one job**: it is fast and reads the whole phenotype. They run in order,
+and each one reads the previous step's tables:
+
+| Step | Reads | Writes (`<NN>_<name>/<phenotype>/<ancestry>[_<PANEL>]/`) | External data |
+|---|---|---|---|
+| 12 master table | Step06 fine-mapping, Step08 annotation, Step09 + Step10 + Step11 per-locus coloc results | `Step12_Variant_Master`, `_Signal_Master`, `_Locus_Gene_Master`, `_Locus_Master`, `_Molecular_Evidence_Long`, `_Coloc_Locus_Coverage`, `_Pathway_Input_Genes`, ... | GENCODE GTF (gene names; `--groups genome`) |
+| 13 Open Targets | Step12 (+ Step06) | `Step13_Gene_Comparison` (tiers A-D), locus / variant / mechanism benchmarks | Open Targets 26.09 parquet (`--groups opentargets`); duckdb |
+| 14 pathways | Step12 (+ Step13) | `Step14_Gene_Ranking` (one vote per gene), gene sets (CORE_STRONG, ...), `Step14_Pathway_Significant` | g:Profiler web API (default) or offline `--gmt` libraries |
+| 15 network | Step14 | STRING physical / functional networks, centrality, connectors, PPI enrichment, graphml / svg | STRING web API; BioGRID optional (key) |
+| 16 drug targets | Step14, Step15, Step12 | `Step16_Target_Prioritisation` (Open Targets tractability, ChEMBL drugs, direction of effect) | Open Targets GraphQL + ChEMBL web APIs |
+| 17 final | Steps 12-16 | `Step17_Final_Target_Ranking`, evidence tiers, pathway / network / drug mechanism maps | none |
+
+Steps 13-15 call web services. Run them where there is internet (most login nodes, or a compute node
+with internet). Their answers are cached in `resources/network_cache/` and `resources/drug_target_cache/`,
+so a re-run is offline. `--check-resources` tests every service. Missing or unreachable evidence is
+reported as such, never as a biological "no". Optional BioGRID key: `export BIOGRID_ACCESS_KEY=...`
+or `BIOGRID_ACCESS_KEY=...` in `config/api_keys.env` (git-ignored; template
+`config/api_keys.example.env`). Step13 no longer downloads Open Targets during the run (it used
+to); get the data once with Step00 (`--download-ot` / `--repair-ot` still exist if you want them).
+
+**The same flags in every one of the six steps:**
+
+| Flag | Meaning |
+|---|---|
+| (none) | run now, on this machine |
+| `--slurm` | write a one-job SLURM script (`HPC_CPU.sh` header; `--cpus --mem --time --partition --qos --account` override) |
+| `--status` | inputs present? results current or STALE (an input is newer)? what to run next |
+| `--stats` | summary of the step's results and its top table, read from the output files |
+| `--check-resources` | inputs, Python modules and external data / web services; exit 1 if not ready |
+| `--index N` | only study N of the Step02 list (results in `<ancestry>[_<PANEL>]/<GCST>/`, read by the next steps with the same `--index`) |
+| `--reference-panel 1000G30x` | read and write the `<ancestry>_1000G30x/` folders of that LD panel |
+
+```bash
+# Step12: master table
+envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step12_MasterTable_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+
+# Step13: Open Targets comparison
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step13_OpenTargets_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+
+# Step14: gene ranking + pathways
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step14_Pathways_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+
+# Step15: STRING network
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step15_Network_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+
+# Step16: tractability + drugs
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step16_DrugTargets_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+
+# Step17: final mechanism ranking
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --check-resources
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step17_Mechanism_parkinson_s_disease_european.sh
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --status
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
+```
+
+**With the 1000 Genomes 30x panel** (all six steps; each reads and writes `<ancestry>_1000G30x/`):
+```bash
+envs/pipeline/bin/python Step12_Master_Table.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step12_MasterTable_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step13_Compare_OpenTargets.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step13_OpenTargets_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step14_Pathways_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step15_PPI_Network_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step15_Network_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step16_Drug_Target_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step16_DrugTargets_parkinson_s_disease_european_1000G30x.sh
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm && sbatch Step17_Mechanism_parkinson_s_disease_european_1000G30x.sh
+# progress / results of any of them, e.g.
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
+envs/pipeline/bin/python Step17_Final_Mechanism_Integration.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+```
+
+Step-specific options (see `--help` of each script):
+
+- **Step12:** `--skip-step10` / `--require-step10` (cell-type evidence), `--skip-step11` (external molecular
+  QTL), `--strong-pp4` / `--suggestive-pp4`. Step11 results are a separate channel (`STEP11_CUSTOM_ABF`,
+  `CUSTOM_*` columns; caQTL / haQTL / mQTL get their own modality columns) and count in the overall best H4.
+  Loci that Step09 / Step10 have not finished are listed in `Step12_Coloc_Locus_Coverage.tsv`
+  and are not counted as negatives.
+- **Step13:** `--study GCST...`, `--ot-release`, `--l2g-top-k`, `--locus-padding`, `--allow-no-coloc`.
+- **Step14:** `--gmt <library.gmt>` (offline, repeatable), `--sources GO:BP,REAC,KEGG,WP`, `--fdr`,
+  `--min-overlap`, `--skip-enrichment`.
+- **Step15:** `--required-score 700`, `--add-nodes 20`, `--network-types`, `--known-genes-file`, `--dry-run`.
+- **Step16:** `--target-set CORE_STRONG`, `--assume-harmonized`, `--dry-run`, `--force-refresh`.
+- **Step17:** `--include-suggestive`.
+
 ## Resource groups
 
 | Group | Contents | Approx. download |
@@ -962,10 +1151,10 @@ Outputs in `09_coloc/` (Step10: `10_celltype_coloc/`) `<phenotype>/<ancestry>[_<
 | `vep` | Ensembl VEP 116 GRCh38 cache (extracted) | 26 GB |
 | `gtex` | GTEx v11 eQTL / sQTL / apaQTL + SuSiE (extracted), variant lookup, GENCODE 47 | 7 GB |
 | `eqtl_catalogue` | eQTL Catalogue metadata tables (+ datasets listed by id) | < 1 GB |
-| `opentargets` | Open Targets Platform 26.09 study / credible sets / L2G / colocalisation | 19 GB |
+| `opentargets` | Open Targets Platform 26.09 study / credible sets / L2G / colocalisation (read by Step13) | 19 GB |
 | `qtl_catalogue` | eQTL Catalogue dense + `.tbi` for Step09: GTEx v8 eQTL / exonQTL / isoQTL / sQTL + Sun_2018 pQTL | 320 GB |
 | `qtl_celltype` | cell-type eQTL for Step10 (default Jerber_2021; `--celltype-study-regex` for all six single-cell studies), dense + `.tbi` + SuSiE (LBF sorted + indexed) | 62 GB (Jerber) |
-| `molecular_qtl` | ADSP FunGen brain pQTL / sQTL / haQTL + Kumasaka caQTL, MD5-verified | 230 GB |
+| `molecular_qtl` | ADSP FunGen brain pQTL / sQTL / haQTL + Kumasaka caQTL, MD5-verified (Step11) | 230 GB |
 | `meqtl` | ADSP FunGen brain mQTL, MD5-verified | 1.5 TB |
 | `annotation` | AlphaMissense (+ tabix index), ClinVar, ENCODE SCREEN cCREs v4, gnomAD v4.1 constraint, UCSC liftover chains, phyloP100way, RegulomeDB v2.2 (sorted + tabix-indexed) | 12 GB |
 | `cadd` | CADD v1.7 GRCh38 SNVs + gnomAD4 indels (+ `.tbi`) | 89 GB |
