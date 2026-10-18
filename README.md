@@ -1401,6 +1401,7 @@ envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's dis
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR                 # or: --slurm, then sbatch Step14_Pathways_parkinson_s_disease_european.sh
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --status
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats-all     # every baseline pathway sensitivity row
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --index 2       # study 2 only
 ```
 
@@ -1409,15 +1410,20 @@ envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's dis
 
 ```bash
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm
 sbatch Step14_Pathways_parkinson_s_disease_european_1000G30x.sh
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
+envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats-all
 envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
 ```
 
-Useful options are `--gmt <library.gmt>` for offline, repeatable enrichment, `--sources`, `--fdr`,
-`--min-overlap` and `--skip-enrichment`.
+The implemented flag is `--stats-all` (rather than `--all-stats`). It reads saved results and prints
+sensitivity results for every baseline-tested pathway, including nonsignificant terms; `--stats` prints
+the shorter report centred on baseline-significant terms. Useful analysis options include
+`--gmt <library.gmt>` for offline repeatable enrichment, `--background-file`, `--background-mode`,
+`--sources`, `--fdr`, `--min-overlap`, `--sensitivity-sets`, `--no-sensitivity` and `--skip-enrichment`.
 
 ## 15. Analyse protein interaction networks
 
