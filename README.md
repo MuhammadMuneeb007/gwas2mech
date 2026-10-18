@@ -239,6 +239,7 @@ python Step00_Installation.py                          # install + verify everyt
 python Step00_Installation.py --verify-only            # check only
 python Step00_Installation.py --only pipeline pangolin # repair selected environments
 python Step00_Installation.py --only gentropy echolocatoR # benchmark environments only
+python Step00_Installation.py --only perturb             # perturbation environment only
 ```
 
 Every later command uses the project's own interpreter, **`envs/pipeline/bin/python`**.
@@ -252,6 +253,7 @@ Every later command uses the project's own interpreter, **`envs/pipeline/bin/pyt
 | `envs/pops` | PoPS (pinned commit) |
 | `envs/gentropy` | Open Targets Gentropy 3.4.0; Python 3.11, PySpark 3.5.x and OpenJDK 11 |
 | `envs/echolocatoR` | echolocatoR 3.0.0 and its echoverse R dependencies; R 4.4 |
+| `envs/perturb` | Pertpy 1.4.0 (`de` extra), Scanpy 1.12.4, decoupler 2.2.0, OmniPath 1.0.12 and cmapPy 4.0.1; Python 3.12 |
 | `external_tools/magma` | MAGMA v1.10 (official binary, SHA-256 verified) |
 
 ### Install the independent benchmark frameworks
@@ -290,6 +292,8 @@ Exact installed versions are written for the manuscript and reproducibility arch
 | `setup_manifests/env_echolocatoR.conda_list.txt` | echolocatoR Conda and system-library environment |
 | `setup_manifests/env_echolocatoR.R_packages.tsv` | exact installed R package versions and library paths |
 | `setup_manifests/echolocatoR.ref.txt` | pinned release tag and Git commit |
+| `setup_manifests/env_perturb.conda_list.txt` | exact Python and Conda packages in the perturbation environment |
+| `setup_manifests/env_perturb.pip_freeze.txt` | exact resolved Pertpy/Scanpy/decoupler/OmniPath/cmapPy dependency stack |
 
 Manual checks, if needed:
 
@@ -305,6 +309,28 @@ Rscript -e 'library(echolocatoR); packageVersion("echolocatoR")'
 Rscript -e 'echolocatoR::check_echoverse_setup()'
 conda deactivate
 ```
+
+### Install the perturbation-analysis environment
+
+The perturbation stack is isolated under `envs/perturb`, so installing or updating it cannot change
+`envs/pipeline`. Current Pertpy and Scanpy releases require Python 3.12; the installer therefore creates
+that interpreter independently and pins every requested top-level package. Run this on a compute node:
+
+```bash
+module load miniforge/26.1.0-0
+source "$ROOTMINIFORGE/etc/profile.d/conda.sh"
+
+python Step00_Installation.py --only perturb
+python Step00_Installation.py --verify-only --only perturb
+
+conda activate "$PWD/envs/perturb"
+python -c "import pertpy, scanpy, decoupler, omnipath, cmapPy; print('perturbation stack imported successfully')"
+conda deactivate
+```
+
+This environment supports differential expression, single-cell matrix processing, molecular-activity
+inference, prior-knowledge retrieval and LINCS GCTX access. The data are downloaded separately by the
+Step 00 resource planner below.
 
 ### Benchmark design and shared inputs
 
@@ -359,6 +385,33 @@ sbatch Step00_Download_meQTL.sh
 
 Each command writes its own job script (`--output`), so you can plan several and submit
 them independently. Then submit with `sbatch <that script>`.
+
+**Perturbation, pathway and interaction benchmark resources** are optional and are never included in the
+default download plan. Each source is versioned or accompanied by provider provenance:
+
+| Group | Official source | Files prepared | GWAS2Mech location |
+|---|---|---|---|
+| `scperturb` | [scPerturb v1.4 on Zenodo](https://zenodo.org/records/13350497) | 54 harmonised RNA/protein `.h5ad` matrices (about 43 GB), each checked against its provider MD5, plus the Zenodo record JSON | `resources/perturbation/scperturb/v1.4/` |
+| `lincs` | [NCBI GEO GSE92742](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE92742) | processed Level 5 MODZ signatures (about 20 GB), cell/gene/perturbagen/signature metadata and README; the matrix and metadata are checked against the provider SHA-512 manifest | `resources/perturbation/lincs/GSE92742/` |
+| `reactome` | [Reactome release 97](https://reactome.org/download/97/) | pathway list, parent-child hierarchy, all-level Ensembl mapping and extracted GMT gene sets | `resources/pathways/reactome/release97/` |
+| `biogrid` | [BioGRID release 5.0.262](https://downloads.thebiogrid.org/Download/BioGRID/Release-Archive/BIOGRID-5.0.262/) | extracted Tab 3 interaction archive and multi-validated physical-interaction MITAB archive | `resources/interactions/biogrid/v5.0.262/` |
+
+```bash
+# Plan all four groups as one independent SLURM array.
+envs/pipeline/bin/python Step00_Download_Resources.py \
+  --groups scperturb lincs reactome biogrid \
+  --output Step00_Download_Perturbation.sh
+sbatch Step00_Download_Perturbation.sh
+
+# Read-only progress report; the generated final job also runs this check.
+envs/pipeline/bin/python Step00_Download_Resources.py --status
+```
+
+For a smaller first run, select one group at a time with the same `--groups` option. The LINCS group uses the
+public, stable Phase I GEO release because it supplies a processed Level 5 matrix and the metadata needed to
+interpret its signatures. BioGRID's complete Tab 3 table contains both genetic and physical records; retain
+rows whose `Experimental System Type` is `physical`. The separate multi-validated MITAB archive provides the
+provider's higher-confidence physical network directly.
 
 **Reference genome and annotation (GENCODE 50, GRCh38)** — 0.9 GB
 ```bash

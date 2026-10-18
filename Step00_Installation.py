@@ -26,6 +26,7 @@ GWAS
  -> liftover              (pyliftover, CrossMap)
  -> Open Targets / FUMA   (duckdb, pyarrow, polars, rsync)
  -> benchmarking          (Gentropy 3.4.0; echolocatoR 3.0.0)
+ -> perturbation analysis (Pertpy, Scanpy, decoupler, OmniPath, cmapPy)
  -> resource downloads    (aria2c, curl, wget, pigz, samtools, tabix)
 
 Everything is created beneath the CURRENT WORKING DIRECTORY:
@@ -37,6 +38,7 @@ Everything is created beneath the CURRENT WORKING DIRECTORY:
     envs/pops            PoPS (pins numpy 1.19 / scikit-learn 0.24)
     envs/gentropy        Open Targets Gentropy (Python 3.11, PySpark 3.5, Java 11)
     envs/echolocatoR     echolocatoR and echoverse R packages
+    envs/perturb         single-cell and LINCS perturbation analysis (Python 3.12)
     external_tools/Pangolin
     external_tools/pops  PoPS source (pinned commit)
     external_tools/magma/v1.10/   MAGMA binary (official CTG build, SHA-256 checked)
@@ -60,6 +62,7 @@ Usage (from the project directory):
     python Step00_Installation.py --only spliceai pangolin
     python Step00_Installation.py --only ldsc pops magma
     python Step00_Installation.py --only gentropy echolocatoR
+    python Step00_Installation.py --only perturb
     python Step00_Installation.py --verify-only         # read-only check
     python Step00_Installation.py --dry-run             # print commands only
     python Step00_Installation.py --force-recreate --only spliceai
@@ -108,6 +111,7 @@ SPLICEAI_ENV = ENVS / "spliceai"
 PANGOLIN_ENV = ENVS / "pangolin"
 GENTROPY_ENV = ENVS / "gentropy"
 ECHOLOCATOR_ENV = ENVS / "echolocatoR"
+PERTURB_ENV = ENVS / "perturb"
 
 PANGOLIN_URL = "https://github.com/tkzeng/Pangolin.git"
 PANGOLIN_REPO = EXTERNAL / "Pangolin"
@@ -221,6 +225,16 @@ ECHOLOCATOR_CONDA = [
     "compilers",
     "git",
 ]
+
+# Pertpy 1.4.0 and Scanpy 1.12.4 require Python >=3.12.  This environment is
+# intentionally separate from envs/pipeline (Python 3.11).
+PERTPY_SPEC = "pertpy[de]==1.4.0"
+SCANPY_SPEC = "scanpy==1.12.4"
+DECOUPLER_SPEC = "decoupler==2.2.0"
+OMNIPATH_SPEC = "omnipath==1.0.12"
+CMAPPY_SPEC = "cmapPy==4.0.1"
+PERTURB_CONDA = ["python=3.12", "pip"]
+PERTURB_PIP = [PERTPY_SPEC, SCANPY_SPEC, DECOUPLER_SPEC, OMNIPATH_SPEC, CMAPPY_SPEC]
 
 # --- MAGMA v1.10 (CTG lab; official binaries, SHA-256 verified) ---
 #     NOTE: the conda package called "magma" is an unrelated GPU linear-algebra
@@ -377,6 +391,7 @@ TOOLS = [
     ("java", "gentropy", ["-version"], True, None, "PySpark runtime", "openjdk=11"),
     ("gentropy", "gentropy", ["--help"], True, None, "Open Targets benchmark CLI", GENTROPY_SPEC),
     ("Rscript", "echolocatoR", ["--version"], True, None, "echolocatoR runtime", "r-base=4.4"),
+    ("python", "perturb", ["--version"], True, None, "perturbation-analysis interpreter", "python=3.12"),
 ]
 
 # import name, distribution name, env, required, step, install method, spec, used by
@@ -412,6 +427,11 @@ PYTHON_PACKAGES = [
     ("Bio", "biopython", "pangolin", True, 10, "conda", "biopython", "Step10"),
     ("gentropy", "gentropy", "gentropy", True, None, "pip", GENTROPY_SPEC, "benchmarking"),
     ("pyspark", "pyspark", "gentropy", True, None, "pip", ">=3.5.0,<3.6", "Gentropy runtime"),
+    ("pertpy", "pertpy", "perturb", True, None, "pip", PERTPY_SPEC, "single-cell perturbation analysis"),
+    ("scanpy", "scanpy", "perturb", True, None, "pip", SCANPY_SPEC, "single-cell matrices"),
+    ("decoupler", "decoupler", "perturb", True, None, "pip", DECOUPLER_SPEC, "activity inference"),
+    ("omnipath", "omnipath", "perturb", True, None, "pip", OMNIPATH_SPEC, "molecular prior knowledge"),
+    ("cmapPy", "cmapPy", "perturb", True, None, "pip", CMAPPY_SPEC, "LINCS GCTX access"),
 ]
 
 # name, required, step, spec, used by
@@ -474,6 +494,8 @@ RUNTIME_CHECKS = [
     ("pangolin", "Pangolin PyTorch backend", "import torch"),
     ("gentropy", "Gentropy / PySpark 3.5 compatibility",
      "import gentropy, pyspark; assert pyspark.__version__.split('.')[:2] == ['3', '5']"),
+    ("perturb", "Pertpy differential-expression and perturbation stack",
+     "import pertpy, scanpy, decoupler, omnipath, cmapPy"),
 ]
 
 # Runtime checks that run a command (component, label, command).
@@ -517,7 +539,8 @@ R_PACKAGE_SETS = {
 }
 
 # Conda environments under envs/, plus MAGMA (a binary under external_tools/).
-CONDA_COMPONENTS = ["pipeline", "spliceai", "pangolin", "ldsc", "pops", "gentropy", "echolocatoR"]
+CONDA_COMPONENTS = ["pipeline", "spliceai", "pangolin", "ldsc", "pops", "gentropy", "echolocatoR",
+                    "perturb"]
 COMPONENTS = CONDA_COMPONENTS + ["magma"]
 
 
@@ -1195,6 +1218,28 @@ def install_echolocator(pms: list[str]) -> None:
         )
 
 
+def install_perturb(pms: list[str]) -> None:
+    """Install the single-cell/LINCS perturbation stack without changing the pipeline env."""
+    banner("PERTURBATION ANALYSIS ENVIRONMENT  ->  envs/perturb  (Python 3.12)")
+
+    if args.force_recreate:
+        remove_env(PERTURB_ENV)
+
+    if env_exists(PERTURB_ENV):
+        log(f"[CACHE] Perturbation environment exists: {PERTURB_ENV}")
+    else:
+        with_fallback(
+            pms,
+            lambda pm: [pm, "create", "-y", "-p", PERTURB_ENV, *CONDA_FORGE, *PERTURB_CONDA],
+            "Create envs/perturb",
+        )
+
+    python = env_bin(PERTURB_ENV, "python")
+    run([python, "-m", "pip", "install", "--upgrade", "pip"], label="pip: upgrade installer")
+    run([python, "-m", "pip", "install", "--upgrade", *PERTURB_PIP],
+        label="pip: Pertpy + Scanpy + decoupler + OmniPath + cmapPy")
+
+
 def _sha256(path: Path) -> str:
     import hashlib
 
@@ -1285,6 +1330,7 @@ INSTALLERS = {
     "pops": install_pops,
     "gentropy": install_gentropy,
     "echolocatoR": install_echolocator,
+    "perturb": install_perturb,
     "magma": install_magma,
 }
 
@@ -1617,6 +1663,7 @@ def main() -> int:
     log(f"  {env_bin(POPS_ENV, 'pops')}")
     log(f"  conda activate {GENTROPY_ENV}   # Gentropy benchmark CLI")
     log(f"  conda activate {ECHOLOCATOR_ENV}  # echolocatoR benchmark")
+    log(f"  conda activate {PERTURB_ENV}     # single-cell / LINCS perturbation analysis")
     log(f"  {MAGMA_BIN}")
     log("Reference data (MAGMA gene locations, LDSC baseline/weights, PoPS features,")
     log("liftover chain files) is NOT downloaded by this script.")

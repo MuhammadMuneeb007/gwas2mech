@@ -104,11 +104,17 @@ Resource groups (--groups / --skip-groups); sizes are approximate downloads:
                       population panels under resources/LD_panels/1000G30x/
                       exist)                                                  ~28 GB
   adsp_eqtl           ADSP FunGen brain bulk eQTL + single-nucleus eQTL       ~720 GB
+  scperturb           scPerturb v1.4 harmonised RNA/protein .h5ad files         ~43 GB
+  lincs               LINCS Phase I Level 5 signatures + analysis metadata     ~22 GB
+  reactome            Reactome 97 pathway hierarchy, gene mapping and GMT         <1 GB
+  biogrid             BioGRID 5.0.262 all + multi-validated physical PPI          <1 GB
 
 Layouts match the pipeline: dense QTL files under
 resources/coloc/eqtl_catalogue/dense/<dataset_id>/ (as Step09
 expect), other molecular QTL under resources/molecular_qtl/<type>/<source>/,
 annotation under resources/annotation/<source>/.
+Perturbation resources are kept under resources/perturbation/, Reactome under
+resources/pathways/reactome/, and BioGRID under resources/interactions/biogrid/.
 
 Step08 (local variant annotation) uses: vep (VEP 116 cache), genome (GRCh38
 FASTA + GENCODE GTF), annotation (AlphaMissense - tabix-indexed here -, ClinVar,
@@ -145,7 +151,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import io
+import json
 import re
 import shutil
 import subprocess
@@ -234,10 +242,25 @@ GNOMAD_CONSTRAINT = ("https://storage.googleapis.com/gcp-public-data--gnomad/rel
 UCSC = "https://hgdownload.soe.ucsc.edu/goldenPath"
 CADD = "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38"
 
+# --- Perturbation / pathway benchmark resources (large; opt-in only) ---
+# A fixed Zenodo record preserves the exact scPerturb v1.4 collection used by a
+# benchmark.  The API supplies every file's byte count and provider MD5.
+SCPERTURB_RECORD = "13350497"
+SCPERTURB_API = f"https://zenodo.org/api/records/{SCPERTURB_RECORD}"
+LINCS_GSE = "GSE92742"
+LINCS_BASE = f"https://ftp.ncbi.nlm.nih.gov/geo/series/GSE92nnn/{LINCS_GSE}/suppl"
+REACTOME_RELEASE = "97"
+REACTOME_BASE = f"https://reactome.org/download/{REACTOME_RELEASE}"
+BIOGRID_RELEASE = "5.0.262"
+BIOGRID_BASE = ("https://downloads.thebiogrid.org/Download/BioGRID/Release-Archive/"
+                f"BIOGRID-{BIOGRID_RELEASE}")
+
 GROUPS = ["gwas_catalog", "genome", "1000g", "vep", "gtex", "eqtl_catalogue", "opentargets",
           "qtl_catalogue", "qtl_celltype", "molecular_qtl", "meqtl", "annotation", "cadd",
-          "qtl_catalogue_susie", "adsp_eqtl", "1000g30x"]
-OPTIONAL_GROUPS = {"qtl_catalogue_susie", "adsp_eqtl", "1000g30x"}   # only when named in --groups
+          "qtl_catalogue_susie", "adsp_eqtl", "1000g30x", "scperturb", "lincs", "reactome",
+          "biogrid"]
+OPTIONAL_GROUPS = {"qtl_catalogue_susie", "adsp_eqtl", "1000g30x", "scperturb", "lincs",
+                   "reactome", "biogrid"}   # only when named in --groups
 
 
 # =============================================================================
@@ -250,7 +273,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--groups", nargs="+", choices=GROUPS,
                     default=[g for g in GROUPS if g not in OPTIONAL_GROUPS],
                     help="Resource groups to include (default: all except qtl_catalogue_susie, adsp_eqtl, "
-                         "1000g30x).")
+                         "1000g30x and the perturbation benchmark groups).")
 parser.add_argument("--skip-groups", nargs="+", choices=GROUPS, default=[],
                     help="Resource groups to leave out.")
 parser.add_argument("--template", default="HPC_CPU.sh",
@@ -355,14 +378,15 @@ def local_file_valid(path: Path, expected_size: int | None = None) -> bool:
 
 # =============================================================================
 # FILE ITEMS  (one item = one file = one SLURM array task)
-#   post  : - | fasta (decompress + faidx) | tar (extract into post_dir)
+#   post  : - | fasta (decompress + faidx) | tar / zip (extract into post_dir)
 #           | tabix (index a bgzip TSV: chrom col 1, position col 2, '#' header lines)
 #           | bed-tabix (plain BED-like TSV with one header line -> sorted <dest>.gz + .tbi;
 #             the plain file is removed afterwards)
 #           | lbf-tabix (eQTL Catalogue SuSiE lbf_variable file, ordered by molecular trait ->
 #             position-sorted bgzip <name>.sorted.tsv.gz + .tbi, read by locus in Step09 / Step10;
 #             the unsorted download is removed once the row counts match)
-#   check : - | gzip | tar | parquet       (integrity test after download)
+#   check : - | gzip | tar | zip | parquet | md5:<hex> | sha512:<hex>
+#           (integrity test after download)
 #   mutable: "latest"/"master" URLs whose size may change before download,
 #            so their size is reported but not enforced.
 # =============================================================================
@@ -840,6 +864,85 @@ def annotation_items() -> list[dict]:
     return items
 
 
+# -----------------------------------------------------------------------------
+# Perturbation benchmark data (all groups are opt-in because they add ~65 GB)
+# -----------------------------------------------------------------------------
+
+def perturbation_items(notes: list[str]) -> list[dict]:
+    items: list[dict] = []
+
+    if "scperturb" in SELECTED_GROUPS:
+        try:
+            with http_open(SCPERTURB_API, timeout=120) as response:
+                record = json.load(response)
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            sys.exit(f"ERROR: cannot read the scPerturb Zenodo record {SCPERTURB_RECORD} ({exc}).")
+
+        files = [f for f in record.get("files", []) if str(f.get("key", "")).endswith(".h5ad")]
+        if not files:
+            sys.exit(f"ERROR: scPerturb Zenodo record {SCPERTURB_RECORD} contains no .h5ad files.")
+        root = Path("resources/perturbation/scperturb") / f"v{record.get('metadata', {}).get('version', '1.4')}"
+        for file in files:
+            name = Path(str(file["key"])).name
+            checksum = str(file.get("checksum", ""))
+            check = checksum if re.fullmatch(r"md5:[0-9a-fA-F]{32}", checksum) else "-"
+            url = str(file.get("links", {}).get("self", ""))
+            if not url:
+                sys.exit(f"ERROR: scPerturb Zenodo record has no download URL for {name}.")
+            items.append(item("SCPERTURB_H5AD", "scperturb", url, root / name,
+                              check=check, size=int(file.get("size") or 0) or None))
+        # Preserve the provider record alongside the matrices for provenance.
+        items.append(item("SCPERTURB_METADATA", "scperturb", SCPERTURB_API,
+                          root / f"zenodo_record_{SCPERTURB_RECORD}.json", mutable=True))
+        notes.append(f"scperturb: fixed Zenodo record {SCPERTURB_RECORD}, {len(files)} MD5-checked .h5ad files")
+
+    if "lincs" in SELECTED_GROUPS:
+        root = Path("resources/perturbation/lincs") / LINCS_GSE
+        checksum_name = "GSE92742_SHA512SUMS.txt.gz"
+        try:
+            with http_open(f"{LINCS_BASE}/{checksum_name}", timeout=120) as response:
+                checksum_text = gzip.GzipFile(fileobj=response).read().decode("utf-8")
+            sha512 = {parts[1].lstrip("*"): parts[0].lower()
+                      for line in checksum_text.splitlines()
+                      if len(parts := line.split(maxsplit=1)) == 2 and re.fullmatch(r"[0-9a-fA-F]{128}", parts[0])}
+        except (urllib.error.URLError, OSError, UnicodeError) as exc:
+            sys.exit(f"ERROR: cannot read the LINCS SHA-512 manifest ({exc}).")
+        files = [
+            ("LINCS_LEVEL5", "GSE92742_Broad_LINCS_Level5_COMPZ.MODZ_n473647x12328.gctx.gz", "gzip"),
+            ("LINCS_CELL_INFO", "GSE92742_Broad_LINCS_cell_info.txt.gz", "gzip"),
+            ("LINCS_GENE_INFO", "GSE92742_Broad_LINCS_gene_info.txt.gz", "gzip"),
+            ("LINCS_PERT_INFO", "GSE92742_Broad_LINCS_pert_info.txt.gz", "gzip"),
+            ("LINCS_SIG_INFO", "GSE92742_Broad_LINCS_sig_info.txt.gz", "gzip"),
+            ("LINCS_README", "GSE92742_Broad_LINCS_README.pdf", "-"),
+            ("LINCS_CHECKSUMS", checksum_name, "gzip"),
+        ]
+        items += [item(resource, "lincs", f"{LINCS_BASE}/{name}", root / name,
+                       check=f"sha512:{sha512[name]}" if name in sha512 else check)
+                  for resource, name, check in files]
+
+    if "reactome" in SELECTED_GROUPS:
+        root = Path("resources/pathways/reactome") / f"release{REACTOME_RELEASE}"
+        for name in ("ReactomePathways.txt", "ReactomePathwaysRelation.txt",
+                     "Ensembl2Reactome_All_Levels.txt"):
+            items.append(item("REACTOME", "reactome", f"{REACTOME_BASE}/{name}", root / name))
+        name = "ReactomePathways.gmt.zip"
+        items.append(item("REACTOME_GMT", "reactome", f"{REACTOME_BASE}/{name}", root / name,
+                          check="zip", post="zip", post_dir=root / "gmt", post_marker=".complete"))
+
+    if "biogrid" in SELECTED_GROUPS:
+        root = Path("resources/interactions/biogrid") / f"v{BIOGRID_RELEASE}"
+        for resource, name, directory in [
+            ("BIOGRID_ALL_TAB3", f"BIOGRID-ALL-{BIOGRID_RELEASE}.tab3.zip", "all_tab3"),
+            ("BIOGRID_MV_PHYSICAL", f"BIOGRID-MV-Physical-{BIOGRID_RELEASE}.mitab.zip",
+             "mv_physical_mitab"),
+        ]:
+            items.append(item(resource, "biogrid", f"{BIOGRID_BASE}/{name}", root / name,
+                              check="zip", post="zip", post_dir=root / directory,
+                              post_marker=".complete"))
+
+    return items
+
+
 # =============================================================================
 # STATUS
 # =============================================================================
@@ -848,7 +951,7 @@ def post_done(entry: dict) -> bool:
     if entry["post"] == "fasta":
         fasta = ROOT / entry["dest"][: -len(".gz")]
         return local_file_valid(fasta) and local_file_valid(Path(str(fasta) + ".fai"))
-    if entry["post"] in ("tar", "tar-rm"):   # marker written after a successful extraction
+    if entry["post"] in ("tar", "tar-rm", "zip", "zip-rm"):  # marker after successful extraction
         return (ROOT / entry["post_dir"] / entry["post_marker"]).is_file()
     if entry["post"] == "tabix":
         return local_file_valid(ROOT / entry["dest"]) and local_file_valid(ROOT / (entry["dest"] + ".tbi"))
@@ -1036,6 +1139,10 @@ md5_of() {
     if command -v md5sum >/dev/null 2>&1; then md5sum "$1" | cut -d' ' -f1; else md5 -q "$1"; fi
 }
 
+sha512_of() {
+    if command -v sha512sum >/dev/null 2>&1; then sha512sum "$1" | cut -d' ' -f1; else shasum -a 512 "$1" | cut -d' ' -f1; fi
+}
+
 # -----------------------------------------------------------------------------
 # download: aria2c (resumable via .aria2), else curl/wget into <file>.part
 # -----------------------------------------------------------------------------
@@ -1175,8 +1282,10 @@ integrity() {
     case "$CHECK" in
         gzip)    if [[ -n "$PIGZ" ]]; then "$PIGZ" -t "$OUT"; else gzip -t "$OUT"; fi ;;
         tar)     tar -tf "$OUT" >/dev/null ;;
+        zip)     [[ -n "$PYTHON" ]] && "$PYTHON" -m zipfile -t "$OUT" >/dev/null ;;
         parquet) [[ "$(tail -c 4 "$OUT")" == "PAR1" ]] ;;
         md5:*)   log "computing MD5 ..."; [[ "$(md5_of "$OUT")" == "${CHECK#md5:}" ]] ;;
+        sha512:*) log "computing SHA-512 ..."; [[ "$(sha512_of "$OUT")" == "${CHECK#sha512:}" ]] ;;
         *)       return 0 ;;
     esac
 }
@@ -1201,6 +1310,16 @@ post_process() {
             touch "$ROOT/$PDIR/$PMARKER"
             log "extracted: $PDIR/$PMARKER"
             if [[ "$POST" == "tar-rm" ]]; then
+                rm -f "$OUT"; log "removed the verified archive to save space: ${OUT#$ROOT/}"
+            fi ;;
+        zip|zip-rm)
+            [[ -n "$PYTHON" ]] || { log "ERROR: python not found (run Step00_Installation.py first)"; return 1; }
+            mkdir -p "$ROOT/$PDIR"
+            log "extracting -> $PDIR"
+            "$PYTHON" -m zipfile -e "$OUT" "$ROOT/$PDIR" || return 1
+            touch "$ROOT/$PDIR/$PMARKER"
+            log "extracted: $PDIR/$PMARKER"
+            if [[ "$POST" == "zip-rm" ]]; then
                 rm -f "$OUT"; log "removed the verified archive to save space: ${OUT#$ROOT/}"
             fi ;;
         tabix)
@@ -1632,7 +1751,8 @@ def main() -> int:
     print("\nCollecting file list ...")
     notes: list[str] = []
     entries = (static_items(notes) + eqtl_catalogue_items(notes) + opentargets_items()
-               + catalogue_qtl_items() + molecular_qtl_items() + annotation_items())
+               + catalogue_qtl_items() + molecular_qtl_items() + annotation_items()
+               + perturbation_items(notes))
     # One task per FILE: the same file can be wanted by two groups (e.g. a dense file
     # that the repair group and qtl_catalogue both list) - keep the first.
     entries = list({e["dest"]: e for e in reversed(entries)}.values())[::-1]
@@ -1715,8 +1835,8 @@ def main() -> int:
     ])
 
     total_bytes = sum(e["size"] or 0 for e in pending)
-    # tar-rm archives are deleted after extraction, so they need no extra space at the end.
-    extract_bytes = sum(e["size"] or 0 for e in pending if e["post"] in ("tar", "fasta"))
+    # *-rm archives are deleted after extraction, so they need no extra space at the end.
+    extract_bytes = sum(e["size"] or 0 for e in pending if e["post"] in ("tar", "zip", "fasta"))
     free = shutil.disk_usage(ROOT).free
 
     # A single file this big may not finish within one walltime; re-running resumes it.
