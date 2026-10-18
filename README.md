@@ -426,7 +426,7 @@ default download plan. Each source is versioned or accompanied by provider prove
 |---|---|---|---|
 | `scperturb` | [scPerturb v1.4 on Zenodo](https://zenodo.org/records/13350497) | 54 harmonised RNA/protein `.h5ad` matrices (about 43 GB), each checked against its provider MD5, plus the Zenodo record JSON | `resources/perturbation/scperturb/v1.4/` |
 | `lincs` | [NCBI GEO GSE92742](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE92742) | processed Level 5 MODZ signatures (about 20 GB), cell/gene/perturbagen/signature metadata and README; the matrix and metadata are checked against the provider SHA-512 manifest | `resources/perturbation/lincs/GSE92742/` |
-| `reactome` | [Reactome release 97](https://reactome.org/download/97/) | pathway list, parent-child hierarchy, all-level Ensembl mapping and extracted GMT gene sets | `resources/pathways/reactome/release97/` |
+| `reactome` | [Reactome release 97](https://reactome.org/download/97/) and [current downloads](https://reactome.org/download/current/) | pinned pathway list, parent-child hierarchy, all-level Ensembl mapping and extracted GMT gene sets; also the current GMT ZIP, validated as an intact archive containing exactly one `.gmt` file | `resources/pathways/reactome/release97/` and `resources/pathways/reactome/manual/ReactomePathways.gmt.zip` |
 | `biogrid` | [BioGRID release 5.0.262](https://downloads.thebiogrid.org/Download/BioGRID/Release-Archive/BIOGRID-5.0.262/) | extracted Tab 3 interaction archive and multi-validated physical-interaction MITAB archive | `resources/interactions/biogrid/v5.0.262/` |
 
 ```bash
@@ -438,6 +438,17 @@ sbatch Step00_Download_Perturbation.sh
 
 # Read-only progress report; the generated final job also runs this check.
 envs/pipeline/bin/python Step00_Download_Resources.py --status
+```
+
+The `reactome` group keeps release 97 as the reproducible analysis snapshot and also downloads the
+provider's mutable current GMT archive to
+`resources/pathways/reactome/manual/ReactomePathways.gmt.zip`. To prepare only the Reactome resources:
+
+```bash
+envs/pipeline/bin/python Step00_Download_Resources.py \
+  --groups reactome \
+  --output Step00_Download_Reactome.sh
+sbatch Step00_Download_Reactome.sh
 ```
 
 For a smaller first run, select one group at a time with the same `--groups` option. The LINCS group uses the

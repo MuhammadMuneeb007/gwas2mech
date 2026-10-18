@@ -251,6 +251,7 @@ LINCS_GSE = "GSE92742"
 LINCS_BASE = f"https://ftp.ncbi.nlm.nih.gov/geo/series/GSE92nnn/{LINCS_GSE}/suppl"
 REACTOME_RELEASE = "97"
 REACTOME_BASE = f"https://reactome.org/download/{REACTOME_RELEASE}"
+REACTOME_CURRENT_BASE = "https://reactome.org/download/current"
 BIOGRID_RELEASE = "5.0.262"
 BIOGRID_BASE = ("https://downloads.thebiogrid.org/Download/BioGRID/Release-Archive/"
                 f"BIOGRID-{BIOGRID_RELEASE}")
@@ -385,7 +386,7 @@ def local_file_valid(path: Path, expected_size: int | None = None) -> bool:
 #           | lbf-tabix (eQTL Catalogue SuSiE lbf_variable file, ordered by molecular trait ->
 #             position-sorted bgzip <name>.sorted.tsv.gz + .tbi, read by locus in Step09 / Step10;
 #             the unsorted download is removed once the row counts match)
-#   check : - | gzip | tar | zip | parquet | md5:<hex> | sha512:<hex>
+#   check : - | gzip | tar | zip | reactome-gmt | parquet | md5:<hex> | sha512:<hex>
 #           (integrity test after download)
 #   mutable: "latest"/"master" URLs whose size may change before download,
 #            so their size is reported but not enforced.
@@ -928,6 +929,13 @@ def perturbation_items(notes: list[str]) -> list[dict]:
         name = "ReactomePathways.gmt.zip"
         items.append(item("REACTOME_GMT", "reactome", f"{REACTOME_BASE}/{name}", root / name,
                           check="zip", post="zip", post_dir=root / "gmt", post_marker=".complete"))
+        # Keep the provider's current GMT archive at the user-facing manual
+        # location as well. This URL is mutable, whereas releaseXX above is the
+        # reproducible snapshot used for a recorded analysis.
+        manual_root = Path("resources/pathways/reactome/manual")
+        items.append(item("REACTOME_GMT_CURRENT", "reactome",
+                          f"{REACTOME_CURRENT_BASE}/{name}", manual_root / name,
+                          check="reactome-gmt", mutable=True))
 
     if "biogrid" in SELECTED_GROUPS:
         root = Path("resources/interactions/biogrid") / f"v{BIOGRID_RELEASE}"
@@ -1283,6 +1291,8 @@ integrity() {
         gzip)    if [[ -n "$PIGZ" ]]; then "$PIGZ" -t "$OUT"; else gzip -t "$OUT"; fi ;;
         tar)     tar -tf "$OUT" >/dev/null ;;
         zip)     [[ -n "$PYTHON" ]] && "$PYTHON" -m zipfile -t "$OUT" >/dev/null ;;
+        reactome-gmt)
+            [[ -n "$PYTHON" ]] && "$PYTHON" -c 'import sys; from zipfile import ZipFile; z = ZipFile(sys.argv[1]); assert z.testzip() is None; names = [n for n in z.namelist() if n.endswith(".gmt")]; z.close(); assert len(names) == 1, f"expected exactly one GMT file, found {len(names)}"' "$OUT" ;;
         parquet) [[ "$(tail -c 4 "$OUT")" == "PAR1" ]] ;;
         md5:*)   log "computing MD5 ..."; [[ "$(md5_of "$OUT")" == "${CHECK#md5:}" ]] ;;
         sha512:*) log "computing SHA-512 ..."; [[ "$(sha512_of "$OUT")" == "${CHECK#sha512:}" ]] ;;
