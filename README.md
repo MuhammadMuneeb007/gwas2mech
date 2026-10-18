@@ -253,7 +253,7 @@ Every later command uses the project's own interpreter, **`envs/pipeline/bin/pyt
 | `envs/pops` | PoPS (pinned commit) |
 | `envs/gentropy` | Open Targets Gentropy 3.4.0; Python 3.11, PySpark 3.5.x and OpenJDK 11 |
 | `envs/echolocatoR` | echolocatoR 3.0.0 and its echoverse R dependencies; R 4.4 |
-| `envs/perturb` | Pertpy 1.4.0 (`de` extra), Scanpy 1.12.4, decoupler 2.2.0, OmniPath 1.0.12 and cmapPy 4.0.1; Python 3.12 |
+| `envs/perturb` | Pertpy/Scanpy perturbation stack: Pertpy 1.4.0 (`de` extra), Scanpy 1.12.4, AnnData 0.13.4, decoupler 2.2.0, GSEApy 1.3.1, OmniPath 1.0.12, cmapPy 4.0.1, pandas 2.3.3, SciPy 1.18.1 and h5py 3.16.0; Python 3.12 |
 | `external_tools/magma` | MAGMA v1.10 (official binary, SHA-256 verified) |
 
 ### Install the independent benchmark frameworks
@@ -293,7 +293,7 @@ Exact installed versions are written for the manuscript and reproducibility arch
 | `setup_manifests/env_echolocatoR.R_packages.tsv` | exact installed R package versions and library paths |
 | `setup_manifests/echolocatoR.ref.txt` | pinned release tag and Git commit |
 | `setup_manifests/env_perturb.conda_list.txt` | exact Python and Conda packages in the perturbation environment |
-| `setup_manifests/env_perturb.pip_freeze.txt` | exact resolved Pertpy/Scanpy/decoupler/OmniPath/cmapPy dependency stack |
+| `setup_manifests/env_perturb.pip_freeze.txt` | exact resolved single-cell, activity-inference, pathway and LINCS dependency stack |
 
 Manual checks, if needed:
 
@@ -314,18 +314,51 @@ conda deactivate
 
 The perturbation stack is isolated under `envs/perturb`, so installing or updating it cannot change
 `envs/pipeline`. Current Pertpy and Scanpy releases require Python 3.12; the installer therefore creates
-that interpreter independently and pins every requested top-level package. Run this on a compute node:
+that interpreter independently and pins every requested top-level package. Do not install this stack into
+`envs/pipeline`, which is the frozen Python 3.11 production environment. Run this on a compute node:
 
 ```bash
+cd /data/ascher02/uqmmune1/Splice2/GWAS2m
+
 module load miniforge/26.1.0-0
 source "$ROOTMINIFORGE/etc/profile.d/conda.sh"
 
 python Step00_Installation.py --only perturb
 python Step00_Installation.py --verify-only --only perturb
 
-conda activate "$PWD/envs/perturb"
-python -c "import pertpy, scanpy, decoupler, omnipath, cmapPy; print('perturbation stack imported successfully')"
-conda deactivate
+envs/perturb/bin/python - <<'PY'
+import scanpy
+import anndata
+import pertpy
+import decoupler
+import gseapy
+import omnipath
+import pandas
+import scipy
+import h5py
+from cmapPy.pandasGEXpress import parse
+print("Perturbation environment ready")
+PY
+```
+
+The direct equivalent, if the project installer cannot be used, is:
+
+```bash
+cd /data/ascher02/uqmmune1/Splice2/GWAS2m
+
+conda create -y -p "$PWD/envs/perturb" -c conda-forge python=3.12 pip
+
+envs/perturb/bin/python -m pip install \
+  "scanpy==1.12.4" \
+  "anndata==0.13.4" \
+  "pertpy[de]==1.4.0" \
+  "decoupler==2.2.0" \
+  "gseapy==1.3.1" \
+  "omnipath==1.0.12" \
+  "cmapPy==4.0.1" \
+  "pandas==2.3.3" \
+  "scipy==1.18.1" \
+  "h5py==3.16.0"
 ```
 
 This environment supports differential expression, single-cell matrix processing, molecular-activity

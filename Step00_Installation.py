@@ -233,8 +233,24 @@ SCANPY_SPEC = "scanpy==1.12.4"
 DECOUPLER_SPEC = "decoupler==2.2.0"
 OMNIPATH_SPEC = "omnipath==1.0.12"
 CMAPPY_SPEC = "cmapPy==4.0.1"
+ANNDATA_SPEC = "anndata==0.13.4"
+GSEAPY_PERTURB_SPEC = "gseapy==1.3.1"
+PANDAS_PERTURB_SPEC = "pandas==2.3.3"
+SCIPY_PERTURB_SPEC = "scipy==1.18.1"
+H5PY_SPEC = "h5py==3.16.0"
 PERTURB_CONDA = ["python=3.12", "pip"]
-PERTURB_PIP = [PERTPY_SPEC, SCANPY_SPEC, DECOUPLER_SPEC, OMNIPATH_SPEC, CMAPPY_SPEC]
+PERTURB_PIP = [
+    SCANPY_SPEC,
+    ANNDATA_SPEC,
+    PERTPY_SPEC,
+    DECOUPLER_SPEC,
+    GSEAPY_PERTURB_SPEC,
+    OMNIPATH_SPEC,
+    CMAPPY_SPEC,
+    PANDAS_PERTURB_SPEC,
+    SCIPY_PERTURB_SPEC,
+    H5PY_SPEC,
+]
 
 # --- MAGMA v1.10 (CTG lab; official binaries, SHA-256 verified) ---
 #     NOTE: the conda package called "magma" is an unrelated GPU linear-algebra
@@ -432,6 +448,11 @@ PYTHON_PACKAGES = [
     ("decoupler", "decoupler", "perturb", True, None, "pip", DECOUPLER_SPEC, "activity inference"),
     ("omnipath", "omnipath", "perturb", True, None, "pip", OMNIPATH_SPEC, "molecular prior knowledge"),
     ("cmapPy", "cmapPy", "perturb", True, None, "pip", CMAPPY_SPEC, "LINCS GCTX access"),
+    ("anndata", "anndata", "perturb", True, None, "pip", ANNDATA_SPEC, "single-cell data model"),
+    ("gseapy", "gseapy", "perturb", True, None, "pip", GSEAPY_PERTURB_SPEC, "pathway enrichment"),
+    ("pandas", "pandas", "perturb", True, None, "pip", PANDAS_PERTURB_SPEC, "data tables"),
+    ("scipy", "scipy", "perturb", True, None, "pip", SCIPY_PERTURB_SPEC, "scientific computing"),
+    ("h5py", "h5py", "perturb", True, None, "pip", H5PY_SPEC, "HDF5/GCTX access"),
 ]
 
 # name, required, step, spec, used by
@@ -495,7 +516,8 @@ RUNTIME_CHECKS = [
     ("gentropy", "Gentropy / PySpark 3.5 compatibility",
      "import gentropy, pyspark; assert pyspark.__version__.split('.')[:2] == ['3', '5']"),
     ("perturb", "Pertpy differential-expression and perturbation stack",
-     "import pertpy, scanpy, decoupler, omnipath, cmapPy"),
+     "import scanpy, anndata, pertpy, decoupler, gseapy, omnipath, pandas, scipy, h5py; "
+     "from cmapPy.pandasGEXpress import parse"),
 ]
 
 # Runtime checks that run a command (component, label, command).
@@ -1237,7 +1259,7 @@ def install_perturb(pms: list[str]) -> None:
     python = env_bin(PERTURB_ENV, "python")
     run([python, "-m", "pip", "install", "--upgrade", "pip"], label="pip: upgrade installer")
     run([python, "-m", "pip", "install", "--upgrade", *PERTURB_PIP],
-        label="pip: Pertpy + Scanpy + decoupler + OmniPath + cmapPy")
+        label="pip: single-cell, activity, pathway and LINCS perturbation stack")
 
 
 def _sha256(path: Path) -> str:
