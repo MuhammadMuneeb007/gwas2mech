@@ -1128,7 +1128,7 @@ valid() {
 post_done() {
     case "$POST" in
         fasta) [[ -s "${OUT%.gz}" && -s "${OUT%.gz}.fai" ]] ;;
-        tar|tar-rm) [[ -e "$ROOT/$PDIR/$PMARKER" ]] ;;
+        tar|tar-rm|zip|zip-rm) [[ -e "$ROOT/$PDIR/$PMARKER" ]] ;;
         tabix) [[ -s "$OUT" && -s "$OUT.tbi" ]] ;;
         bed-tabix) [[ -s "$OUT.gz" && -s "$OUT.gz.tbi" ]] ;;
         lbf-tabix) [[ -s "$(lbf_index "$OUT")" && -s "$(lbf_index "$OUT").tbi" ]] ;;
@@ -1642,8 +1642,48 @@ def file_state(row: dict) -> tuple[str, int]:
             return "PARTIAL", sum(p.stat().st_size for p in partial)
         return "MISSING", 0
 
-    if post_dir != "-" and (ROOT / post_dir / marker).is_file():
-        return "DONE", expected or (dest.stat().st_size if dest.is_file() else 0)
+    if post == "fasta":
+        prepared = Path(str(dest)[:-3]) if str(dest).endswith(".gz") else dest
+        index = Path(str(prepared) + ".fai")
+        if local_file_valid(prepared) and local_file_valid(index):
+            return "DONE", expected or prepared.stat().st_size
+        partial = [p for p in (dest, Path(str(dest) + ".part"), prepared, index)
+                   if p.is_file() and p.stat().st_size > 0]
+        if partial or Path(str(dest) + ".aria2").exists():
+            return "PARTIAL", sum(p.stat().st_size for p in partial)
+        return "MISSING", 0
+
+    if post == "tabix":
+        index = Path(str(dest) + ".tbi")
+        if local_file_valid(dest) and local_file_valid(index):
+            return "DONE", expected or dest.stat().st_size
+        partial = [p for p in (dest, Path(str(dest) + ".part"), index)
+                   if p.is_file() and p.stat().st_size > 0]
+        if partial or Path(str(dest) + ".aria2").exists():
+            return "PARTIAL", sum(p.stat().st_size for p in partial)
+        return "MISSING", 0
+
+    if post == "bed-tabix":
+        prepared = Path(str(dest) + ".gz")
+        index = Path(str(prepared) + ".tbi")
+        if local_file_valid(prepared) and local_file_valid(index):
+            return "DONE", expected or prepared.stat().st_size
+        partial = [p for p in (dest, Path(str(dest) + ".part"),
+                               Path(str(prepared) + ".part"), prepared, index)
+                   if p.is_file() and p.stat().st_size > 0]
+        if partial or Path(str(dest) + ".aria2").exists():
+            return "PARTIAL", sum(p.stat().st_size for p in partial)
+        return "MISSING", 0
+
+    if post in ("tar", "tar-rm", "zip", "zip-rm"):
+        if post_dir != "-" and (ROOT / post_dir / marker).is_file():
+            return "DONE", expected or (dest.stat().st_size if dest.is_file() else 0)
+        partial = [p for p in (dest, Path(str(dest) + ".part"))
+                   if p.is_file() and p.stat().st_size > 0]
+        if partial or Path(str(dest) + ".aria2").exists():
+            return "PARTIAL", max((p.stat().st_size for p in partial), default=0)
+        return "MISSING", 0
+
     if local_file_valid(dest, expected):
         return "DONE", dest.stat().st_size
     partial = [p for p in (dest, Path(str(dest) + ".part")) if p.is_file() and p.stat().st_size > 0]
