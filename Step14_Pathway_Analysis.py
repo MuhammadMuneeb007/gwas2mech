@@ -3,7 +3,7 @@
 
 """
 ================================================================================
-GWAS2m STEP 14 v3.3
+GWAS2m STEP 14 v3.2
 PUBLICATION-GRADE GENE PRIORITISATION + PATHWAY ENRICHMENT + OT COMPARISON
 ================================================================================
 
@@ -14,17 +14,12 @@ GWAS2Mech PIPELINE USAGE (same flags in Steps 12-17)
     sbatch Step14_Pathways_parkinson_s_disease_european.sh
     envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --status
     envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats
-    envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --stats-all         # every baseline pathway sensitivity row
     envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --index 2             # study 2 only -> <ancestry>/<GCST>/
     # 1000 Genomes 30x LD panel: every input / output folder is <ancestry>_1000G30x
-    envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --check-resources
     envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x
     envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --slurm
     sbatch Step14_Pathways_parkinson_s_disease_european_1000G30x.sh
-    envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --status
     envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats
-    envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --stats-all
-    envs/pipeline/bin/python Step14_Pathway_Analysis.py --phenotype "Parkinson's disease" --ancestry EUR --reference-panel 1000G30x --index 2
 
 WHY THIS STEP EXISTS
 --------------------
@@ -252,8 +247,8 @@ GWAS2Mech pipeline options ({STEP_FRAME['NAME']}):
                             output folder is <ancestry>_<PANEL>
   --index N                 only study N of the Step02 list (results in <ancestry>[_<PANEL>]/<GCST>/)
   --status                  inputs present? results current? what to run next
-  --stats                   summaries + significant pathway sensitivity (nothing is recomputed)
-  --stats-all               print sensitivity for ALL baseline-tested pathways (may be thousands)
+   --stats                   summaries + significant pathway sensitivity (nothing is recomputed)
+   --stats-all               print sensitivity for ALL baseline-tested pathways (may be thousands)
   --check-resources         inputs, Python modules and external resources (exit 1 if not ready)
   --slurm                   write a one-job SLURM script (header of HPC_CPU.sh) instead of running
   --template --partition --qos --account --cpus --mem --time   SLURM overrides for --slurm
@@ -2938,6 +2933,7 @@ def pathway_redundancy(
             assigned = None
 
             best_j = 0.0
+            best_rep = None
 
             for cluster in clusters:
                 rep = cluster[
@@ -2962,6 +2958,10 @@ def pathway_redundancy(
                 ):
                     best_j = score
                     assigned = cluster
+                    best_rep = cluster[
+                        "rep_name"
+                    ]
+
             if assigned is None:
                 cluster_id += 1
 
@@ -2981,6 +2981,10 @@ def pathway_redundancy(
                 clusters.append(
                     assigned
                 )
+
+                best_rep = row[
+                    "TERM_NAME"
+                ]
 
             rows.append(
                 {
