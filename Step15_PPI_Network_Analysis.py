@@ -3,8 +3,8 @@
 
 """
 ================================================================================
-GWAS2m STEP15 v1.0
-PPI / NETWORK ANALYSIS WITH STRING + OPTIONAL BioGRID CROSS-VALIDATION
+GWAS2m STEP15 v1.1
+NETWORK EVIDENCE AUDIT WITH STRING + OPTIONAL BIOGRID + GENE BIOTYPES
 ================================================================================
 
 GWAS2Mech PIPELINE USAGE (same flags in Steps 12-17)
@@ -140,6 +140,12 @@ OUTPUTS
     Step15_STRING_Expanded_Physical.svg
 
     Step15_QC_Audit.tsv
+    Step15_Gene_Biotype_Audit.tsv
+    Step15_Primary_Direct_Physical_Edges.tsv
+    Step15_Primary_Network_Centrality.tsv
+    Step15_Pathway_Network_Evidence.tsv
+    Step15_Gene_Pathway_Handoff.tsv
+    Step15_BioGRID_Physical_Interactions.tsv
     Step15_summary.json
 ================================================================================
 """
@@ -215,7 +221,15 @@ STEP_FRAME = {
          "NETWORK CENTRALITY"),
         ("Step15_STRING_PPI_Enrichment.tsv", ["GENE_SET", "N_INPUT_GENES", "N_MAPPED_PROTEINS", "number_of_nodes",
                                               "number_of_edges", "expected_number_of_edges", "p_value",
-                                              "INTERPRETATION"], "", "PPI ENRICHMENT"),
+                                              "PPI_BH_FDR_ACROSS_TESTED_SETS", "PPI_FDR_SIGNIFICANT", "INTERPRETATION"], "", "PPI ENRICHMENT"),
+        ("Step15_Primary_Network_Centrality.tsv", ["GENE_SYMBOL", "GENE_ID", "DEGREE", "BETWEENNESS", "PAGERANK"],
+         "DEGREE", "PRIMARY GWAS-ONLY PHYSICAL NETWORK"),
+        ("Step15_Gene_Biotype_Audit.tsv", ["GENE_ID", "GENE_SYMBOL_ENSEMBL", "GENE_BIOTYPE", "BIOTYPE_CLASS", "BIOTYPE_SOURCE"],
+         "", "GENE BIOTYPE AUDIT"),
+        ("Step15_Pathway_Network_Evidence.tsv", ["SOURCE", "TERM_ID", "TERM_NAME", "FDR", "N_PRIMARY_GENES_ANNOTATED",
+                                                       "N_DIRECT_PRIMARY_STRING_EDGES", "REGION_LOO_FRAC_SIGNIFICANT",
+                                                       "GENE_LOO_FRAC_SIGNIFICANT", "MECHANISTIC_DIRECTION"],
+         "", "PATHWAY / NETWORK EVIDENCE"),
     ],
 }
 
@@ -520,7 +534,7 @@ def pipeline_main(run) -> None:
 # ============================ end of pipeline frame ===========================
 
 
-VERSION = "1.0.1"
+VERSION = "1.1.0-mechanism-network-audited"
 
 ANCESTRY = {
     "eur": ("EUR", "European"),
@@ -946,6 +960,31 @@ class CachedHTTP:
         self.session.headers.update({
             "User-Agent": "GWAS2m-Step15/1.0 network-analysis"
         })
+
+    def post_json(self, url, payload, retries=3):
+        """Cached JSON POST, required for Ensembl's documented /lookup/id API."""
+        cache_path = self._cache_path("POST_JSON", url, payload, extension="json")
+        if cache_path.exists():
+            return json.loads(cache_path.read_text(encoding="utf-8"))
+        for attempt in range(1, retries + 1):
+            try:
+                elapsed = time.time() - self._last_call
+                if elapsed < self.min_interval:
+                    time.sleep(self.min_interval - elapsed)
+                response = self.session.post(
+                    url, json=payload,
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                    timeout=self.timeout,
+                )
+                self._last_call = time.time()
+                response.raise_for_status()
+                data = response.json()
+                cache_path.write_text(json.dumps(data), encoding="utf-8")
+                return data
+            except Exception:
+                if attempt == retries:
+                    raise
+                time.sleep(attempt * 2)
 
     def _cache_path(self, method, url, params, extension="txt"):
         payload = json.dumps(
@@ -1632,7 +1671,9 @@ def network_node_table(
                 gene_sets,
                 known_gene_ids,
             )
-            is_seed = "YES"
+            is_seed = "NO" if node_class == "OTHER_SEED" else "YES"
+            if node_class == "OTHER_SEED":
+                node_class = "OTHER_STEP14_GENE_AS_CONNECTOR"
         else:
             node_class = "CONNECTOR"
             is_seed = "NO"
@@ -2557,6 +2598,202 @@ def print_plain_english(
     )
 
 
+
+# =============================================================================
+# GWAS2Mech Step15 v1.1: methodological audit and Step16 handoff
+# =============================================================================
+
+def include_external_top1_genes(ranking, gene_sets):
+    """Map external Open Targets genes without falsely assigning internal H4 support."""
+    existing = set(ranking["EFFECTOR_GENE_ID"].map(clean_gene_id))
+    extra_ids = sorted({clean_gene_id(x) for x in gene_sets.get("OPEN_TARGETS_TOP1", [])
+                        if clean_gene_id(x) and clean_gene_id(x) not in existing})
+    if not extra_ids:
+        return ranking.copy(), []
+    extras = []
+    for gid in extra_ids:
+        row = {c: np.nan for c in ranking.columns}
+        row.update({"EFFECTOR_GENE_ID": gid, "EFFECTOR_GENE_SYMBOL": "",
+                    "MAX_H4": np.nan, "QC_SUPPORTED_STRONG": "NO",
+                    "INTERNAL_GWAS2M_CANDIDATE": "NO"})
+        extras.append(row)
+    original = ranking.copy()
+    original["INTERNAL_GWAS2M_CANDIDATE"] = "YES"
+    return pd.concat([original, pd.DataFrame(extras)], ignore_index=True), extra_ids
+
+
+def annotate_gene_biotypes(genes, http, biotype_file="", skip_lookup=False):
+    """Keep unsupported biotypes UNKNOWN, never infer biotype from gene names."""
+    ids = sorted(set(genes["EFFECTOR_GENE_ID"].map(clean_gene_id)) - {""})
+    annotations = {}
+    if biotype_file:
+        path = Path(biotype_file)
+        data = pd.read_csv(path, sep=None, engine="python", dtype=str)
+        idcol = next((x for x in ["GENE_ID", "EFFECTOR_GENE_ID", "gene_id", "ensembl_gene_id"] if x in data), None)
+        typecol = next((x for x in ["GENE_BIOTYPE", "gene_biotype", "gene_type", "biotype"] if x in data), None)
+        if not idcol or not typecol:
+            raise ValueError("--biotype-file needs a gene ID and gene biotype column")
+        for _, row in data.iterrows():
+            gid = clean_gene_id(row[idcol]); bt = clean_symbol(row[typecol])
+            if gid and bt:
+                annotations[gid] = {"biotype": bt, "display_name": "", "source": "USER_BIOTYPE_FILE"}
+    remaining = [x for x in ids if x not in annotations and re.fullmatch(r"ENSG\d+", x)]
+    if not skip_lookup and remaining:
+        for start in range(0, len(remaining), 200):
+            batch = remaining[start:start+200]
+            try:
+                result = http.post_json("https://rest.ensembl.org/lookup/id", {"ids":batch})
+                for gid in batch:
+                    item = result.get(gid)
+                    if isinstance(item, dict) and item.get("object_type", "Gene") == "Gene":
+                        annotations[gid] = {"biotype": str(item.get("biotype") or ""),
+                                            "display_name": str(item.get("display_name") or ""),
+                                            "source": "ENSEMBL_REST"}
+            except Exception as exc:
+                print(f"[WARN] Ensembl biotype lookup unavailable for batch {start//200+1}: {exc}")
+    result = []
+    for gid in ids:
+        item = annotations.get(gid, {})
+        bt = item.get("biotype", "")
+        category = ("PROTEIN_CODING" if bt.lower() == "protein_coding" else
+                    "UNKNOWN" if not bt else "NON_PROTEIN_CODING")
+        result.append({"GENE_ID": gid, "GENE_SYMBOL_ENSEMBL": item.get("display_name", ""),
+                       "GENE_BIOTYPE": bt or "UNKNOWN", "BIOTYPE_CLASS": category,
+                       "BIOTYPE_SOURCE": item.get("source", "NOT_RESOLVED")})
+    return pd.DataFrame(result)
+
+
+def make_gene_audit(genes, mapping, gene_sets, biotypes, external_ids):
+    lut = gene_lookup_table(genes)
+    mr = mapping.drop_duplicates("GENE_ID").set_index("GENE_ID") if not mapping.empty else pd.DataFrame()
+    br = biotypes.set_index("GENE_ID") if not biotypes.empty else pd.DataFrame()
+    core = set(gene_sets.get("CORE_STRONG", []))
+    ot = set(gene_sets.get("OPEN_TARGETS_TOP1", []))
+    rows=[]
+    for gid in sorted(lut):
+        m=mr.loc[gid] if not mr.empty and gid in mr.index else {}
+        b=br.loc[gid] if not br.empty and gid in br.index else {}
+        mapped=str(m.get("MAPPED", "NO")) == "YES"
+        category=b.get("BIOTYPE_CLASS", "UNKNOWN")
+        rows.append({"GENE_ID":gid, "GENE_SYMBOL":lut[gid].get("symbol", "") or b.get("GENE_SYMBOL_ENSEMBL", ""),
+                     "IS_GWAS2M_PRIMARY":"YES" if gid in core else "NO",
+                     "IS_OPEN_TARGETS_TOP1":"YES" if gid in ot else "NO",
+                     "IS_EXTERNAL_ONLY":"YES" if gid in external_ids else "NO",
+                     "MAX_H4": lut[gid].get("max_h4", np.nan),
+                     "GENE_BIOTYPE":b.get("GENE_BIOTYPE", "UNKNOWN"), "BIOTYPE_CLASS":category,
+                     "BIOTYPE_SOURCE":b.get("BIOTYPE_SOURCE", "NOT_RESOLVED"),
+                     "STRING_ID":m.get("STRING_ID", "") if mapped else "",
+                     "STRING_MAPPING":m.get("MAPPING_METHOD", "UNRESOLVED"),
+                     "STRING_MAPPED":"YES" if mapped else "NO",
+                     "PPI_INTERPRETATION":("PROTEIN_NETWORK_ELIGIBLE" if mapped and category=="PROTEIN_CODING" else
+                         "NONCODING_NOT_REPRESENTED_BY_PPI" if category=="NON_PROTEIN_CODING" else
+                         "MAPPING_UNCERTAIN_GENE_BIOTYPE_UNKNOWN" if category=="UNKNOWN" else
+                         "PROTEIN_CODING_NOT_MAPPED_TO_STRING")})
+    return pd.DataFrame(rows)
+
+
+def physical_biogrid_only(raw):
+    if raw.empty:
+        return raw.copy()
+    if "EXPERIMENTAL_SYSTEM_TYPE" not in raw:
+        print("[WARN] BioGRID lacks experimental-system type: cannot validate physical evidence")
+        return raw.iloc[0:0].copy()
+    return raw.loc[raw["EXPERIMENTAL_SYSTEM_TYPE"].astype(str).str.casefold().str.strip()=="physical"].copy()
+
+
+def physical_biogrid_summary(string_edges, physical, attempted):
+    """Only physical BioGRID observations qualify; absence != biological negative."""
+    supported={}
+    if not physical.empty and {"SYMBOL_A","SYMBOL_B"}.issubset(physical):
+        for row in physical.to_dict("records"):
+            a=clean_symbol(row.get("SYMBOL_A","")); b=clean_symbol(row.get("SYMBOL_B",""))
+            if not a or not b:
+                continue
+            key=edge_key(a.upper(),b.upper())
+            supported.setdefault(key,[]).append(row)
+    rows=[]
+    for row in string_edges.to_dict("records"):
+        a=clean_symbol(row.get("preferredName_A","")); b=clean_symbol(row.get("preferredName_B",""))
+        evidence=supported.get(edge_key(a.upper(),b.upper()),[]) if a and b else []
+        pubs=sorted({str(r.get("PUBMED_ID", "")).strip() for r in evidence
+                     if str(r.get("PUBMED_ID","")).strip() not in ("","nan","None")})
+        rows.append({"STRING_ID_A":row.get("stringId_A", ""),"STRING_ID_B":row.get("stringId_B", ""),
+                     "SYMBOL_A":a,"SYMBOL_B":b,"STRING_SCORE":row.get("score",np.nan),
+                     "BIOGRID_PHYSICAL_EVIDENCE":("YES" if evidence else "NOT_OBSERVED" if attempted else "NOT_QUERIED"),
+                     "N_BIOGRID_PHYSICAL_RECORDS":len(evidence),"BIOGRID_PUBMED_IDS":";".join(pubs)})
+    return pd.DataFrame(rows, columns=["STRING_ID_A","STRING_ID_B","SYMBOL_A","SYMBOL_B","STRING_SCORE",
+                                             "BIOGRID_PHYSICAL_EVIDENCE","N_BIOGRID_PHYSICAL_RECORDS","BIOGRID_PUBMED_IDS"])
+
+
+def pathway_mechanism_tables(pathways, gene_sets, audit, primary_edges, sensitivity=None):
+    """Pathway membership is annotation, not proof of gene perturbation."""
+    if audit.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    core=set(gene_sets.get("CORE_STRONG", []))
+    gene_index=audit.set_index("GENE_ID")
+    gene_rows=[]; pathway_rows=[]
+    sensitivity_map = {}
+    if sensitivity is not None and not sensitivity.empty:
+        ss = sensitivity.copy()
+        if "GENE_SET" in ss:
+            ss = ss[ss["GENE_SET"].eq("CORE_STRONG")]
+        for r in ss.to_dict("records"):
+            key=(str(r.get("SOURCE","")),str(r.get("TERM_ID","")))
+            atype=str(r.get("ANALYSIS_TYPE",""))
+            if atype in {"REGION_LOO","GENE_LOO"}:
+                sensitivity_map.setdefault(key,{})[atype]=r
+    p=pathways.copy()
+    if "GENE_SET" in p:
+        p=p[p["GENE_SET"].astype(str)=="CORE_STRONG"].copy()
+    p=p.drop_duplicates([x for x in ["SOURCE","TERM_ID"] if x in p]) if not p.empty else p
+    edge_gene_pairs={edge_key(x,y) for x,y in zip(primary_edges.get("GENE_A_ID",[]), primary_edges.get("GENE_B_ID",[]))
+                     if x and y}
+    for record in p.to_dict("records"):
+        genes=[x for x in split_tokens(record.get("INTERSECTION_GENES", "")) if x in core]
+        genes=sorted(set(genes))
+        if not genes:
+            continue
+        within_edges=[pair_label(a,b) for ix,a in enumerate(genes) for b in genes[ix+1:]
+                      if edge_key(a,b) in edge_gene_pairs]
+        context={"SOURCE":record.get("SOURCE", ""), "TERM_ID":record.get("TERM_ID", ""),
+                 "TERM_NAME":record.get("TERM_NAME", ""),"FDR":record.get("FDR",np.nan)}
+        sm=sensitivity_map.get((str(context["SOURCE"]),str(context["TERM_ID"])),{})
+        for kind, prefix in (("REGION_LOO", "REGION"), ("GENE_LOO", "GENE")):
+            r=sm.get(kind,{})
+            context[f"{prefix}_LOO_FRAC_SIGNIFICANT"]=r.get("FRAC_SIGNIFICANT",np.nan)
+            context[f"{prefix}_LOO_N_TESTS"]=r.get("N_TESTS",np.nan)
+            context[f"{prefix}_LOO_STATUS"]=r.get("SENSITIVITY_STATUS","NOT_AVAILABLE")
+        pathway_rows.append({**context,"N_PRIMARY_GENES_ANNOTATED":len(genes),
+                             "PRIMARY_GENE_IDS":";".join(genes),
+                             "N_DIRECT_PRIMARY_STRING_EDGES":len(within_edges),
+                             "PRIMARY_STRING_GENE_PAIRS":";".join(within_edges),
+                             "MECHANISTIC_DIRECTION":"UNKNOWN_NOT_TESTED",
+                             "INTERPRETATION":"CURATED_PATHWAY_OVERLAP_AND_OPTIONAL_PPI_NOT_CAUSAL_EFFECT"})
+        for gid in genes:
+            meta=gene_index.loc[gid]
+            gene_rows.append({**context,"GENE_ID":gid,"GENE_SYMBOL":meta.get("GENE_SYMBOL", ""),
+                              "MAX_H4":meta.get("MAX_H4",np.nan),"BIOTYPE_CLASS":meta.get("BIOTYPE_CLASS","UNKNOWN"),
+                              "STRING_MAPPED":meta.get("STRING_MAPPED","NO"),
+                              "PATHWAY_GENE_MEMBERSHIP":"ANNOTATED_IN_STEP14_ENRICHMENT",
+                              "PERTURBATION_DATASET":"NOT_ASSESSED_STEP16",
+                              "PATHWAY_RESPONSE_DIRECTION":"UNKNOWN_NOT_TESTED",
+                              "CAUSAL_MECHANISM":"NOT_ESTABLISHED"})
+    associated={r["GENE_ID"] for r in gene_rows}
+    for gid in sorted(core-associated):
+        if gid not in gene_index.index:
+            continue
+        meta=gene_index.loc[gid]
+        gene_rows.append({"SOURCE":"","TERM_ID":"","TERM_NAME":"","FDR":np.nan,
+                          "GENE_ID":gid,"GENE_SYMBOL":meta.get("GENE_SYMBOL",""),
+                          "MAX_H4":meta.get("MAX_H4",np.nan),"BIOTYPE_CLASS":meta.get("BIOTYPE_CLASS","UNKNOWN"),
+                          "STRING_MAPPED":meta.get("STRING_MAPPED","NO"),
+                          "PATHWAY_GENE_MEMBERSHIP":"NO_SIGNIFICANT_CORE_PATHWAY_ANNOTATION",
+                          "PERTURBATION_DATASET":"NOT_ASSESSED_STEP16",
+                          "PATHWAY_RESPONSE_DIRECTION":"UNKNOWN_NOT_TESTED",
+                          "CAUSAL_MECHANISM":"NOT_ESTABLISHED"})
+    return pd.DataFrame(pathway_rows), pd.DataFrame(gene_rows)
+
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -2645,6 +2882,19 @@ def main():
     )
 
     parser.add_argument(
+        "--biotype-file", default="",
+        help="Optional TSV/CSV of Ensembl gene IDs and gene biotypes (overrides online lookup).",
+    )
+    parser.add_argument(
+        "--skip-biotype-lookup", action="store_true",
+        help="Skip optional Ensembl REST gene-biotype lookup; unresolved biotypes remain UNKNOWN.",
+    )
+    parser.add_argument(
+        "--ppi-background-mode", choices=["organism", "step14"], default="organism",
+        help="STRING enrichment reference: full organism (default) or mapped Step14 candidates (sensitivity only).",
+    )
+
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Load/print Step14 inputs but do not call STRING or BioGRID.",
@@ -2722,7 +2972,7 @@ def main():
         "Step14_Pathway_Significant.tsv"
     )
 
-    section("GWAS2m STEP15 v1.0 - PPI / NETWORK ANALYSIS")
+    section("GWAS2m STEP15 v1.1 - BIOLOGICAL NETWORK EVIDENCE AUDIT")
 
     print(f"Root                   : {root}")
     print(f"Phenotype              : {args.phenotype}")
@@ -2746,10 +2996,16 @@ def main():
     pathways = load_pathways(
         pathway_path
     )
+    step14_sensitivity = load_pathways(
+        step14_dir / "Step14_Pathway_Sensitivity_Summary.tsv"
+    )
 
     gene_sets = load_gene_sets(
         membership
     )
+    genes, external_only_ids = include_external_top1_genes(genes, gene_sets)
+    print(f"[INFO] External OT top-1 genes absent from Step14 ranking: {len(external_only_ids)}"
+          f" ({', '.join(external_only_ids) if external_only_ids else 'none'})")
 
     known_raw = load_known_genes(
         args.known_genes_file
@@ -2867,6 +3123,42 @@ def main():
         genes,
         gene_sets,
     )
+    biotypes = annotate_gene_biotypes(
+        genes, http, args.biotype_file, args.skip_biotype_lookup
+    )
+    biotypes.to_csv(output / "Step15_Gene_Biotype_Audit.tsv", sep="\t", index=False)
+    # Defensive correction: a symbol fallback can accidentally resolve an
+    # lncRNA/pseudogene identifier to a protein with a similar name. Block
+    # confirmed noncoding genes from the protein network, while retaining them
+    # in all gene/pathway reports for subsequent RNA-regulatory analysis.
+    noncoding_ids = set(biotypes.loc[
+        biotypes["BIOTYPE_CLASS"] == "NON_PROTEIN_CODING", "GENE_ID"])
+    if noncoding_ids:
+        noncoding_mask = mapping["GENE_ID"].isin(noncoding_ids)
+        mapping.loc[noncoding_mask, "STRING_ID"] = ""
+        mapping.loc[noncoding_mask, "MAPPED"] = "NO"
+        mapping.loc[noncoding_mask, "MAPPING_METHOD"] = "NONCODING_EXCLUDED_FROM_PROTEIN_NETWORK"
+    unmapped = mapping[mapping["MAPPED"] != "YES"].copy()
+    unmapped.to_csv(output / "Step15_STRING_Unmapped_Genes.tsv", sep="\t", index=False)
+    # External OT-only IDs are absent from Step14's gene ranking. Fill their
+    # names using a verified Ensembl response where available, or the mapped
+    # STRING preferred name as a transparent fallback; never invent H4 scores.
+    biotype_symbols = biotypes.set_index("GENE_ID")["GENE_SYMBOL_ENSEMBL"].to_dict()
+    protein_symbols = mapping.drop_duplicates("GENE_ID").set_index("GENE_ID")["STRING_PREFERRED_NAME"].to_dict()
+    for gid in external_only_ids:
+        new_symbol = clean_symbol(biotype_symbols.get(gid)) or clean_symbol(protein_symbols.get(gid))
+        if new_symbol:
+            genes.loc[genes["EFFECTOR_GENE_ID"] == gid, "EFFECTOR_GENE_SYMBOL"] = new_symbol
+            mapping.loc[mapping["GENE_ID"] == gid, "GENE_SYMBOL"] = new_symbol
+    mapping.to_csv(output / "Step15_STRING_Mapping.tsv", sep="\t", index=False)
+    gene_audit = make_gene_audit(genes, mapping, gene_sets, biotypes, external_only_ids)
+    gene_audit.to_csv(output / "Step15_Gene_Mapping_Audit.tsv", sep="\t", index=False)
+    core_audit = gene_audit[gene_audit["IS_GWAS2M_PRIMARY"] == "YES"]
+    print(f"[GENES] Primary {len(core_audit)}; coding="
+          f"{int((core_audit['BIOTYPE_CLASS']=='PROTEIN_CODING').sum())}; "
+          f"noncoding={int((core_audit['BIOTYPE_CLASS']=='NON_PROTEIN_CODING').sum())}; "
+          f"unknown={int((core_audit['BIOTYPE_CLASS']=='UNKNOWN').sum())}; "
+          f"STRING-mapped={int((core_audit['STRING_MAPPED']=='YES').sum())}")
 
     # Combined seeds for network construction.
     combined_gene_ids = dedupe_keep_order(
@@ -2886,10 +3178,12 @@ def main():
         mapping,
     )
 
-    background_string_ids = string_ids_for_genes(
-        list(lookup),
-        mapping,
+    background_string_ids = (
+        string_ids_for_genes(list(lookup), mapping)
+        if args.ppi_background_mode == "step14" else []
     )
+    print(f"[PPI] Reference background: {args.ppi_background_mode.upper()}; "
+          "Step14 candidate-restricted mode is a sensitivity analysis, not a measured universe")
 
     # -------------------------------------------------------------------------
     # PPI enrichment
@@ -2959,6 +3253,16 @@ def main():
             })
 
     ppi = pd.DataFrame(ppi_rows)
+    if not ppi.empty:
+        vals = pd.to_numeric(ppi.get("p_value", pd.Series(np.nan, index=ppi.index)), errors="coerce")
+        valid = vals.dropna().sort_values()
+        ppi["PPI_BH_FDR_ACROSS_TESTED_SETS"] = np.nan
+        if len(valid):
+            ranks = np.arange(1, len(valid) + 1)
+            adjusted = np.minimum.accumulate((valid.to_numpy() * len(valid) / ranks)[::-1])[::-1]
+            ppi.loc[valid.index, "PPI_BH_FDR_ACROSS_TESTED_SETS"] = np.minimum(adjusted, 1.0)
+        ppi["PPI_FDR_SIGNIFICANT"] = np.where(
+            ppi["PPI_BH_FDR_ACROSS_TESTED_SETS"].le(0.05), "YES", "NO_OR_UNTESTED")
 
     ppi.to_csv(
         output / "Step15_STRING_PPI_Enrichment.tsv",
@@ -3059,6 +3363,40 @@ def main():
             index=False,
         )
 
+    # The PRIMARY analysis uses only GWAS2Mech strong candidates, never OT anchors.
+    # All mapped seeds are retained as nodes even when they have zero edges.
+    primary_string_ids = string_ids_for_genes(gene_sets.get("CORE_STRONG", []), mapping)
+    primary_physical = string_network(
+        http, api_base, primary_string_ids, args.species,
+        args.required_score, "physical", 0, args.caller_identity,
+    )
+    primary_physical = annotate_string_edges(
+        primary_physical, mapping, genes, gene_sets, known_gene_ids,
+    )
+    primary_physical.to_csv(output / "Step15_Primary_Direct_Physical_Edges.tsv", sep="\t", index=False)
+    primary_G = edges_to_graph(primary_physical)
+    primary_G.add_nodes_from(primary_string_ids)
+    primary_nodes = network_node_table(
+        primary_G, primary_physical, mapping, genes, gene_sets, known_gene_ids
+    )
+    primary_centrality, primary_communities = network_metrics(primary_G, primary_nodes)
+    primary_centrality.to_csv(output / "Step15_Primary_Network_Centrality.tsv", sep="\t", index=False)
+    primary_communities.to_csv(output / "Step15_Primary_Network_Communities.tsv", sep="\t", index=False)
+    if primary_G.number_of_nodes():
+        save_graphml(primary_G, output / "Step15_Primary_Direct_Physical.graphml", primary_centrality)
+    print(f"[PRIMARY NETWORK] {len(primary_string_ids)} mapped GWAS2Mech genes, "
+          f"{primary_G.number_of_edges()} STRING physical edges; "
+          f"{sum(primary_G.degree(n) == 0 for n in primary_G.nodes)} isolates retained")
+    if len(primary_string_ids) >= 2:
+        try:
+            svg = string_network_svg(http, api_base, primary_string_ids,
+                                     args.species, args.required_score,
+                                     "physical", 0, args.caller_identity)
+            if svg:
+                (output / "Step15_Primary_STRING_Direct_Physical.svg").write_bytes(svg)
+        except Exception as exc:
+            print(f"[WARN] Primary STRING SVG unavailable: {exc}")
+
     direct_physical = network_results.get(
         ("physical", "direct"),
         pd.DataFrame(),
@@ -3082,18 +3420,22 @@ def main():
     direct_physical_G = edges_to_graph(
         direct_physical
     )
+    direct_physical_G.add_nodes_from(combined_string_ids)
 
     expanded_physical_G = edges_to_graph(
         expanded_physical
     )
+    expanded_physical_G.add_nodes_from(combined_string_ids)
 
     direct_functional_G = edges_to_graph(
         direct_functional
     )
+    direct_functional_G.add_nodes_from(combined_string_ids)
 
     expanded_functional_G = edges_to_graph(
         expanded_functional
     )
+    expanded_functional_G.add_nodes_from(combined_string_ids)
 
     # Main metrics are on expanded physical network because it can reveal
     # bridges between seed genes.
@@ -3266,6 +3608,17 @@ def main():
             )
 
     # -------------------------------------------------------------------------
+    # Curated pathway membership x primary (GWAS-only) PPI; Step16 handoff.
+    # -------------------------------------------------------------------------
+    pathway_network, gene_pathway = pathway_mechanism_tables(
+        pathways, gene_sets, gene_audit, primary_physical, step14_sensitivity,
+    )
+    pathway_network.to_csv(output / "Step15_Pathway_Network_Evidence.tsv", sep="\t", index=False)
+    gene_pathway.to_csv(output / "Step15_Gene_Pathway_Handoff.tsv", sep="\t", index=False)
+    print(f"[PATHWAY HANDOFF] {len(pathway_network)} primary pathway annotations, "
+          f"{len(gene_pathway)} gene/pathway rows. Direction remains UNKNOWN_NOT_TESTED.")
+
+    # -------------------------------------------------------------------------
     # Optional BioGRID
     # -------------------------------------------------------------------------
 
@@ -3281,7 +3634,9 @@ def main():
     )
 
     biogrid = pd.DataFrame()
+    biogrid_physical = pd.DataFrame()
     cross = pd.DataFrame()
+    biogrid_status = "NOT_QUERIED"
 
     if biogrid_key:
         seed_symbols = []
@@ -3307,11 +3662,11 @@ def main():
                 sep="\t",
                 index=False,
             )
-
-            cross = string_biogrid_comparison(
-                direct_physical,
-                biogrid,
-            )
+            biogrid_physical = physical_biogrid_only(biogrid)
+            biogrid_status = "QUERIED_TRUNCATION_RISK" if len(biogrid) >= 10000 else "QUERIED"
+            if len(biogrid) >= 10000:
+                print("[WARN] BioGRID response reached 10,000-record page cap; absence cannot be interpreted without pagination")
+            cross = physical_biogrid_summary(primary_physical, biogrid_physical, attempted=True)
 
             cross.to_csv(
                 output / "Step15_STRING_BioGRID_Edge_Comparison.tsv",
@@ -3320,10 +3675,16 @@ def main():
             )
 
         except Exception as exc:
+            biogrid_status = "FAILED"
             print(
                 f"[WARN] BioGRID query failed: {type(exc).__name__}: {exc}"
             )
+            cross = physical_biogrid_summary(primary_physical, pd.DataFrame(), attempted=False)
+            # Do not leave stale files from a previous successful run.
+            pd.DataFrame().to_csv(output / "Step15_BioGRID_Interactions.tsv", sep="\t", index=False)
+            cross.to_csv(output / "Step15_STRING_BioGRID_Edge_Comparison.tsv", sep="\t", index=False)
     else:
+        cross = physical_biogrid_summary(primary_physical, pd.DataFrame(), attempted=False)
         pd.DataFrame().to_csv(
             output / "Step15_BioGRID_Interactions.tsv",
             sep="\t",
@@ -3335,6 +3696,9 @@ def main():
             sep="\t",
             index=False,
         )
+
+    biogrid_physical.to_csv(output / "Step15_BioGRID_Physical_Interactions.tsv", sep="\t", index=False)
+    cross.to_csv(output / "Step15_Primary_STRING_BioGRID_Physical_Comparison.tsv", sep="\t", index=False)
 
     # -------------------------------------------------------------------------
     # Screen report
@@ -3432,11 +3796,11 @@ def main():
 
         if not cross.empty:
             supported = int(
-                (cross["BIOGRID_DIRECT_SUPPORT"] == "YES").sum()
+                (cross["BIOGRID_PHYSICAL_EVIDENCE"] == "YES").sum()
             )
 
             print(
-                f"STRING direct physical edges also present in BioGRID: "
+                f"GWAS-only STRING physical edges with BioGRID physical evidence: "
                 f"{supported}/{len(cross)}"
             )
 
@@ -3461,6 +3825,18 @@ def main():
     # -------------------------------------------------------------------------
 
     qc_rows = [
+        {
+            "CHECK": "PRIMARY_PHYSICAL_EDGES",
+            "STATUS": "INFO",
+            "VALUE": primary_G.number_of_edges(),
+            "DETAIL": "GWAS2Mech genes only; excludes Open Targets-only anchors and connectors.",
+        },
+        {
+            "CHECK": "BIOGRID_PHYSICAL_STATUS",
+            "STATUS": biogrid_status,
+            "VALUE": len(biogrid_physical),
+            "DETAIL": "Physical experimental-system records only; not-observed != absent.",
+        },
         {
             "CHECK": "CORE_STRONG_GENES",
             "STATUS": "INFO",
@@ -3568,11 +3944,21 @@ def main():
             gene_sets.get("CORE_STRONG_OT_DISCORDANT", [])
         ),
         "n_step14_genes_mapped_to_string": int(
-            (mapping["MAPPED"] == "YES").sum()
+            (mapping.loc[~mapping["GENE_ID"].isin(external_only_ids), "MAPPED"] == "YES").sum()
         ),
-        "n_step14_genes_unmapped_to_string": len(
-            unmapped
-        ),
+        "ppi_background_mode": args.ppi_background_mode,
+        "n_external_ot_genes_not_in_step14": len(external_only_ids),
+        "n_primary_gene_pathway_rows": len(gene_pathway),
+        "n_primary_annotated_pathway_terms": len(pathway_network),
+        "primary_direct_physical": {"nodes": primary_G.number_of_nodes(), "edges":primary_G.number_of_edges()},
+        "n_primary_protein_coding":int((core_audit["BIOTYPE_CLASS"]=="PROTEIN_CODING").sum()),
+        "n_primary_non_protein_coding":int((core_audit["BIOTYPE_CLASS"]=="NON_PROTEIN_CODING").sum()),
+        "n_primary_biotype_unknown":int((core_audit["BIOTYPE_CLASS"]=="UNKNOWN").sum()),
+        "biogrid_status":biogrid_status,
+        "n_biogrid_physical_records":len(biogrid_physical),
+        "n_step14_genes_unmapped_to_string": int((
+            ~mapping["GENE_ID"].isin(external_only_ids) & (mapping["MAPPED"] != "YES")
+        ).sum()),
         "direct_physical": {
             "nodes": direct_physical_G.number_of_nodes(),
             "edges": direct_physical_G.number_of_edges(),
@@ -3599,11 +3985,15 @@ def main():
             biogrid
         ),
         "scientific_notes": [
-            "STRING physical edges are preferred for PPI interpretation.",
+            "STRING physical network includes predicted physical association evidence, not necessarily direct experimental binding.",
             "STRING functional edges are supportive functional associations, not necessarily direct binding.",
             "Connector proteins added by STRING are network hypotheses and are not genetically prioritized.",
             "Non-mapping genes are not biological negatives, especially non-protein-coding genes.",
             "Network centrality is descriptive and may reflect generic hub/study bias.",
+            "STRING PPI enrichment is a connectivity test; FDR is across reported gene sets, which overlap.",
+            "PPI pathway links come from Step14 annotations and are not independent causal confirmation.",
+            "Direction, causality, perturbations and therapeutic claims are not evaluated in Step15.",
+            "Open Targets-only seeds are mapped, but are excluded from the primary GWAS-only network.",
         ],
     }
 
@@ -3631,6 +4021,15 @@ def main():
     print("Key files:")
     key_files = [
         "Step15_STRING_Mapping.tsv",
+        "Step15_Gene_Biotype_Audit.tsv",
+        "Step15_Gene_Mapping_Audit.tsv",
+        "Step15_Primary_Direct_Physical_Edges.tsv",
+        "Step15_Primary_Direct_Physical.graphml",
+        "Step15_Primary_STRING_Direct_Physical.svg",
+        "Step15_Primary_Network_Centrality.tsv",
+        "Step15_Pathway_Network_Evidence.tsv",
+        "Step15_Gene_Pathway_Handoff.tsv",
+        "Step15_BioGRID_Physical_Interactions.tsv",
         "Step15_STRING_PPI_Enrichment.tsv",
         "Step15_Direct_Physical_Edges.tsv",
         "Step15_Expanded_Physical_Edges.tsv",
@@ -3655,7 +4054,7 @@ def main():
         "NEXT STEP AFTER REVIEWING THIS NETWORK:"
     )
     print(
-        "  Step16 = drug-target / tractability / direction-of-effect analysis."
+        "  Step16 = gene perturbation and directional pathway-response analysis (NOT drug discovery)."
     )
 
 
